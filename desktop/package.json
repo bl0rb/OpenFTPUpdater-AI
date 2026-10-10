@@ -1,6 +1,7 @@
 {
   "name": "openftpupdater-ai-desktop",
   "private": true,
+  "license": "MIT",
   "scripts": {
     "tauri": "tauri",
     "dev": "tauri dev",

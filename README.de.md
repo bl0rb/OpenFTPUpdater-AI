@@ -114,3 +114,7 @@ desktop/core       Rust-Bibliothek: Einstellungen, site.json, Shell/PATH, git, G
 desktop/src-tauri  Tauri-App: Zustand, Befehle, die vier Schritte
 desktop/ui         Web-Oberfläche (HTML, JS, CSS), ohne Build-Schritt
 ```
+
+## Lizenz
+
+[MIT](LICENSE) © 2026 bl0rb

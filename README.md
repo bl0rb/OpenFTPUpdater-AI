@@ -112,3 +112,7 @@ desktop/core       Rust library: config, site.json, shell/PATH, git, GitHub, Cla
 desktop/src-tauri  Tauri app: state, commands, the four steps
 desktop/ui         Web UI (HTML, JS, CSS), no build step
 ```
+
+## License
+
+[MIT](LICENSE) © 2026 bl0rb

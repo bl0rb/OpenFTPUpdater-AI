@@ -29,7 +29,7 @@
       "app"
     ],
     "category": "DeveloperTool",
-    "copyright": "© 2026 bl0rb · github.com/bl0rb/OpenFTPUpdater-AI",
+    "copyright": "© 2026 bl0rb · MIT License · github.com/bl0rb/OpenFTPUpdater-AI",
     "shortDescription": "Update a static website with Claude Code and publish it via SFTP",
     "icon": [
       "icons/32x32.png",

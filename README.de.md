@@ -21,9 +21,17 @@ Vier Schaltflächen, einzeln oder nacheinander:
 
 <sub>Quelle der Grafik: [docs/diagrams/openftpupdater-flow.de.html](docs/diagrams/openftpupdater-flow.de.html) (auch als SVG).</sub>
 
-**Neues Produkt** (zweiter Knopf in der Update-Kachel): eines deiner GitHub-Repositories wählen, Claude
+**Neues Produkt** (Knopf in der Kopfleiste): eines deiner GitHub-Repositories wählen, Claude
 Code nimmt es mit dem `addProductSkill` des Projekts auf (Produktseite, Listen, Icon, Ablaufgrafik,
 Eintrag in `site.json`), danach baut und committet die App. Live geht es mit Upload.
+
+## Produkte auswählen
+
+Das Hauptfenster listet die Produkte aus `site.json` mit je einer Checkbox. Precheck und Update kümmern
+sich nur um ausgewählte Produkte: Abgewählte fragt der Precheck nicht ab, und Claude bekommt sie beim
+Update als „nicht ausgewählt, daran nichts ändern“ genannt. Jede Zeile zeigt den dokumentierten Stand,
+nach einem Precheck auch, ob ein neueres Release vorliegt, und „kein Klon“, wenn `localPath` fehlt. Die
+Auswahl merkt sich die App in ihren Einstellungen, nicht im Website-Repository.
 
 ## Repositories wählen
 
@@ -51,10 +59,20 @@ Es ist nicht signiert, macOS blockiert es deshalb beim ersten Öffnen; einmal un
 Datenschutz & Sicherheit → Dennoch öffnen** erlauben oder im Terminal installieren:
 
 ```bash
-sudo installer -pkg OpenFTPUpdater-AI-0.1.1.pkg -target /
+sudo installer -pkg OpenFTPUpdater-AI-0.1.2.pkg -target /
 ```
 
-Dasselbe Paket lässt sich über Microsoft Intune als „macOS-App (PKG)“ verteilen.
+Dasselbe Paket lässt sich über Microsoft Intune als „macOS-App (PKG)“ verteilen; dann in der
+Einrichtung „Beim Start nach neuen Versionen suchen“ abschalten.
+
+## Updates der App
+
+Wie bei ClaudeKeyZapper: Beim Start fragt die App einmal still das neueste Release dieses Repositories
+auf GitHub ab; manuell geht es über **Nach Updates suchen** in der Fußzeile. Ist eine neuere Version da,
+erscheint oben ein Banner. **Installieren** lädt die `.pkg` von `github.com`, prüft sie gegen die
+SHA-256-Prüfsumme, die GitHub für das Release-Asset veröffentlicht (ohne Prüfsumme wird abgelehnt), und
+öffnet den macOS-Installer; danach die App neu starten. Beta-Versionen (`X.Y.Z-beta.N`) gibt es nur über
+**Beta-Version suchen** oder wenn schon eine Beta installiert ist. Entwicklungs-Builds prüfen nicht.
 
 ## Voraussetzungen
 

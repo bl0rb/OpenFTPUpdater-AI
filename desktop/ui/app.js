@@ -3,10 +3,10 @@ const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
 const STEPS = [
-  { id: 'precheck', title: 'Precheck', desc: 'Prüft Repo, Werkzeuge, neue Releases, SFTP-Zugang und Live-Seite. Ändert nichts.' },
-  { id: 'update', title: 'Update', desc: 'Claude passt die Seite per Skill an neue Releases an, danach Build und Commit.' },
-  { id: 'upload', title: 'Upload', desc: 'Frischer Build, Push, dann nur geänderte Dateien per SFTP auf den Server.' },
-  { id: 'verify', title: 'Verify', desc: 'Vergleicht die Live-Seite Datei für Datei mit dem hochgeladenen Build.' },
+  { id: 'precheck', title: 'Precheck', desc: 'Prüft Repo, Werkzeuge, Releases, SFTP und Live-Seite. Ändert nichts.' },
+  { id: 'update', title: 'Update', desc: 'Claude passt die Seite mit den gewählten Aufgaben an, dann Build und Commit.' },
+  { id: 'upload', title: 'Upload', desc: 'Build, Push, dann nur geänderte Dateien per SFTP auf den Server.' },
+  { id: 'verify', title: 'Verify', desc: 'Vergleicht die Live-Seite Datei für Datei mit dem Build.' },
 ];
 const STATUS_TEXT = { idle: 'Bereit', running: 'Läuft', ok: 'OK', warning: 'Hinweis', error: 'Fehler' };
 // Claude Code model aliases; each follows the newest model of its family.
@@ -99,6 +99,7 @@ function setView(next) {
   renderToolbar();
   renderBanners();
   renderMain();
+  renderFooter();
   if (view.pendingHostKey && !hostKeyOpen) hostKeyDialog();
 }
 
@@ -111,16 +112,44 @@ function renderToolbar() {
         h('div', { class: 'project' }, view.site ? `${view.site.name} · ${view.projectDisplay}` : view.projectDisplay || 'Kein Projekt eingerichtet'))),
     h('span', { class: 'spacer' }),
     view.site && button(view.site.url.replace(/^https?:\/\//, ''), () => call('open_url', { url: view.site.url }), { iconName: 'external', cls: 'link', title: 'Live-Seite öffnen' }),
+    view.site && button('Neues Produkt …', addProductDialog,
+      { iconName: 'plus', disabled: !!view.running, title: 'Ein Repository als neues Produkt auf der Website aufnehmen' }),
     button('Einrichtung', settingsDialog, { iconName: 'gear', disabled: !!view.running }));
 }
 
 function banner(kind, text, actions = []) {
   return h('div', { class: `banner ${kind}` }, h('div', { class: 'text selectable' }, text),
-    actions.map(([label, action]) => button(label, action)));
+    actions.map(([label, action, opts]) => button(label, action, opts)));
+}
+
+function updateBanner(u) {
+  const installing = view.installingUpdate;
+  return h('div', { class: 'banner update' },
+    h('div', { class: 'text' },
+      h('strong', null, `${u.prerelease ? 'Beta: ' : ''}OpenFTPUpdater-AI ${u.version} ist verfügbar (installiert: ${view.version})`),
+      h('div', { class: 'muted small' }, installing ? 'Paket wird geladen und geprüft …'
+        : u.prerelease ? 'Beta-Versionen sind zum Testen gedacht. Die Installation benötigt Administratorrechte.'
+          : 'Die Installation benötigt Administratorrechte. Danach die App neu starten.')),
+    button('Versionshinweise', () => call('open_url', { url: u.pageUrl })),
+    button('Später', () => call('dismiss_update'), { disabled: installing }),
+    button(installing ? 'Wird geladen …' : 'Installieren', () => call('install_update'),
+      { cls: 'primary', disabled: installing || !!view.running, title: view.running ? 'Erst nach dem laufenden Schritt' : null }));
+}
+
+function renderFooter() {
+  const checking = view.checkingUpdate;
+  const check = (beta) => () => call('check_for_updates', { beta });
+  document.getElementById('footer').replaceChildren(
+    h('span', null, view.devBuild ? 'OpenFTPUpdater-AI Entwicklungsversion' : `OpenFTPUpdater-AI ${view.version}`),
+    h('span', { class: 'spacer' }),
+    ...(checking ? [h('span', null, 'Suche nach Updates …')] : [
+      button('Nach Updates suchen', check(false), { cls: 'link' }),
+      button('Beta-Version suchen', check(true), { cls: 'link' })]));
 }
 
 function renderBanners() {
   const items = [];
+  if (view.availableUpdate) items.push(updateBanner(view.availableUpdate));
   if (view.error) items.push(banner('error', view.error, [['Schließen', () => call('dismiss')]]));
   if (view.notice) items.push(banner('info', view.notice, [['Schließen', () => call('dismiss')]]));
   if (view.config.projectDir && view.siteError) items.push(banner('warning', `Projekt: ${view.siteError}`, [['Einrichtung', settingsDialog]]));
@@ -145,8 +174,11 @@ function renderMain() {
     // Built once, so the instruction field keeps focus and the log keeps its scroll position.
     skeleton = {
       steps: h('section', { class: 'steps' }),
-      tasks: h('div', { class: 'tasks' }),
-      instructions: h('textarea', { id: 'instructions', rows: 2, placeholder: 'z. B. „Ergänze im nudgit-Abschnitt den Hinweis auf die Chrome-Erweiterung“ – leer lassen für ein reines Release-Update' }),
+      products: h('div', { class: 'list products' }),
+      productCount: h('span', { class: 'muted small' }),
+      productAll: h('input', { type: 'checkbox', onchange: (e) => call('set_products', { ids: view.products.map((p) => p.id), enabled: e.target.checked }) }),
+      tasks: h('div', { class: 'list tasks' }),
+      instructions: h('textarea', { id: 'instructions', rows: 1, placeholder: 'z. B. „Ergänze im nudgit-Abschnitt den Hinweis auf die Chrome-Erweiterung“ – leer lassen für ein reines Release-Update' }),
       runAll: null,
       detailHead: h('div', { class: 'detail-head' }),
       detailResult: h('div', { class: 'detail-result' }),
@@ -155,36 +187,67 @@ function renderMain() {
     skeleton.runAll = button('Alle Schritte', () => call('run_all', { instructions: skeleton.instructions.value }),
       { iconName: 'forward', title: 'Precheck, Update (wenn nötig), Upload und Verify nacheinander; stoppt beim ersten Fehler' });
     main.replaceChildren(
-      skeleton.steps,
-      h('section', { class: 'task-panel' },
-        h('div', { class: 'task-panel-head' }, h('strong', null, 'Aufgaben beim Update'),
-          h('span', { class: 'muted small' }, 'Jede Aufgabe läuft als eigener Claude-Lauf mit ihrem Skill, in dieser Reihenfolge.')),
-        skeleton.tasks),
-      h('div', { class: 'run-row' },
-        h('div', { class: 'field' }, h('label', { for: 'instructions' }, 'Zusätzliche Anweisung an Claude (optional, gilt für Update)'), skeleton.instructions),
-        skeleton.runAll),
+      h('section', { class: 'section' },
+        h('div', { class: 'section-head' }, h('h2', null, 'Ablauf'),
+          h('span', { class: 'muted small' }, 'Schritte einzeln starten oder alle nacheinander'),
+          h('span', { class: 'spacer' }), skeleton.runAll),
+        skeleton.steps),
+      h('div', { class: 'config' },
+        h('section', { class: 'section panel' },
+          h('div', { class: 'section-head' }, h('h2', null, 'Produkte'), skeleton.productCount, h('span', { class: 'spacer' }),
+            h('label', { class: 'check-all', title: 'Alle Produkte an- oder abwählen' }, skeleton.productAll, 'Alle')),
+          skeleton.products,
+          h('div', { class: 'note' }, 'Nur ausgewählte Produkte prüft der Precheck und aktualisiert Update.')),
+        h('section', { class: 'section panel' },
+          h('div', { class: 'section-head' }, h('h2', null, 'Update-Aufgaben'),
+            h('span', { class: 'muted small' }, 'je ein Claude-Lauf, in dieser Reihenfolge')),
+          skeleton.tasks,
+          h('div', { class: 'field-col' }, h('label', { for: 'instructions' }, 'Zusätzliche Anweisung an Claude (optional)'), skeleton.instructions))),
       h('section', { class: 'detail' }, skeleton.detailHead, skeleton.detailResult, skeleton.log));
     loadLog(selected);
   }
   skeleton.runAll.disabled = !!view.running || !view.site;
   skeleton.instructions.disabled = !!view.running;
   renderSteps();
+  renderProducts();
   renderTasks();
   renderDetail();
+}
+
+function versionBadge(p) {
+  const latest = p.latestTag?.replace(/^v/, '');
+  if (!latest) return h('span', { class: 'badge', title: 'Dokumentierter Stand; der Precheck fragt das neueste Release ab' }, p.documented);
+  if (p.outdated) return h('span', { class: 'badge orange', title: `Neues Release ${p.latestTag}` }, `${p.documented} → ${latest}`);
+  return h('span', { class: 'badge green', title: 'Dokumentierter Stand ist das neueste Release' }, `${p.documented} aktuell`);
+}
+
+function renderProducts() {
+  const products = view.products;
+  const on = products.filter((p) => p.enabled).length;
+  skeleton.productCount.textContent = products.length ? `${on} von ${products.length} ausgewählt` : '';
+  skeleton.productAll.checked = products.length > 0 && on === products.length;
+  skeleton.productAll.indeterminate = on > 0 && on < products.length;
+  skeleton.productAll.disabled = !!view.running || !products.length;
+  skeleton.products.replaceChildren(...(products.length ? products.map((p) => h('div', { class: `row ${p.enabled ? 'on' : ''}` },
+    h('label', { class: 'row-name' },
+      h('input', { type: 'checkbox', checked: p.enabled, disabled: !!view.running, onchange: (e) => call('set_products', { ids: [p.id], enabled: e.target.checked }) }),
+      h('span', { class: 'row-text inline' }, h('strong', null, p.name), h('span', { class: 'muted small mono ellipsis', title: p.repo }, p.repo))),
+    p.local ? h('span') : h('span', { class: 'badge orange', title: p.localPath ? `Kein lokaler Klon unter ${p.localPath}` : 'Kein localPath in site.json' }, 'kein Klon'),
+    versionBadge(p)))
+    : [h('div', { class: 'note empty-list' }, 'Noch keine Produkte: „Neues Produkt …“ in der Kopfleiste nimmt eins auf.')]));
 }
 
 function renderTasks() {
   skeleton.tasks.replaceChildren(...view.tasks.map((t) => {
     const save = (enabled, model) => call('set_task', { id: t.id, enabled, model });
-    return h('div', { class: `task ${t.enabled ? 'on' : ''}` },
-      h('label', { class: 'task-head' },
+    // One row per task; the columns line up across rows (CSS subgrid).
+    return h('div', { class: `row ${t.enabled ? 'on' : ''}` },
+      h('label', { class: 'row-name' },
         h('input', { type: 'checkbox', checked: t.enabled, disabled: !!view.running, onchange: (e) => save(e.target.checked, t.chosenModel) }),
-        h('strong', null, t.label)),
-      t.description && h('div', { class: 'muted small' }, t.description),
-      h('div', { class: 'task-meta' },
-        modelSelect(t.chosenModel, t.defaultModel, (model) => save(t.enabled, model), `task-model-${t.id}`),
-        t.effort && h('span', { class: 'badge', title: 'Effort aus site.json' }, `Effort ${t.effort}`),
-        t.skill && h('span', { class: 'badge mono', title: 'Skill im Projekt' }, t.skill)));
+        h('span', { class: 'row-text' }, h('strong', null, t.label), t.description && h('span', { class: 'muted small' }, t.description))),
+      h('span', null, t.skill && h('span', { class: 'badge mono', title: 'Skill im Projekt' }, t.skill)),
+      h('span', null, t.effort && h('span', { class: 'badge', title: 'Effort aus site.json' }, t.effort)),
+      modelSelect(t.chosenModel, t.defaultModel, (model) => save(t.enabled, model), `task-model-${t.id}`));
   }));
 }
 
@@ -215,20 +278,19 @@ function renderSteps() {
   skeleton.steps.replaceChildren(...STEPS.map((step, i) => {
     const state = view.steps[step.id];
     const running = view.running === step.id;
-    const action = h('div', { class: 'step-actions' }, running
+    const action = running
       ? button('Abbrechen', () => invoke('cancel'), { iconName: 'stop', cls: 'danger' })
       : button('Starten', () => call('run_step', { step: step.id, instructions: skeleton.instructions.value }),
-        { iconName: 'play', cls: next === step.id ? 'primary' : null, disabled: !!view.running || !ready(step.id) }),
-      step.id === 'update' && !running && button('Neues Produkt …', addProductDialog,
-        { iconName: 'plus', disabled: !!view.running || !view.site, title: 'Ein Repository als neues Produkt auf der Website aufnehmen' }));
+        { iconName: 'play', cls: next === step.id ? 'primary' : null, disabled: !!view.running || !ready(step.id) });
+    const summary = state.stale ? 'Nach Update/Upload erneut prüfen' : state.summary;
     return h('div', {
       class: `step ${selected === step.id ? 'selected' : ''}`, role: 'button', tabindex: '0',
       onclick: () => selectStep(step.id), onkeydown: (e) => { if (e.key === 'Enter') selectStep(step.id); },
     },
-      h('div', { class: 'step-head' }, h('span', { class: 'step-number' }, i + 1), h('h2', null, step.title), h('span', { class: 'spacer' }), statusChip(state.status, state.stale)),
+      h('div', { class: 'step-head' }, h('span', { class: 'step-number' }, i + 1), h('h2', null, step.title), statusChip(state.status, state.stale)),
       h('div', { class: 'desc' }, step.desc),
-      h('div', { class: `summary ${state.stale ? 'muted' : state.status === 'error' ? 'red' : state.status === 'warning' ? 'orange' : 'muted'}` },
-        state.stale ? 'Nach Update/Upload erneut prüfen' : state.summary || ' '),
+      h('div', { class: `summary ${state.stale ? 'muted' : state.status === 'error' ? 'red' : state.status === 'warning' ? 'orange' : 'muted'}`, title: summary || null },
+        summary || ''),
       action);
   }));
 }
@@ -274,7 +336,7 @@ function updateResult() {
     items.push(h('div', { class: 'facts' },
       h('span', null, h('strong', null, 'Aufgaben: '), view.tasks.filter((t) => t.enabled).map((t) => t.label).join(', ') || 'keine gewählt'),
       h('span', null, h('strong', null, 'Build: '), site.build),
-      h('span', null, h('strong', null, 'Produkte: '), site.products.map((p) => `${p.name} ${p.documented}`).join(', ') || '—')));
+      h('span', null, h('strong', null, 'Produkte: '), view.products.filter((p) => p.enabled).map((p) => `${p.name} ${p.documented}`).join(', ') || 'keine gewählt')));
   }
   for (const run of view.claudeRuns) {
     const c = run.outcome;
@@ -425,10 +487,11 @@ function settingsDialog() {
     showPicker: !c.projectDir,
     host: c.sftp.host, port: c.sftp.port || 22, user: c.sftp.user, remoteDir: c.sftp.remoteDir,
     auth: c.sftp.auth, keyPath: c.sftp.keyPath, secret: '', message: null, messageKind: 'note', busy: false,
+    updateCheck: !c.noUpdateCheck,
   };
   const input = () => ({
     projectDir: s.projectDir, workspaceDir: s.workspaceDir, host: s.host, port: Number(s.port) || 22, user: s.user, remoteDir: s.remoteDir,
-    auth: s.auth, keyPath: s.keyPath, secret: s.secret,
+    auth: s.auth, keyPath: s.keyPath, secret: s.secret, updateCheck: s.updateCheck,
   });
   const text = (key, props = {}) => h('input', { type: 'text', value: s[key] ?? '', spellcheck: 'false', autocomplete: 'off', ...props,
     oninput: (e) => { s[key] = e.target.value; } });
@@ -491,6 +554,11 @@ function settingsDialog() {
             c.sftp.secretSaved && [' ', button('Gespeichertes Passwort entfernen', async () => { await call('forget_secret'); close(); }, { cls: 'link' })]),
           row('Server-Schlüssel', h('div', { class: c.sftp.hostKey ? 'mono selectable' : 'muted' },
             c.sftp.hostKey || 'wird bei der ersten Verbindung bestätigt'))),
+        h('fieldset', null, h('legend', null, 'App'),
+          h('label', { class: 'check-line' },
+            h('input', { type: 'checkbox', checked: s.updateCheck, onchange: (e) => { s.updateCheck = e.target.checked; } }),
+            'Beim Start nach neuen Versionen suchen'),
+          h('div', { class: 'note' }, 'Fragt das neueste Release auf GitHub ab. Installiert wird nur auf Klick, nach Prüfung der SHA-256-Prüfsumme, die GitHub für das Paket veröffentlicht. Manuell jederzeit über „Nach Updates suchen“ unten.')),
         s.message && h('div', { class: `note ${s.messageKind}` }, s.message),
       ],
       actions: [

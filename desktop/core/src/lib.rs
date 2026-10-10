@@ -4,6 +4,7 @@
 //! - `site`: the project's `.openftpupdater/site.json` (build, output, URL, watched products)
 //! - `shell`, `git`, `github`, `claude`: external tools
 //! - `sftp`, `manifest`, `verify`, `secrets`: upload, change tracking, live check, password storage
+//! - `update`: updates of the app itself from its GitHub releases
 
 pub mod claude;
 pub mod config;
@@ -16,4 +17,5 @@ pub mod secrets;
 pub mod sftp;
 pub mod shell;
 pub mod site;
+pub mod update;
 pub mod verify;

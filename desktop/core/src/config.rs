@@ -84,9 +84,17 @@ pub struct Config {
     pub sftp: SftpConfig,
     /// Task id → choice.
     pub tasks: std::collections::BTreeMap<String, TaskChoice>,
+    /// Product ids (site.json) the user turned off: Precheck and Update leave them alone.
+    pub skipped_products: std::collections::BTreeSet<String>,
+    /// No look for a new version of the app at start (e.g. when IT distributes it).
+    pub no_update_check: bool,
 }
 
 impl Config {
+    pub fn product_enabled(&self, id: &str) -> bool {
+        !self.skipped_products.contains(id)
+    }
+
     /// Where clones are searched and created.
     pub fn workspace(&self) -> PathBuf {
         if !self.workspace_dir.trim().is_empty() {

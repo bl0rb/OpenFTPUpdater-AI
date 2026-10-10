@@ -7,6 +7,7 @@ use steps::{Job, NewProductInput};
 
 use openftpupdater_core::claude::{Outcome, Outdated};
 use openftpupdater_core::config::{self, AuthKind, Config};
+use openftpupdater_core::update::{self, ReleaseInfo};
 use openftpupdater_core::{github, localrepo, manifest};
 use openftpupdater_core::paths::{abbreviate_home, expand_home};
 use openftpupdater_core::secrets;
@@ -81,12 +82,18 @@ pub struct Model {
     pub checks: Vec<Check>,
     /// `None` until a precheck has looked at the releases.
     pub outdated: Option<Vec<Outdated>>,
+    /// Product id → newest release tag, as last looked up.
+    pub latest_tags: BTreeMap<String, String>,
     /// Claude runs of the last Update or New product, one per task.
     pub claude_runs: Vec<ClaudeRun>,
     pub upload: Option<UploadResult>,
     pub verify: Option<Report>,
     /// Fingerprint the user has to confirm before the first SFTP connection.
     pub pending_host_key: Option<String>,
+    /// Newer version of the app itself, found by the update check.
+    pub available_update: Option<ReleaseInfo>,
+    pub checking_update: bool,
+    pub installing_update: bool,
     pub notice: Option<String>,
     pub error: Option<String>,
 }
@@ -121,10 +128,14 @@ impl Model {
             runner: None,
             checks: Vec::new(),
             outdated: None,
+            latest_tags: BTreeMap::new(),
             claude_runs: Vec::new(),
             upload: None,
             verify: None,
             pending_host_key: None,
+            available_update: None,
+            checking_update: false,
+            installing_update: false,
             notice: None,
             error: None,
         }
@@ -170,6 +181,8 @@ struct LastUpload {
 #[serde(rename_all = "camelCase")]
 struct View {
     version: String,
+    /// Debug build: no update check.
+    dev_build: bool,
     config: Config,
     project_display: String,
     /// Folder with the clones, as displayed (auto value if not set).
@@ -183,12 +196,16 @@ struct View {
     running: Option<Step>,
     checks: Vec<Check>,
     outdated: Option<Vec<Outdated>>,
+    products: Vec<steps::ProductView>,
     tasks: Vec<steps::ResolvedTask>,
     claude_runs: Vec<ClaudeRun>,
     upload: Option<UploadResult>,
     verify: Option<Report>,
     last_upload: Option<LastUpload>,
     pending_host_key: Option<String>,
+    available_update: Option<ReleaseInfo>,
+    checking_update: bool,
+    installing_update: bool,
     notice: Option<String>,
     error: Option<String>,
 }
@@ -198,6 +215,7 @@ fn get_view(app: AppHandle) -> View {
     let version = app.package_info().version.to_string();
     with_model(&app, |m| View {
         version,
+        dev_build: cfg!(debug_assertions),
         config: m.config.clone(),
         project_display: if m.config.project_dir.is_empty() { String::new() } else { abbreviate_home(&expand_home(&m.config.project_dir)) },
         workspace_display: abbreviate_home(&m.config.workspace()),
@@ -209,6 +227,7 @@ fn get_view(app: AppHandle) -> View {
         running: m.running,
         checks: m.checks.clone(),
         outdated: m.outdated.clone(),
+        products: m.site.as_ref().map(|site| steps::resolve_products(site, &m.config, &m.latest_tags)).unwrap_or_default(),
         tasks: m.site.as_ref().map(|site| steps::resolve_tasks(site, &m.config)).unwrap_or_default(),
         claude_runs: m.claude_runs.clone(),
         upload: m.upload.clone(),
@@ -219,6 +238,9 @@ fn get_view(app: AppHandle) -> View {
             files: last.files.len(),
         }),
         pending_host_key: m.pending_host_key.clone(),
+        available_update: m.available_update.clone(),
+        checking_update: m.checking_update,
+        installing_update: m.installing_update,
         notice: m.notice.clone(),
         error: m.error.clone(),
     })
@@ -245,6 +267,13 @@ struct SettingsInput {
     key_path: String,
     /// New password or passphrase; empty keeps the stored one.
     secret: String,
+    /// Look for a new app version at start.
+    #[serde(default = "yes")]
+    update_check: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn apply_settings(app: &AppHandle, input: SettingsInput) -> Result<(), String> {
@@ -259,6 +288,7 @@ fn apply_settings(app: &AppHandle, input: SettingsInput) -> Result<(), String> {
     next.sftp.remote_dir = input.remote_dir.trim().to_owned();
     next.sftp.auth = input.auth;
     next.sftp.key_path = input.key_path.trim().to_owned();
+    next.no_update_check = !input.update_check;
     if target_changed {
         // Another server needs its own confirmed host key.
         next.sftp.host_key.clear();
@@ -374,6 +404,105 @@ fn set_task(app: AppHandle, id: String, enabled: bool, model: String) -> Result<
     config::save(&next).map_err(|e| format!("{e:#}"))?;
     changed(&app);
     Ok(())
+}
+
+/// Turns watched products on or off; turned-off products are neither checked nor updated.
+#[tauri::command]
+fn set_products(app: AppHandle, ids: Vec<String>, enabled: bool) -> Result<(), String> {
+    let next = with_model(&app, |m| {
+        for id in ids {
+            if enabled {
+                m.config.skipped_products.remove(&id);
+            } else {
+                m.config.skipped_products.insert(id);
+            }
+        }
+        m.config.clone()
+    });
+    config::save(&next).map_err(|e| format!("{e:#}"))?;
+    changed(&app);
+    Ok(())
+}
+
+// MARK: App updates
+
+/// Looks for a newer release of the app. Betas count when asked for or when a beta is installed.
+/// A check at start stays silent unless it finds something.
+fn check_updates(app: &AppHandle, beta: bool, user_initiated: bool) {
+    let version = app.package_info().version.to_string();
+    if cfg!(debug_assertions) {
+        if user_initiated {
+            with_model(app, |m| m.notice = Some("Entwicklungsversion – keine Update-Prüfung.".into()));
+            changed(app);
+        }
+        return;
+    }
+    with_model(app, |m| m.checking_update = true);
+    changed(app);
+    let result = update::latest_release(beta || update::is_prerelease(&version));
+    with_model(app, |m| {
+        m.checking_update = false;
+        match result {
+            Ok(Some(release)) if update::is_newer(&release.version, &version) => m.available_update = Some(release),
+            Ok(_) => {
+                m.available_update = None;
+                if user_initiated {
+                    m.notice = Some(format!("OpenFTPUpdater-AI {version} ist aktuell."));
+                }
+            }
+            Err(e) if user_initiated => m.error = Some(format!("Update-Prüfung fehlgeschlagen: {e:#}")),
+            Err(_) => {}
+        }
+    });
+    changed(app);
+}
+
+#[tauri::command]
+async fn check_for_updates(app: AppHandle, beta: bool) {
+    blocking(move || check_updates(&app, beta, true)).await
+}
+
+/// Downloads the package of the available update, checks it and opens it in the macOS installer.
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    let release = with_model(&app, |m| {
+        if m.installing_update || m.running.is_some() {
+            return None;
+        }
+        let release = m.available_update.clone()?;
+        m.installing_update = true;
+        Some(release)
+    });
+    let Some(release) = release else { return Ok(()) };
+    changed(&app);
+    blocking(move || {
+        let result = update::download_package(&release)
+            .map_err(|e| format!("{e:#}"))
+            .and_then(|path| app.opener().open_path(path.to_string_lossy(), None::<&str>).map_err(|e| e.to_string()));
+        with_model(&app, |m| {
+            m.installing_update = false;
+            match &result {
+                Ok(()) => {
+                    m.available_update = None;
+                    m.notice = Some(format!(
+                        "Installer für OpenFTPUpdater-AI {} geöffnet. Nach der Installation die App neu starten.",
+                        release.version
+                    ));
+                }
+                Err(e) => m.error = Some(format!("Update konnte nicht geladen werden: {e}")),
+            }
+        });
+        changed(&app);
+        Ok(())
+    })
+    .await
+}
+
+/// Hides the update banner until the next check.
+#[tauri::command]
+fn dismiss_update(app: AppHandle) {
+    with_model(&app, |m| m.available_update = None);
+    changed(&app);
 }
 
 #[tauri::command]
@@ -528,6 +657,14 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(Shared(Mutex::new(Model::load())))
+        .setup(|app| {
+            // Like ClaudeKeyZapper: look for a new version once at start, quietly.
+            let handle = app.handle().clone();
+            if !cfg!(debug_assertions) && !with_model(&handle, |m| m.config.no_update_check) {
+                std::thread::spawn(move || check_updates(&handle, false, false));
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_view,
             get_log,
@@ -544,6 +681,10 @@ fn main() {
             run_all,
             run_add_product,
             set_task,
+            set_products,
+            check_for_updates,
+            install_update,
+            dismiss_update,
             list_repos,
             clone_repo,
             inspect_repo,

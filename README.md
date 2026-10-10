@@ -21,9 +21,17 @@ Four buttons, run one by one or all in a row:
 
 <sub>Diagram source: [docs/diagrams/openftpupdater-flow.html](docs/diagrams/openftpupdater-flow.html) (also as SVG).</sub>
 
-**New product** (second button on the Update tile): pick one of your GitHub repositories, and Claude
+**New product** (button in the toolbar): pick one of your GitHub repositories, and Claude
 Code adds it to the site with the project's `addProductSkill` (product page, listings, icon, diagram,
 `site.json` entry), then the app builds and commits. It goes live with Upload.
+
+## Selecting products
+
+The main window lists the products from `site.json` with a checkbox each. Precheck and Update only
+handle selected products: Precheck does not look up the others, and Update names them to Claude as "not
+selected, leave unchanged". Every row shows the documented version, after a Precheck also whether a newer
+release exists, and "kein Klon" if `localPath` is missing. The selection is stored in the app's settings,
+not in the website repository.
 
 ## Choosing repositories
 
@@ -51,10 +59,20 @@ not signed, so macOS blocks it on the first open; allow it once under **System S
 Security → Open Anyway**, or install it in the terminal:
 
 ```bash
-sudo installer -pkg OpenFTPUpdater-AI-0.1.1.pkg -target /
+sudo installer -pkg OpenFTPUpdater-AI-0.1.2.pkg -target /
 ```
 
-The same package can be distributed through Microsoft Intune as a "macOS app (PKG)".
+The same package can be distributed through Microsoft Intune as a "macOS app (PKG)"; then turn off
+"Beim Start nach neuen Versionen suchen" in the settings.
+
+## App updates
+
+As in ClaudeKeyZapper: at start, the app quietly looks up the latest release of this repository on
+GitHub once; **Nach Updates suchen** in the footer checks manually. If a newer version exists, a banner
+appears at the top. **Installieren** downloads the `.pkg` from `github.com`, checks it against the SHA-256
+digest GitHub publishes for the release asset (without one, the update is refused) and opens the macOS
+installer; restart the app afterwards. Betas (`X.Y.Z-beta.N`) are only offered through **Beta-Version
+suchen** or when a beta is installed. Development builds do not check.
 
 ## Requirements
 

@@ -75,7 +75,8 @@ impl Outdated {
     }
 }
 
-pub fn task_prompt(site: &Site, task: &Task, outdated: &[Outdated], instructions: &str) -> String {
+/// `skipped`: names of the products the user turned off; Claude must leave them alone.
+pub fn task_prompt(site: &Site, task: &Task, outdated: &[Outdated], skipped: &[String], instructions: &str) -> String {
     let mut text = if task.skill.is_empty() {
         format!("Aktualisiere die Website {} in diesem Repository.\n\n", site.name)
     } else {
@@ -88,6 +89,14 @@ pub fn task_prompt(site: &Site, task: &Task, outdated: &[Outdated], instructions
         for o in outdated {
             text.push_str(&format!("- {} ({}): {} → {} (Tag {})\n", o.name, o.repo, o.documented, o.latest_version(), o.latest_tag));
         }
+    }
+    if !skipped.is_empty() {
+        let selected: Vec<&str> = site.products.iter().map(|p| p.name.as_str()).filter(|n| !skipped.iter().any(|s| s == n)).collect();
+        text.push_str(&format!(
+            "Ausgewählte Produkte: {}. Nicht ausgewählt, daran nichts ändern: {}.\n",
+            if selected.is_empty() { "keine".to_owned() } else { selected.join(", ") },
+            skipped.join(", ")
+        ));
     }
     if !instructions.trim().is_empty() {
         text.push_str(&format!("\nZusätzliche Anweisung:\n{}\n", instructions.trim()));
@@ -304,5 +313,19 @@ mod tests {
             }
             _ => panic!("expected result"),
         }
+    }
+
+    #[test]
+    fn task_prompt_names_skipped_products() {
+        let site: Site = serde_json::from_str(
+            r#"{"name":"example.com","url":"https://example.com","build":"npm run build","output":"dist",
+                "products":[{"id":"a","name":"Alpha","repo":"o/a","documented":"1.0.0"},{"id":"b","name":"Beta","repo":"o/b","documented":"2.0.0"}]}"#,
+        )
+        .unwrap();
+        let task = site.update_tasks().remove(0);
+        let all = task_prompt(&site, &task, &[], &[], "");
+        assert!(!all.contains("Nicht ausgewählt"));
+        let some = task_prompt(&site, &task, &[], &["Beta".to_owned()], "");
+        assert!(some.contains("Ausgewählte Produkte: Alpha. Nicht ausgewählt, daran nichts ändern: Beta."));
     }
 }

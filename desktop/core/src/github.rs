@@ -16,7 +16,7 @@ pub fn token() -> Option<&'static str> {
 }
 
 /// GET on the GitHub API; `Ok(None)` for 404.
-fn get(path: &str) -> Result<Option<serde_json::Value>> {
+pub(crate) fn get(path: &str) -> Result<Option<serde_json::Value>> {
     let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).build();
     let mut request = agent
         .get(&format!("https://api.github.com/{path}"))

@@ -186,6 +186,46 @@ pub fn resolve_tasks(site: &Site, config: &Config) -> Vec<ResolvedTask> {
         .collect()
 }
 
+/// One watched product with the user's choice and what the last release lookup found.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductView {
+    pub id: String,
+    pub name: String,
+    pub repo: String,
+    pub documented: String,
+    pub enabled: bool,
+    /// Newest release tag, once a Precheck or Update has looked it up.
+    pub latest_tag: Option<String>,
+    /// The newest release is newer than the documented one.
+    pub outdated: bool,
+    /// `localPath` from site.json, if set.
+    pub local_path: Option<String>,
+    /// The local clone exists.
+    pub local: bool,
+}
+
+pub fn resolve_products(site: &Site, config: &Config, latest_tags: &std::collections::BTreeMap<String, String>) -> Vec<ProductView> {
+    let project = expand_home(&config.project_dir);
+    site.products
+        .iter()
+        .map(|p| {
+            let latest_tag = latest_tags.get(&p.id).cloned();
+            ProductView {
+                id: p.id.clone(),
+                name: p.name.clone(),
+                repo: p.repo.clone(),
+                documented: p.documented.clone(),
+                enabled: config.product_enabled(&p.id),
+                outdated: latest_tag.as_deref().is_some_and(|tag| github::is_newer(tag, &p.documented)),
+                latest_tag,
+                local: p.local_path.as_deref().is_some_and(|path| project.join(path).is_dir()),
+                local_path: p.local_path.clone(),
+            }
+        })
+        .collect()
+}
+
 /// Runs the jobs one after another on a background thread; stops at the first error.
 pub fn start(app: &AppHandle, jobs: Vec<Job>) -> Result<(), String> {
     let runner = Arc::new(Runner::default());
@@ -312,11 +352,22 @@ fn connect(ctx: &Ctx) -> Result<Connection> {
     }
 }
 
+/// Looks up the newest release of every selected product; products the user turned off are skipped.
 fn find_outdated(ctx: &Ctx, site: &Site, mut on_check: impl FnMut(Check)) -> Vec<Outdated> {
+    let config = ctx.config();
     let mut outdated = Vec::new();
     for product in &site.products {
         let label = format!("Release {}", product.name);
-        match github::latest_tag(&product.repo) {
+        if !config.product_enabled(&product.id) {
+            ctx.info(format!("{}: nicht ausgewählt, übersprungen", product.name));
+            on_check(Check { label, status: Status::Idle, detail: "nicht ausgewählt".into() });
+            continue;
+        }
+        let latest = github::latest_tag(&product.repo);
+        if let Ok(tag) = &latest {
+            with_model(&ctx.app, |m| m.latest_tags.insert(product.id.clone(), tag.clone()));
+        }
+        match latest {
             Ok(tag) if github::is_newer(&tag, &product.documented) => {
                 let o = Outdated::new(product, tag);
                 ctx.warn(format!("{}: dokumentiert {}, neuestes Release {}", product.name, o.documented, o.latest_version()));
@@ -435,7 +486,8 @@ fn precheck(ctx: &Ctx) -> Result<(Status, String)> {
     let worst = checks.iter().map(|c| c.status).max().unwrap_or(Status::Ok).max(Status::Ok);
     let problems = checks.iter().filter(|c| c.status >= Status::Warning && !c.label.starts_with("Release ")).count();
     let mut summary = if outdated.is_empty() {
-        "Alle Produkte auf dem dokumentierten Stand".to_owned()
+        if site.products.iter().all(|p| config.product_enabled(&p.id)) { "Alle Produkte auf dem dokumentierten Stand" } else { "Alle ausgewählten Produkte auf dem dokumentierten Stand" }
+            .to_owned()
     } else {
         format!(
             "Neue Releases: {}",
@@ -524,10 +576,13 @@ fn update(ctx: &Ctx, instructions: &str) -> Result<(Status, String)> {
     ctx.info("Neueste Releases abfragen …");
     let outdated = find_outdated(ctx, &site, |_| {});
     with_model(&ctx.app, |m| m.outdated = Some(outdated.clone()));
+    let config = ctx.config();
+    let skipped: Vec<String> = site.products.iter().filter(|p| !config.product_enabled(&p.id)).map(|p| p.name.clone()).collect();
     if outdated.is_empty() && instructions.trim().is_empty() {
-        return Ok((Status::Ok, "Nichts zu tun: alle Produkte aktuell".into()));
+        let what = if skipped.is_empty() { "alle Produkte" } else { "alle ausgewählten Produkte" };
+        return Ok((Status::Ok, format!("Nichts zu tun: {what} aktuell")));
     }
-    let tasks: Vec<ResolvedTask> = resolve_tasks(&site, &ctx.config()).into_iter().filter(|t| t.enabled).collect();
+    let tasks: Vec<ResolvedTask> = resolve_tasks(&site, &config).into_iter().filter(|t| t.enabled).collect();
     if tasks.is_empty() {
         bail!("Keine Aufgabe ausgewählt");
     }
@@ -537,7 +592,7 @@ fn update(ctx: &Ctx, instructions: &str) -> Result<(Status, String)> {
     for (i, task) in tasks.iter().enumerate() {
         ctx.runner.check()?;
         ctx.log("cmd", format!("━━ Aufgabe {}/{}: {} ━━", i + 1, tasks.len(), task.task.label));
-        let prompt = claude::task_prompt(&site, &task.task, &outdated, instructions);
+        let prompt = claude::task_prompt(&site, &task.task, &outdated, &skipped, instructions);
         let outcome = run_claude(ctx, &site, &project, &prompt, &task.task.label, task.model.as_deref(), task.effort.as_deref())?;
         summaries.push(if tasks.len() > 1 { format!("{}:\n{}", task.task.label, outcome.text) } else { outcome.text });
     }

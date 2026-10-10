@@ -38,16 +38,23 @@ to the public repositories of the owners already on the site.
 
 ## Installation
 
-Download `OpenFTPUpdater-AI-<version>-macos-arm64.zip` from the
-[releases](https://github.com/bl0rb/OpenFTPUpdater-AI/releases) (Apple silicon), check it against the
-`.sha256` file next to it and move the app to `/Applications`:
+Download `OpenFTPUpdater-AI-<version>.pkg` from the
+[releases](https://github.com/bl0rb/OpenFTPUpdater-AI/releases) (Apple silicon) and check it against the
+`.sha256` file next to it:
 
 ```bash
-shasum -a 256 -c OpenFTPUpdater-AI-*-macos-arm64.zip.sha256
+shasum -a 256 -c OpenFTPUpdater-AI-*.pkg.sha256
 ```
 
-The app is ad-hoc signed, not notarized, so macOS blocks the first launch. Allow it once under
-**System Settings → Privacy & Security → Open Anyway**.
+The package installs `OpenFTPUpdater-AI.app` to `/Applications` and replaces an installed version. It is
+not signed, so macOS blocks it on the first open; allow it once under **System Settings → Privacy &
+Security → Open Anyway**, or install it in the terminal:
+
+```bash
+sudo installer -pkg OpenFTPUpdater-AI-0.1.1.pkg -target /
+```
+
+The same package can be distributed through Microsoft Intune as a "macOS app (PKG)".
 
 ## Requirements
 
@@ -163,15 +170,17 @@ npm ci
 npm run build
 ```
 
-`scripts/build-app.sh` builds the release package as CI does: the app re-signed ad hoc, zipped as
-`dist/OpenFTPUpdater-AI-<version>-macos-<arch>.zip` with a `.sha256` file (`VERSION=0.2.0 scripts/build-app.sh`).
+`scripts/build-pkg.sh` builds the installer as CI does: `dist/OpenFTPUpdater-AI-<version>.pkg` with a
+`.sha256` file (`VERSION=0.2.0 scripts/build-pkg.sh`). `SIGN_IDENTITY` (Developer ID Application) and
+`INSTALLER_IDENTITY` (Developer ID Installer) sign app and package; without them the app is ad-hoc signed
+and the package unsigned.
 
 ## Continuous integration and releases
 
 - `.github/workflows/ci.yml`: every pull request and every push to `main` runs the core tests and the
   release build (`build.yml`, macOS 15, Apple silicon).
 - `.github/workflows/release.yml`: a tag `X.Y.Z` (or `X.Y.Z-beta.N` for a pre-release) runs the same
-  build with that version and publishes a GitHub release with the zip and its checksum. Publishing
+  build with that version and publishes a GitHub release with the `.pkg` and its checksum. Publishing
   only starts after tests and build are green.
 - All actions are pinned to commit SHAs (version as a comment); Dependabot proposes updates for actions,
   crates and the Tauri CLI every Monday.

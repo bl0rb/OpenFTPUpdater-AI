@@ -1,6 +1,6 @@
 name: Build
 
-# Tests the core and builds the app as dist/OpenFTPUpdater-AI-<version>-macos-arm64.zip.
+# Tests the core and builds the installer dist/OpenFTPUpdater-AI-<version>.pkg (Apple silicon).
 # Used by ci.yml (pull requests, main) and release.yml (tags), so every pull request exercises the release build.
 on:
   workflow_call:
@@ -29,13 +29,13 @@ jobs:
       - name: Check UI script
         run: cp ui/app.js "$RUNNER_TEMP/app.mjs" && node --check "$RUNNER_TEMP/app.mjs"
 
-      - name: Build app
+      - name: Build installer
         env:
           VERSION: ${{ inputs.version }}
         run: |
           npm ci
           if [ -z "$VERSION" ]; then unset VERSION; fi
-          scripts/build-app.sh
+          scripts/build-pkg.sh
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

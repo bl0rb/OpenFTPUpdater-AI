@@ -1,6 +1,6 @@
 name: Release
 
-# A tag like 0.2.0 builds the app and publishes it; 0.2.0-beta.1 becomes a pre-release.
+# A tag like 0.2.0 builds the installer and publishes it; 0.2.0-beta.1 becomes a pre-release.
 # The release is only created after tests and build are green (release gate).
 on:
   push:
@@ -33,5 +33,5 @@ jobs:
         run: |
           PRE=()
           [[ "$GITHUB_REF_NAME" == *-* ]] && PRE=(--prerelease)
-          gh release create "$GITHUB_REF_NAME" dist/OpenFTPUpdater-AI-"$GITHUB_REF_NAME"-* \
+          gh release create "$GITHUB_REF_NAME" "dist/OpenFTPUpdater-AI-$GITHUB_REF_NAME.pkg" "dist/OpenFTPUpdater-AI-$GITHUB_REF_NAME.pkg.sha256" \
             --title "OpenFTPUpdater-AI $GITHUB_REF_NAME" --generate-notes "${PRE[@]}"

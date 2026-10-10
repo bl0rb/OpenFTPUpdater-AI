@@ -38,16 +38,23 @@ jedes: lokaler Klon gefunden, schon auf der Seite, Website-Repository. Ohne `gh`
 
 ## Installation
 
-`OpenFTPUpdater-AI-<version>-macos-arm64.zip` aus den
-[Releases](https://github.com/bl0rb/OpenFTPUpdater-AI/releases) laden (Apple Silicon), mit der
-`.sha256`-Datei daneben prüfen und die App nach `/Applications` ziehen:
+`OpenFTPUpdater-AI-<version>.pkg` aus den
+[Releases](https://github.com/bl0rb/OpenFTPUpdater-AI/releases) laden (Apple Silicon) und mit der
+`.sha256`-Datei daneben prüfen:
 
 ```bash
-shasum -a 256 -c OpenFTPUpdater-AI-*-macos-arm64.zip.sha256
+shasum -a 256 -c OpenFTPUpdater-AI-*.pkg.sha256
 ```
 
-Die App ist ad-hoc signiert, nicht notarisiert; macOS blockiert deshalb den ersten Start. Einmal unter
-**Systemeinstellungen → Datenschutz & Sicherheit → Dennoch öffnen** erlauben.
+Das Paket installiert `OpenFTPUpdater-AI.app` nach `/Applications` und ersetzt eine installierte Version.
+Es ist nicht signiert, macOS blockiert es deshalb beim ersten Öffnen; einmal unter **Systemeinstellungen →
+Datenschutz & Sicherheit → Dennoch öffnen** erlauben oder im Terminal installieren:
+
+```bash
+sudo installer -pkg OpenFTPUpdater-AI-0.1.1.pkg -target /
+```
+
+Dasselbe Paket lässt sich über Microsoft Intune als „macOS-App (PKG)“ verteilen.
 
 ## Voraussetzungen
 
@@ -168,8 +175,10 @@ Die App liegt danach unter `desktop/target/release/bundle/macos/OpenFTPUpdater-A
 (ad-hoc signiert). Während der Entwicklung: `npm run dev`. Tests des Kerns:
 `cargo test -p openftpupdater-core`.
 
-`scripts/build-app.sh` baut das Release-Paket wie die CI: die App ad-hoc neu signiert, gepackt als
-`dist/OpenFTPUpdater-AI-<version>-macos-<arch>.zip` mit `.sha256`-Datei (`VERSION=0.2.0 scripts/build-app.sh`).
+`scripts/build-pkg.sh` baut den Installer wie die CI: `dist/OpenFTPUpdater-AI-<version>.pkg` mit
+`.sha256`-Datei (`VERSION=0.2.0 scripts/build-pkg.sh`). `SIGN_IDENTITY` (Developer ID Application) und
+`INSTALLER_IDENTITY` (Developer ID Installer) signieren App und Paket; ohne sie ist die App ad-hoc
+signiert und das Paket unsigniert.
 
 `bundle.macOS.minimumSystemVersion` ist bewusst nicht gesetzt: Mit
 `MACOSX_DEPLOYMENT_TARGET=14.0` erzeugte Rust 1.94 unter macOS 27 im Release-Build
@@ -186,7 +195,7 @@ desktop/ui         Web-Oberfläche (HTML, JS, CSS), ohne Build-Schritt
 - `.github/workflows/ci.yml`: Jeder Pull Request und jeder Push auf `main` führt die Tests des Kerns und
   den Release-Build aus (`build.yml`, macOS 15, Apple Silicon).
 - `.github/workflows/release.yml`: Ein Tag `X.Y.Z` (oder `X.Y.Z-beta.N` für ein Pre-Release) baut mit
-  dieser Version und veröffentlicht ein GitHub-Release mit Zip und Prüfsumme. Veröffentlicht wird erst
+  dieser Version und veröffentlicht ein GitHub-Release mit `.pkg` und Prüfsumme. Veröffentlicht wird erst
   nach grünen Tests und grünem Build.
 - Alle Actions sind auf Commit-SHAs gepinnt (Version als Kommentar); Dependabot schlägt jeden Montag
   Updates für Actions, Crates und die Tauri-CLI vor.

@@ -140,6 +140,7 @@ pub fn start(app: &AppHandle, steps: Vec<Step>, instructions: String) -> Result<
                 let state = m.steps.entry(step).or_default();
                 state.status = Status::Running;
                 state.summary.clear();
+                state.stale = false;
                 state.log.clear();
             });
             changed(&app);
@@ -162,6 +163,12 @@ pub fn start(app: &AppHandle, steps: Vec<Step>, instructions: String) -> Result<
                 state.status = status;
                 state.summary = summary;
                 state.finished_at = Some(now());
+                if matches!(step, Step::Update | Step::Upload) {
+                    // Commits, pushes and uploads change what the precheck saw.
+                    if let Some(precheck) = m.steps.get_mut(&Step::Precheck) {
+                        precheck.stale = precheck.status != Status::Idle;
+                    }
+                }
             });
             changed(&app);
             if status == Status::Error || runner.is_cancelled() {
@@ -478,20 +485,26 @@ fn upload(ctx: &Ctx) -> Result<(Status, String)> {
         ctx.warn("Erster Upload mit dieser App: alle Dateien werden hochgeladen, vorhandene Dateien auf dem Server bleiben unberührt.");
     }
 
-    if ahead > 0 {
+    let head = git::head(&project).unwrap_or_default().chars().take(7).collect::<String>();
+    let pushed = if ahead > 0 {
         ctx.cmd("$ git push origin HEAD");
         git::push(&project)?;
-        ctx.ok(format!("{ahead} Commit(s) gepusht"));
-    } else if !upstream {
+        ctx.ok(format!("{ahead} Commit(s) gepusht, origin steht jetzt auf {head}"));
+        format!("{ahead} Commit(s) gepusht")
+    } else if upstream {
+        ctx.ok(format!("Nichts zu pushen: origin steht bereits auf {head}"));
+        "bereits gepusht".to_owned()
+    } else {
         ctx.warn("Kein Upstream-Branch: nicht gepusht");
-    }
+        "nicht gepusht (kein Upstream-Branch)".to_owned()
+    };
 
     if diff.upload.is_empty() && diff.delete.is_empty() {
         current.commit = git::head(&project).ok();
         current.uploaded_at = Some(now());
         manifest::save_last(&config.sftp, &current)?;
-        with_model(&ctx.app, |m| m.upload = Some(UploadResult { uploaded: 0, deleted: 0, unchanged: diff.unchanged }));
-        return Ok((Status::Ok, "Server ist bereits auf dem Stand des Builds".into()));
+        with_model(&ctx.app, |m| m.upload = Some(UploadResult { uploaded: 0, deleted: 0, unchanged: diff.unchanged, pushed: pushed.clone() }));
+        return Ok((Status::Ok, format!("Server war bereits auf dem Stand des Builds · Git: {pushed}")));
     }
 
     ctx.info(format!("Verbinde mit {}@{} …", config.sftp.user, config.sftp.host));
@@ -509,9 +522,9 @@ fn upload(ctx: &Ctx) -> Result<(Status, String)> {
     current.commit = git::head(&project).ok();
     current.uploaded_at = Some(now());
     manifest::save_last(&config.sftp, &current)?;
-    let result = UploadResult { uploaded: diff.upload.len(), deleted: diff.delete.len(), unchanged: diff.unchanged };
+    let result = UploadResult { uploaded: diff.upload.len(), deleted: diff.delete.len(), unchanged: diff.unchanged, pushed };
     with_model(&ctx.app, |m| m.upload = Some(result.clone()));
-    Ok((Status::Ok, format!("{} Dateien hochgeladen, {} entfernt", result.uploaded, result.deleted)))
+    Ok((Status::Ok, format!("{} Dateien hochgeladen, {} entfernt · Git: {}", result.uploaded, result.deleted, result.pushed)))
 }
 
 // MARK: Verify

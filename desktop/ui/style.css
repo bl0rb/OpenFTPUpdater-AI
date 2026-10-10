@@ -183,6 +183,7 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px;
 .checks { display: grid; grid-template-columns: auto auto 1fr; gap: 4px 10px; align-items: baseline; }
 .checks .label { font-weight: 600; white-space: nowrap; }
 .checks .detail-text { color: var(--muted); overflow-wrap: anywhere; }
+.checks.stale { opacity: 0.55; }
 .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
 .status-dot.ok { background: var(--green); }
 .status-dot.warning { background: var(--orange); }
@@ -247,3 +248,4 @@ legend { font-weight: 600; padding: 0 4px; }
 .empty { margin: auto; max-width: 420px; text-align: center; display: flex; flex-direction: column; gap: 10px; align-items: center; }
 .empty img { width: 72px; height: 72px; }
 .empty h2 { margin: 0; }
+.note.orange { color: var(--orange); }

@@ -57,6 +57,8 @@ pub struct StepState {
     pub summary: String,
     /// Unix seconds.
     pub finished_at: Option<u64>,
+    /// The result predates a later Update or Upload (only used for Precheck).
+    pub stale: bool,
     #[serde(skip)]
     pub log: Vec<LogLine>,
 }
@@ -92,6 +94,8 @@ pub struct UploadResult {
     pub uploaded: usize,
     pub deleted: usize,
     pub unchanged: usize,
+    /// What happened with git, e.g. `2 Commit(s) gepusht`.
+    pub pushed: String,
 }
 
 impl Model {

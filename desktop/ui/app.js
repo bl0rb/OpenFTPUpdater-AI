@@ -172,7 +172,8 @@ function suggested() {
   return null;
 }
 
-function statusChip(status) {
+function statusChip(status, stale = false) {
+  if (stale) return h('span', { class: 'chip idle', title: 'Stand vor dem letzten Update oder Upload' }, 'Veraltet');
   return h('span', { class: `chip ${status}` }, status === 'running' && h('span', { class: 'spinner' }), STATUS_TEXT[status]);
 }
 
@@ -189,9 +190,10 @@ function renderSteps() {
       class: `step ${selected === step.id ? 'selected' : ''}`, role: 'button', tabindex: '0',
       onclick: () => selectStep(step.id), onkeydown: (e) => { if (e.key === 'Enter') selectStep(step.id); },
     },
-      h('div', { class: 'step-head' }, h('span', { class: 'step-number' }, i + 1), h('h2', null, step.title), h('span', { class: 'spacer' }), statusChip(state.status)),
+      h('div', { class: 'step-head' }, h('span', { class: 'step-number' }, i + 1), h('h2', null, step.title), h('span', { class: 'spacer' }), statusChip(state.status, state.stale)),
       h('div', { class: 'desc' }, step.desc),
-      h('div', { class: `summary ${state.status === 'error' ? 'red' : state.status === 'warning' ? 'orange' : 'muted'}` }, state.summary || ' '),
+      h('div', { class: `summary ${state.stale ? 'muted' : state.status === 'error' ? 'red' : state.status === 'warning' ? 'orange' : 'muted'}` },
+        state.stale ? 'Nach Update/Upload erneut prüfen' : state.summary || ' '),
       action);
   }));
 }
@@ -208,20 +210,24 @@ function renderDetail() {
   const step = STEPS.find((s) => s.id === selected);
   const state = view.steps[selected];
   skeleton.detailHead.replaceChildren(
-    h('h3', null, step.title), statusChip(state.status),
+    h('h3', null, step.title), statusChip(state.status, state.stale),
     h('span', { class: 'muted small' }, state.finishedAt ? `zuletzt ${formatTime(state.finishedAt)}` : ''));
   skeleton.detailResult.replaceChildren(...({
     precheck: precheckResult, update: updateResult, upload: uploadResult, verify: verifyResult,
-  }[selected]()));
+  }[selected]()).filter(Boolean));
 }
 
 function precheckResult() {
   if (!view.checks.length) return [];
+  const stale = view.steps.precheck.stale;
   const outdated = view.outdated?.length
     ? h('div', { class: 'facts' }, h('span', null, h('strong', null, 'Neue Releases: '),
       view.outdated.map((o) => `${o.name} ${o.documented} → ${o.latestTag.replace(/^v/, '')}`).join(', ')))
     : null;
-  return [outdated, h('div', { class: 'checks' }, view.checks.map((c) => [
+  return [
+    stale && h('div', { class: 'note orange' }, 'Dieses Ergebnis stammt von vor dem letzten Update oder Upload (z. B. Remote-Stand und Releases). Precheck erneut starten für den aktuellen Stand.'),
+    outdated && !stale ? outdated : null,
+    h('div', { class: `checks ${stale ? 'stale' : ''}` }, view.checks.map((c) => [
     h('span', { class: `status-dot ${c.status}` }), h('span', { class: 'label' }, c.label), h('span', { class: 'detail-text selectable' }, c.detail),
   ]))];
 }
@@ -258,7 +264,8 @@ function uploadResult() {
     items.push(h('div', { class: 'facts' },
       h('span', null, h('strong', null, 'Hochgeladen: '), view.upload.uploaded),
       h('span', null, h('strong', null, 'Entfernt: '), view.upload.deleted),
-      h('span', null, h('strong', null, 'Unverändert: '), view.upload.unchanged)));
+      h('span', null, h('strong', null, 'Unverändert: '), view.upload.unchanged),
+      h('span', null, h('strong', null, 'Git: '), view.upload.pushed)));
   }
   return items;
 }

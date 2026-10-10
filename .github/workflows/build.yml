@@ -1,0 +1,44 @@
+name: Build
+
+# Tests the core and builds the app as dist/OpenFTPUpdater-AI-<version>-macos-arm64.zip.
+# Used by ci.yml (pull requests, main) and release.yml (tags), so every pull request exercises the release build.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Version to build; default: version in desktop/src-tauri/tauri.conf.json"
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    defaults:
+      run:
+        shell: bash
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Test core
+        run: cargo test -p openftpupdater-core
+
+      - name: Check UI script
+        run: cp ui/app.js "$RUNNER_TEMP/app.mjs" && node --check "$RUNNER_TEMP/app.mjs"
+
+      - name: Build app
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          npm ci
+          if [ -z "$VERSION" ]; then unset VERSION; fi
+          scripts/build-app.sh
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: OpenFTPUpdater-AI-macOS
+          path: desktop/dist/OpenFTPUpdater-AI-*
+          if-no-files-found: error

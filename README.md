@@ -36,6 +36,19 @@ to the public repositories of the owners already on the site.
 - **Repo folder** (Settings): where local clones are searched and created; by default the parent of the
   project folder. Product clones found there are handed to Claude as `localPath`.
 
+## Installation
+
+Download `OpenFTPUpdater-AI-<version>-macos-arm64.zip` from the
+[releases](https://github.com/bl0rb/OpenFTPUpdater-AI/releases) (Apple silicon), check it against the
+`.sha256` file next to it and move the app to `/Applications`:
+
+```bash
+shasum -a 256 -c OpenFTPUpdater-AI-*-macos-arm64.zip.sha256
+```
+
+The app is ad-hoc signed, not notarized, so macOS blocks the first launch. Allow it once under
+**System Settings → Privacy & Security → Open Anyway**.
+
 ## Requirements
 
 - macOS (developed on macOS 27; the code is cross-platform Tauri, Windows is untested)
@@ -148,6 +161,23 @@ Settings live in `~/Library/Application Support/OpenFTPUpdater-AI/config.json` (
 cd desktop
 npm ci
 npm run build
+```
+
+`scripts/build-app.sh` builds the release package as CI does: the app re-signed ad hoc, zipped as
+`dist/OpenFTPUpdater-AI-<version>-macos-<arch>.zip` with a `.sha256` file (`VERSION=0.2.0 scripts/build-app.sh`).
+
+## Continuous integration and releases
+
+- `.github/workflows/ci.yml`: every pull request and every push to `main` runs the core tests and the
+  release build (`build.yml`, macOS 15, Apple silicon).
+- `.github/workflows/release.yml`: a tag `X.Y.Z` (or `X.Y.Z-beta.N` for a pre-release) runs the same
+  build with that version and publishes a GitHub release with the zip and its checksum. Publishing
+  only starts after tests and build are green.
+- All actions are pinned to commit SHAs (version as a comment); Dependabot proposes updates for actions,
+  crates and the Tauri CLI every Monday.
+
+```bash
+git tag 0.2.0 && git push origin 0.2.0
 ```
 
 The app ends up in `desktop/target/release/bundle/macos/OpenFTPUpdater-AI.app` (ad-hoc signed).

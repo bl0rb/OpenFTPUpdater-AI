@@ -36,6 +36,19 @@ jedes: lokaler Klon gefunden, schon auf der Seite, Website-Repository. Ohne `gh`
 - **Repo-Ordner** (Einrichtung): hier werden lokale Klone gesucht und angelegt; standardmäßig der
   Elternordner des Projektordners. Dort gefundene Produkt-Klone bekommt Claude als `localPath`.
 
+## Installation
+
+`OpenFTPUpdater-AI-<version>-macos-arm64.zip` aus den
+[Releases](https://github.com/bl0rb/OpenFTPUpdater-AI/releases) laden (Apple Silicon), mit der
+`.sha256`-Datei daneben prüfen und die App nach `/Applications` ziehen:
+
+```bash
+shasum -a 256 -c OpenFTPUpdater-AI-*-macos-arm64.zip.sha256
+```
+
+Die App ist ad-hoc signiert, nicht notarisiert; macOS blockiert deshalb den ersten Start. Einmal unter
+**Systemeinstellungen → Datenschutz & Sicherheit → Dennoch öffnen** erlauben.
+
 ## Voraussetzungen
 
 - macOS (entwickelt unter macOS 27; der Code ist plattformübergreifendes Tauri, Windows ist ungetestet)
@@ -155,6 +168,9 @@ Die App liegt danach unter `desktop/target/release/bundle/macos/OpenFTPUpdater-A
 (ad-hoc signiert). Während der Entwicklung: `npm run dev`. Tests des Kerns:
 `cargo test -p openftpupdater-core`.
 
+`scripts/build-app.sh` baut das Release-Paket wie die CI: die App ad-hoc neu signiert, gepackt als
+`dist/OpenFTPUpdater-AI-<version>-macos-<arch>.zip` mit `.sha256`-Datei (`VERSION=0.2.0 scripts/build-app.sh`).
+
 `bundle.macOS.minimumSystemVersion` ist bewusst nicht gesetzt: Mit
 `MACOSX_DEPLOYMENT_TARGET=14.0` erzeugte Rust 1.94 unter macOS 27 im Release-Build
 Proc-Macro-Bibliotheken, die sich nicht laden ließen („mis-aligned LINKEDIT string pool“).
@@ -163,6 +179,20 @@ Proc-Macro-Bibliotheken, die sich nicht laden ließen („mis-aligned LINKEDIT s
 desktop/core       Rust-Bibliothek: Einstellungen, site.json, Shell/PATH, git, GitHub, Claude, SFTP, Manifest, Verify
 desktop/src-tauri  Tauri-App: Zustand, Befehle, die vier Schritte
 desktop/ui         Web-Oberfläche (HTML, JS, CSS), ohne Build-Schritt
+```
+
+## CI und Releases
+
+- `.github/workflows/ci.yml`: Jeder Pull Request und jeder Push auf `main` führt die Tests des Kerns und
+  den Release-Build aus (`build.yml`, macOS 15, Apple Silicon).
+- `.github/workflows/release.yml`: Ein Tag `X.Y.Z` (oder `X.Y.Z-beta.N` für ein Pre-Release) baut mit
+  dieser Version und veröffentlicht ein GitHub-Release mit Zip und Prüfsumme. Veröffentlicht wird erst
+  nach grünen Tests und grünem Build.
+- Alle Actions sind auf Commit-SHAs gepinnt (Version als Kommentar); Dependabot schlägt jeden Montag
+  Updates für Actions, Crates und die Tauri-CLI vor.
+
+```bash
+git tag 0.2.0 && git push origin 0.2.0
 ```
 
 ## Lizenz

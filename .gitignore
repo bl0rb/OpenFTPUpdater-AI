@@ -5,3 +5,4 @@ desktop/src-tauri/gen/
 desktop/node_modules/
 # macOS
 .DS_Store
+desktop/dist/

@@ -1,0 +1,16 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths: ['desktop/**', '.github/workflows/**']
+  pull_request:
+    paths: ['desktop/**', '.github/workflows/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml

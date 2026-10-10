@@ -4,6 +4,7 @@ use crate::paths;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
@@ -68,7 +69,30 @@ impl SftpConfig {
 pub struct Config {
     /// Local clone of the website repository (contains `.openftpupdater/site.json`).
     pub project_dir: String,
+    /// Folder that holds the local clones (website and products); empty = the project's parent.
+    pub workspace_dir: String,
     pub sftp: SftpConfig,
+}
+
+impl Config {
+    /// Where clones are searched and created.
+    pub fn workspace(&self) -> PathBuf {
+        if !self.workspace_dir.trim().is_empty() {
+            return paths::expand_home(self.workspace_dir.trim());
+        }
+        if !self.project_dir.trim().is_empty() {
+            if let Some(parent) = paths::expand_home(self.project_dir.trim()).parent() {
+                return parent.to_path_buf();
+            }
+        }
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let code = home.join("Documents").join("Code");
+        if code.is_dir() {
+            code
+        } else {
+            home
+        }
+    }
 }
 
 pub fn load() -> Config {

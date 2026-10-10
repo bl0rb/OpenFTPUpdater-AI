@@ -9,6 +9,7 @@ pub mod claude;
 pub mod config;
 pub mod git;
 pub mod github;
+pub mod localrepo;
 pub mod manifest;
 pub mod paths;
 pub mod secrets;

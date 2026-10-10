@@ -9,7 +9,7 @@ use openftpupdater_core::paths::expand_home;
 use openftpupdater_core::sftp::{self, ConnectError, Connection};
 use openftpupdater_core::shell::{self, Runner};
 use openftpupdater_core::site::Site;
-use openftpupdater_core::{git, github, manifest, secrets, verify};
+use openftpupdater_core::{git, github, localrepo, manifest, secrets, verify};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -109,8 +109,38 @@ impl Ctx {
     }
 }
 
-/// Starts the given steps one after another on a background thread.
-pub fn start(app: &AppHandle, steps: Vec<Step>, instructions: String) -> Result<(), String> {
+/// One unit of work; each shows up in the slot of its step.
+pub enum Job {
+    Precheck,
+    Update(String),
+    Upload,
+    Verify,
+    AddProduct(NewProductInput),
+}
+
+impl Job {
+    fn step(&self) -> Step {
+        match self {
+            Job::Precheck => Step::Precheck,
+            Job::Update(_) | Job::AddProduct(_) => Step::Update,
+            Job::Upload => Step::Upload,
+            Job::Verify => Step::Verify,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewProductInput {
+    pub repo: String,
+    pub name: String,
+    /// Absolute path of the local clone, or empty.
+    pub local_path: String,
+    pub instructions: String,
+}
+
+/// Runs the jobs one after another on a background thread; stops at the first error.
+pub fn start(app: &AppHandle, jobs: Vec<Job>) -> Result<(), String> {
     let runner = Arc::new(Runner::default());
     let busy = with_model(app, |m| {
         if m.running.is_some() {
@@ -126,14 +156,15 @@ pub fn start(app: &AppHandle, steps: Vec<Step>, instructions: String) -> Result<
     }
     let app = app.clone();
     std::thread::spawn(move || {
-        let all = steps.len() > 1;
-        for step in steps {
-            if all && step == Step::Update {
+        let all = jobs.len() > 1;
+        for job in jobs {
+            if let (true, Job::Update(instructions)) = (all, &job) {
                 let nothing_to_do = with_model(&app, |m| m.outdated.as_ref().is_some_and(|o| o.is_empty())) && instructions.trim().is_empty();
                 if nothing_to_do {
                     continue;
                 }
             }
+            let step = job.step();
             let ctx = Ctx { app: app.clone(), step, runner: runner.clone() };
             with_model(&app, |m| {
                 m.running = Some(step);
@@ -144,11 +175,12 @@ pub fn start(app: &AppHandle, steps: Vec<Step>, instructions: String) -> Result<
                 state.log.clear();
             });
             changed(&app);
-            let result = match step {
-                Step::Precheck => precheck(&ctx),
-                Step::Update => update(&ctx, &instructions),
-                Step::Upload => upload(&ctx),
-                Step::Verify => verify(&ctx),
+            let result = match &job {
+                Job::Precheck => precheck(&ctx),
+                Job::Update(instructions) => update(&ctx, instructions),
+                Job::Upload => upload(&ctx),
+                Job::Verify => verify(&ctx),
+                Job::AddProduct(input) => add_product(&ctx, input),
             };
             let (status, summary) = match result {
                 Ok(done) => done,
@@ -371,35 +403,29 @@ fn precheck(ctx: &Ctx) -> Result<(Status, String)> {
 
 // MARK: Update
 
-fn update(ctx: &Ctx, instructions: &str) -> Result<(Status, String)> {
-    let project = ctx.project()?;
-    let site = ctx.site()?;
-    let changes = git::changes(&project)?;
+/// Content changes start from a clean tree on the latest remote state.
+fn prepare_tree(ctx: &Ctx, project: &std::path::Path) -> Result<()> {
+    let changes = git::changes(project)?;
     if !changes.is_empty() {
         bail!("Das Arbeitsverzeichnis enthält nicht committete Änderungen ({}). Bitte erst committen oder verwerfen.", changes.len());
     }
-    if git::has_upstream(&project) {
+    if git::has_upstream(project) {
         ctx.cmd("$ git pull --ff-only");
-        let out = git::pull_ff(&project)?;
+        let out = git::pull_ff(project)?;
         ctx.log("out", if out.is_empty() { "Already up to date.".to_owned() } else { out });
     }
+    Ok(())
+}
 
-    ctx.info("Neueste Releases abfragen …");
-    let outdated = find_outdated(ctx, &site, |_| {});
-    with_model(&ctx.app, |m| m.outdated = Some(outdated.clone()));
-    if outdated.is_empty() && instructions.trim().is_empty() {
-        return Ok((Status::Ok, "Nichts zu tun: alle Produkte aktuell".into()));
-    }
-    ctx.runner.check()?;
-
-    let prompt = claude::prompt(&site, &outdated, instructions);
+/// Runs Claude Code with the prompt and fails unless it finished successfully.
+fn run_claude(ctx: &Ctx, site: &Site, project: &std::path::Path, prompt: &str) -> Result<claude::Outcome> {
     ctx.cmd("$ claude -p … (Prompt unten)");
     for line in prompt.lines() {
         ctx.log("claude", format!("  {line}"));
     }
-    let args = claude::args(&site, &prompt);
+    let args = claude::args(site, prompt);
     let mut outcome = None;
-    let code = shell::stream("claude", &args, &project, &github_env(), &ctx.runner, |line| match claude::parse(line) {
+    let code = shell::stream("claude", &args, project, &github_env(), &ctx.runner, |line| match claude::parse(line) {
         Event::Line(text) => ctx.log("claude", text),
         Event::Done(done) => outcome = Some(done),
         Event::Ignore => {}
@@ -414,21 +440,43 @@ fn update(ctx: &Ctx, instructions: &str) -> Result<(Status, String)> {
         ctx.info(format!("Claude: {} Runden, {:.2} USD", outcome.turns.unwrap_or(0), cost));
     }
     if !outcome.success {
-        bail!("Claude hat das Update nicht abgeschlossen: {}", outcome.text.lines().next().unwrap_or("ohne Meldung"));
+        bail!("Claude hat nicht erfolgreich abgeschlossen: {}", outcome.text.lines().next().unwrap_or("ohne Meldung"));
     }
+    Ok(outcome)
+}
 
-    let changes = git::changes(&project)?;
+/// Builds and commits what Claude changed; `None` if nothing changed.
+fn build_and_commit(ctx: &Ctx, site: &Site, project: &std::path::Path, subject: &str, outcome: &claude::Outcome) -> Result<Option<(String, usize)>> {
+    let changes = git::changes(project)?;
     if changes.is_empty() {
-        return Ok((Status::Warning, "Claude hat keine Dateien geändert".into()));
+        return Ok(None);
     }
-    ctx.info(format!("{} geänderte Dateien", changes.len()));
-    if let Ok(stat) = git::diff_stat(&project) {
-        for line in stat.lines() {
-            ctx.log("out", line);
-        }
+    ctx.info(format!("{} geänderte oder neue Dateien:", changes.len()));
+    for line in &changes {
+        ctx.log("out", format!("  {line}"));
     }
-    build(ctx, &site, &project).context("Die Änderungen bleiben uncommittet im Arbeitsverzeichnis")?;
+    build(ctx, site, project).context("Die Änderungen bleiben uncommittet im Arbeitsverzeichnis")?;
+    let body = format!("{}\n\nCo-Authored-By: Claude <noreply@anthropic.com>", outcome.text);
+    ctx.cmd(format!("$ git commit -m \"{subject}\""));
+    let sha = git::commit_all(project, subject, &body)?;
+    ctx.ok(format!("Commit {sha}"));
+    Ok(Some((sha, changes.len())))
+}
 
+fn update(ctx: &Ctx, instructions: &str) -> Result<(Status, String)> {
+    let project = ctx.project()?;
+    let site = ctx.site()?;
+    prepare_tree(ctx, &project)?;
+
+    ctx.info("Neueste Releases abfragen …");
+    let outdated = find_outdated(ctx, &site, |_| {});
+    with_model(&ctx.app, |m| m.outdated = Some(outdated.clone()));
+    if outdated.is_empty() && instructions.trim().is_empty() {
+        return Ok((Status::Ok, "Nichts zu tun: alle Produkte aktuell".into()));
+    }
+    ctx.runner.check()?;
+
+    let outcome = run_claude(ctx, &site, &project, &claude::prompt(&site, &outdated, instructions))?;
     let subject = if outdated.is_empty() {
         let first = instructions.lines().next().unwrap_or("").trim();
         format!("Website-Update: {}", first.chars().take(60).collect::<String>())
@@ -438,12 +486,75 @@ fn update(ctx: &Ctx, instructions: &str) -> Result<(Status, String)> {
             outdated.iter().map(|o| format!("{} {}", o.name, o.latest_version())).collect::<Vec<_>>().join(", ")
         )
     };
-    let body = format!("{}\n\nCo-Authored-By: Claude <noreply@anthropic.com>", outcome.text);
-    ctx.cmd(format!("$ git commit -m \"{subject}\""));
-    let sha = git::commit_all(&project, &subject, &body)?;
-    ctx.ok(format!("Commit {sha}"));
-    with_model(&ctx.app, |m| m.outdated = None);
-    Ok((Status::Ok, format!("Commit {sha}: {} Dateien geändert", changes.len())))
+    match build_and_commit(ctx, &site, &project, &subject, &outcome)? {
+        Some((sha, files)) => {
+            with_model(&ctx.app, |m| m.outdated = None);
+            Ok((Status::Ok, format!("Commit {sha}: {files} Dateien geändert")))
+        }
+        None => Ok((Status::Warning, "Claude hat keine Dateien geändert".into())),
+    }
+}
+
+// MARK: Add product
+
+fn add_product(ctx: &Ctx, input: &NewProductInput) -> Result<(Status, String)> {
+    let project = ctx.project()?;
+    let site = ctx.site()?;
+    let repo = input.repo.trim();
+    let name = input.name.trim();
+    if name.is_empty() {
+        bail!("Name des Produkts fehlt");
+    }
+    if site.products.iter().any(|p| p.repo.eq_ignore_ascii_case(repo)) {
+        bail!("{repo} ist bereits als Produkt in site.json eingetragen");
+    }
+    prepare_tree(ctx, &project)?;
+
+    ctx.info(format!("Repository {repo} prüfen …"));
+    let info = github::repo_info(repo)?;
+    if info.private {
+        ctx.warn("Das Repository ist privat: Besucher können Links darauf nicht öffnen.");
+    }
+    let latest_tag = github::latest_release(&info.full_name)?;
+    match &latest_tag {
+        Some(tag) => ctx.ok(format!("Neuestes Release: {tag}")),
+        None => ctx.warn("Noch kein veröffentlichtes Release: kein Versions-Badge, der Precheck beobachtet das Produkt erst nach dem ersten Release."),
+    }
+    let local_path = match input.local_path.trim() {
+        "" => None,
+        path => {
+            let clone = expand_home(path);
+            if localrepo::origin_repo(&clone).is_none_or(|r| !r.eq_ignore_ascii_case(&info.full_name)) {
+                bail!("{} ist kein Klon von {}", clone.display(), info.full_name);
+            }
+            let relative = localrepo::relative_to_project(&project, &clone);
+            ctx.ok(format!("Lokaler Klon: {relative}"));
+            Some(relative)
+        }
+    };
+    ctx.runner.check()?;
+
+    let product = claude::NewProduct {
+        repo: info.full_name.clone(),
+        name: name.to_owned(),
+        local_path,
+        latest_tag: latest_tag.clone(),
+        description: info.description.clone(),
+        license: info.license.clone(),
+        private: info.private,
+    };
+    let outcome = run_claude(ctx, &site, &project, &claude::add_product_prompt(&site, &product, &input.instructions))?;
+
+    if latest_tag.is_some() {
+        let listed = ctx.site().map(|s| s.products.iter().any(|p| p.repo.eq_ignore_ascii_case(&info.full_name))).unwrap_or(false);
+        if !listed {
+            ctx.warn("site.json enthält das Produkt nicht: Precheck und Update beobachten seine Releases nicht.");
+        }
+    }
+    match build_and_commit(ctx, &site, &project, &format!("Neues Produkt: {name}"), &outcome)? {
+        Some((sha, files)) => Ok((Status::Ok, format!("Commit {sha}: {name} aufgenommen, {files} Dateien"))),
+        None => Ok((Status::Warning, "Claude hat keine Dateien geändert".into())),
+    }
 }
 
 // MARK: Upload

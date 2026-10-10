@@ -3,9 +3,11 @@
 
 mod steps;
 
+use steps::{Job, NewProductInput};
+
 use openftpupdater_core::claude::{Outcome, Outdated};
 use openftpupdater_core::config::{self, AuthKind, Config};
-use openftpupdater_core::manifest;
+use openftpupdater_core::{github, localrepo, manifest};
 use openftpupdater_core::paths::{abbreviate_home, expand_home};
 use openftpupdater_core::secrets;
 use openftpupdater_core::sftp::{self, ConnectError};
@@ -161,6 +163,10 @@ struct View {
     version: String,
     config: Config,
     project_display: String,
+    /// Folder with the clones, as displayed (auto value if not set).
+    workspace_display: String,
+    /// `owner/name` of the website repository (origin of the project folder).
+    site_repo: Option<String>,
     site: Option<Site>,
     site_error: Option<String>,
     sftp_ready: bool,
@@ -184,6 +190,8 @@ fn get_view(app: AppHandle) -> View {
         version,
         config: m.config.clone(),
         project_display: if m.config.project_dir.is_empty() { String::new() } else { abbreviate_home(&expand_home(&m.config.project_dir)) },
+        workspace_display: abbreviate_home(&m.config.workspace()),
+        site_repo: if m.config.project_dir.is_empty() { None } else { localrepo::origin_repo(&expand_home(&m.config.project_dir)) },
         site: m.site.as_ref().ok().cloned(),
         site_error: m.site.as_ref().err().cloned(),
         sftp_ready: m.config.sftp.is_complete(),
@@ -216,6 +224,8 @@ fn get_log(app: AppHandle, step: Step) -> Vec<LogLine> {
 #[serde(rename_all = "camelCase")]
 struct SettingsInput {
     project_dir: String,
+    #[serde(default)]
+    workspace_dir: String,
     host: String,
     port: u16,
     user: String,
@@ -231,6 +241,7 @@ fn apply_settings(app: &AppHandle, input: SettingsInput) -> Result<(), String> {
     let previous_account = next.sftp.secret_account();
     let target_changed = next.sftp.host.trim() != input.host.trim() || next.sftp.port != input.port;
     next.project_dir = input.project_dir.trim().to_owned();
+    next.workspace_dir = input.workspace_dir.trim().to_owned();
     next.sftp.host = input.host.trim().to_owned();
     next.sftp.port = if input.port == 0 { 22 } else { input.port };
     next.sftp.user = input.user.trim().to_owned();
@@ -353,13 +364,131 @@ fn dismiss(app: AppHandle) {
 
 #[tauri::command]
 fn run_step(app: AppHandle, step: Step, instructions: String) -> Result<(), String> {
-    steps::start(&app, vec![step], instructions)
+    let job = match step {
+        Step::Precheck => Job::Precheck,
+        Step::Update => Job::Update(instructions),
+        Step::Upload => Job::Upload,
+        Step::Verify => Job::Verify,
+    };
+    steps::start(&app, vec![job])
 }
 
 /// Precheck, then Update (only if something is outdated or there are instructions), Upload, Verify.
 #[tauri::command]
 fn run_all(app: AppHandle, instructions: String) -> Result<(), String> {
-    steps::start(&app, Step::ALL.to_vec(), instructions)
+    steps::start(&app, vec![Job::Precheck, Job::Update(instructions), Job::Upload, Job::Verify])
+}
+
+/// Claude adds a repository as a new product (runs in the Update slot, ends with a commit).
+#[tauri::command]
+fn run_add_product(app: AppHandle, input: NewProductInput) -> Result<(), String> {
+    if !github::is_repo_name(input.repo.trim()) {
+        return Err("Repository im Format owner/name angeben".into());
+    }
+    steps::start(&app, vec![Job::AddProduct(input)])
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RepoEntry {
+    #[serde(flatten)]
+    info: github::RepoInfo,
+    /// Absolute path of the clone in the repo folder, if any.
+    local_path: Option<String>,
+    on_site: bool,
+    is_website: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RepoList {
+    repos: Vec<RepoEntry>,
+    workspace: String,
+    /// Why only public repositories are listed, if so.
+    note: Option<String>,
+}
+
+/// The user's GitHub repositories with their local clone and their role on the site.
+/// Without a gh login: the public repositories of the owners already on the site.
+#[tauri::command]
+async fn list_repos(app: AppHandle) -> Result<RepoList, String> {
+    let (site, config) = with_model(&app, |m| (m.site.clone().ok(), m.config.clone()));
+    blocking(move || {
+        let workspace = config.workspace();
+        let (repos, note) = match github::user_repos() {
+            Ok(repos) => (repos, None),
+            Err(e) => {
+                let mut owners: Vec<String> = site
+                    .iter()
+                    .flat_map(|s| s.products.iter())
+                    .filter_map(|p| p.repo.split('/').next().map(str::to_owned))
+                    .collect();
+                owners.sort();
+                owners.dedup();
+                let mut repos = Vec::new();
+                for owner in &owners {
+                    repos.extend(github::owner_repos(owner).map_err(|e| format!("{e:#}"))?);
+                }
+                (repos, Some(format!("{e:#}. Gezeigt werden nur öffentliche Repositories.")))
+            }
+        };
+        let mut clones = localrepo::clones_in(&workspace);
+        let website = if config.project_dir.is_empty() { None } else { localrepo::origin_repo(&expand_home(&config.project_dir)) };
+        let repos = repos
+            .into_iter()
+            .map(|info| {
+                let key = info.full_name.to_lowercase();
+                RepoEntry {
+                    local_path: clones.remove(&key).map(|p| p.display().to_string()),
+                    on_site: site.iter().flat_map(|s| s.products.iter()).any(|p| p.repo.eq_ignore_ascii_case(&info.full_name)),
+                    is_website: website.as_ref().is_some_and(|w| w.eq_ignore_ascii_case(&info.full_name)),
+                    info,
+                }
+            })
+            .collect();
+        Ok(RepoList { repos, workspace: abbreviate_home(&workspace), note })
+    })
+    .await
+}
+
+/// Clones a repository into the repo folder and returns its path.
+#[tauri::command]
+async fn clone_repo(app: AppHandle, repo: String, workspace_dir: String) -> Result<String, String> {
+    let mut config = with_model(&app, |m| m.config.clone());
+    if !workspace_dir.trim().is_empty() {
+        config.workspace_dir = workspace_dir;
+    }
+    blocking(move || {
+        if !github::is_repo_name(repo.trim()) {
+            return Err("Repository im Format owner/name angeben".to_owned());
+        }
+        localrepo::clone(repo.trim(), &config.workspace()).map(|p| p.display().to_string()).map_err(|e| format!("{e:#}"))
+    })
+    .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RepoCheck {
+    info: github::RepoInfo,
+    latest_tag: Option<String>,
+    /// Absolute path of a clone found next to the project.
+    local_path: Option<String>,
+    on_site: bool,
+}
+
+#[tauri::command]
+async fn inspect_repo(app: AppHandle, repo: String) -> Result<RepoCheck, String> {
+    let (site, workspace) = with_model(&app, |m| (m.site.clone(), m.config.workspace()));
+    let site = site?;
+    blocking(move || {
+        let info = github::repo_info(repo.trim()).map_err(|e| format!("{e:#}"))?;
+        let latest_tag = github::latest_release(&info.full_name).map_err(|e| format!("{e:#}"))?;
+        let local_path = localrepo::clones_in(&workspace).remove(&info.full_name.to_lowercase()).map(|p| p.display().to_string());
+        let on_site = site.products.iter().any(|p| p.repo.eq_ignore_ascii_case(&info.full_name));
+        Ok(RepoCheck { info, latest_tag, local_path, on_site })
+    })
+    .await
 }
 
 #[tauri::command]
@@ -388,6 +517,10 @@ fn main() {
             dismiss,
             run_step,
             run_all,
+            run_add_product,
+            list_repos,
+            clone_repo,
+            inspect_repo,
             cancel
         ])
         .run(tauri::generate_context!())

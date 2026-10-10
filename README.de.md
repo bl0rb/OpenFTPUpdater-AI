@@ -17,6 +17,21 @@ Vier Schaltflächen, einzeln oder nacheinander:
 | **Upload** | Frischer Build, `git push`, dann nur neue oder geänderte Dateien per SFTP; aus dem Build entfernte Dateien werden auf dem Server gelöscht | Server, Remote-Repository |
 | **Verify** | Lädt jede Datei des letzten Uploads von der Live-Seite und vergleicht SHA-256 mit dem Build | nein |
 
+**Neues Produkt** (zweiter Knopf in der Update-Kachel): eines deiner GitHub-Repositories wählen, Claude
+Code nimmt es mit dem `addProductSkill` des Projekts auf (Produktseite, Listen, Icon, Ablaufgrafik,
+Eintrag in `site.json`), danach baut und committet die App. Live geht es mit Upload.
+
+## Repositories wählen
+
+Die App listet deine GitHub-Repositories über die angemeldete `gh`-CLI, auch private, und markiert
+jedes: lokaler Klon gefunden, schon auf der Seite, Website-Repository. Ohne `gh`-Anmeldung zeigt sie die
+öffentlichen Repositories der Besitzer, die schon auf der Seite stehen.
+
+- **Website-Repo** (Einrichtung): aus der Liste wählen; der Projektordner ergibt sich aus dem lokalen
+  Klon. Gibt es keinen, klont die App das Repo in den Repo-Ordner.
+- **Repo-Ordner** (Einrichtung): hier werden lokale Klone gesucht und angelegt; standardmäßig der
+  Elternordner des Projektordners. Dort gefundene Produkt-Klone bekommt Claude als `localPath`.
+
 ## Voraussetzungen
 
 - macOS (entwickelt unter macOS 27; der Code ist plattformübergreifendes Tauri, Windows ist ungetestet)
@@ -37,6 +52,7 @@ Liegt im Website-Repository und beschreibt Build und beobachtete Produkte:
   "build": "npm run build",
   "output": "dist",
   "skill": "site-update",
+  "addProductSkill": "product-add",
   "failOnOutput": ["[releases]"],
   "products": [
     { "id": "app", "name": "App", "repo": "owner/app", "tagPrefix": "v", "documented": "1.2.0", "localPath": "../app" }
@@ -54,6 +70,7 @@ Liegt im Website-Repository und beschreibt Build und beobachtete Produkte:
 | `url` | Öffentliche Adresse; dort liegt die Wurzel der Build-Ausgabe (für Precheck und Verify) |
 | `build`, `output` | Build-Befehl (läuft mit `/bin/sh -c` im Projekt) und sein Ausgabeordner |
 | `skill` | Claude-Code-Skill im Projekt (`.claude/skills/<name>/SKILL.md`), der weiß, wie die Seite aktualisiert wird |
+| `addProductSkill` | Claude-Code-Skill, der ein Repository als neues Produkt aufnimmt |
 | `failOnOutput` | Zeilen der Build-Ausgabe, die den Build trotz Exit-Code 0 scheitern lassen, z. B. eine Warnung, dass Versionen auf alte Werte zurückgefallen sind |
 | `products[].repo` | GitHub-Repository, dessen neuestes Release (ohne Pre-Releases) beobachtet wird |
 | `products[].documented` | Release, den die Inhalte beschreiben; der Skill setzt ihn nach dem Update hoch |

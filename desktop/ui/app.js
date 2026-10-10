@@ -43,6 +43,8 @@ const ICONS = {
   folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
   forward: '<path d="M5 12h14M13 6l6 6-6 6"/>',
   close: '<path d="M6 6l12 12M18 6 6 18"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  refresh: '<path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/>',
 };
 
 function icon(name) {
@@ -182,10 +184,12 @@ function renderSteps() {
   skeleton.steps.replaceChildren(...STEPS.map((step, i) => {
     const state = view.steps[step.id];
     const running = view.running === step.id;
-    const action = running
-      ? button('Abbrechen', () => invoke('cancel'), { iconName: 'stop', cls: 'run danger' })
+    const action = h('div', { class: 'step-actions' }, running
+      ? button('Abbrechen', () => invoke('cancel'), { iconName: 'stop', cls: 'danger' })
       : button('Starten', () => call('run_step', { step: step.id, instructions: skeleton.instructions.value }),
-        { iconName: 'play', cls: `run ${next === step.id ? 'primary' : ''}`, disabled: !!view.running || !ready(step.id) });
+        { iconName: 'play', cls: next === step.id ? 'primary' : null, disabled: !!view.running || !ready(step.id) }),
+      step.id === 'update' && !running && button('Neues Produkt …', addProductDialog,
+        { iconName: 'plus', disabled: !!view.running || !view.site, title: 'Ein Repository als neues Produkt auf der Website aufnehmen' }));
     return h('div', {
       class: `step ${selected === step.id ? 'selected' : ''}`, role: 'button', tabindex: '0',
       onclick: () => selectStep(step.id), onkeydown: (e) => { if (e.key === 'Enter') selectStep(step.id); },
@@ -332,30 +336,111 @@ function row(label, control, id) {
   return h('div', { class: 'field-row' }, h('label', { for: id }, label), control);
 }
 
+// MARK: Repository picker
+
+let repoCache = null;
+
+async function loadRepos(force = false) {
+  if (!repoCache || force) repoCache = await invoke('list_repos');
+  return repoCache;
+}
+
+/** Filterable list of the user's repositories. Keeps its own state, so typing never re-renders the dialog. */
+function repoPicker({ include = () => true, onPick }) {
+  const state = { query: '', data: null, error: null, picked: null };
+  const list = h('div', { class: 'repo-list', role: 'listbox' });
+  const note = h('div', { class: 'note' });
+  const search = h('input', { type: 'search', placeholder: 'Repositories filtern …', spellcheck: 'false', autocomplete: 'off',
+    oninput: (e) => { state.query = e.target.value.trim().toLowerCase(); renderList(); } });
+  const badge = (text, cls = '') => h('span', { class: `badge ${cls}` }, text);
+  const renderList = () => {
+    if (state.error) { list.replaceChildren(h('div', { class: 'note error-text' }, state.error)); return; }
+    if (!state.data) { list.replaceChildren(h('div', { class: 'note' }, 'Repositories werden geladen …')); return; }
+    const repos = state.data.repos.filter(include).filter((r) => !state.query
+      || r.fullName.toLowerCase().includes(state.query) || (r.description ?? '').toLowerCase().includes(state.query));
+    note.textContent = [state.data.note, `Lokale Klone werden in ${state.data.workspace} gesucht.`].filter(Boolean).join(' ');
+    list.replaceChildren(...(repos.length ? repos.map((r) => h('button', {
+      type: 'button', role: 'option', class: `repo-row ${state.picked === r.fullName ? 'picked' : ''}`,
+      onclick: () => { state.picked = r.fullName; renderList(); onPick(r); },
+    },
+      h('div', { class: 'repo-head' }, h('strong', null, r.fullName),
+        r.private && badge('privat', 'orange'),
+        r.isWebsite && badge('Website', 'accent'),
+        r.onSite && badge('auf der Seite', 'green'),
+        r.localPath ? badge('lokal', 'green') : badge('nicht lokal')),
+      r.description && h('div', { class: 'muted small' }, r.description))) : [h('div', { class: 'note' }, 'Keine passenden Repositories.')]));
+  };
+  const load = async (force) => {
+    state.error = null;
+    state.data = force ? null : state.data;
+    renderList();
+    try { state.data = await loadRepos(force); } catch (e) { state.error = String(e); }
+    renderList();
+  };
+  const el = h('div', { class: 'repo-picker' },
+    h('div', { class: 'line' }, search, button('Neu laden', () => load(true), { iconName: 'refresh', iconOnly: true })),
+    list, note);
+  load(false);
+  return el;
+}
+
+// MARK: Settings
+
 function settingsDialog() {
   const c = view.config;
   const s = {
-    projectDir: c.projectDir, host: c.sftp.host, port: c.sftp.port || 22, user: c.sftp.user, remoteDir: c.sftp.remoteDir,
+    projectDir: c.projectDir, workspaceDir: c.workspaceDir ?? '', siteRepo: view.siteRepo, cloneRepo: null, cloning: false,
+    showPicker: !c.projectDir,
+    host: c.sftp.host, port: c.sftp.port || 22, user: c.sftp.user, remoteDir: c.sftp.remoteDir,
     auth: c.sftp.auth, keyPath: c.sftp.keyPath, secret: '', message: null, messageKind: 'note', busy: false,
   };
   const input = () => ({
-    projectDir: s.projectDir, host: s.host, port: Number(s.port) || 22, user: s.user, remoteDir: s.remoteDir,
+    projectDir: s.projectDir, workspaceDir: s.workspaceDir, host: s.host, port: Number(s.port) || 22, user: s.user, remoteDir: s.remoteDir,
     auth: s.auth, keyPath: s.keyPath, secret: s.secret,
   });
   const text = (key, props = {}) => h('input', { type: 'text', value: s[key] ?? '', spellcheck: 'false', autocomplete: 'off', ...props,
     oninput: (e) => { s[key] = e.target.value; } });
-  const dlg = openDialog('Einrichtung', (close, render) => {
+  let render = () => {};
+  const picker = repoPicker({
+    include: (r) => !r.archived,
+    onPick: (r) => {
+      s.siteRepo = r.fullName;
+      s.cloneRepo = r.localPath ? null : r.fullName;
+      if (r.localPath) { s.projectDir = r.localPath; s.showPicker = false; }
+      render();
+    },
+  });
+  const dlg = openDialog('Einrichtung', (close, rerender) => {
+    render = rerender;
     const password = s.auth === 'password';
+    const sameProject = c.projectDir === s.projectDir;
     return {
       body: [
         h('h2', null, 'Einrichtung'),
-        h('fieldset', null, h('legend', null, 'Projekt'),
+        h('fieldset', null, h('legend', null, 'Website'),
+          row('Website-Repo', h('div', { class: 'line' },
+            h('span', { class: `spacer ${s.siteRepo ? 'mono' : 'muted'}` }, s.siteRepo ?? 'nicht gewählt'),
+            button(s.showPicker ? 'Liste schließen' : 'Aus Liste wählen …', () => { s.showPicker = !s.showPicker; render(); })), 's-site-repo'),
+          s.showPicker && picker,
+          s.cloneRepo && h('div', { class: 'line' },
+            h('span', { class: 'note spacer' }, `${s.cloneRepo} ist noch nicht lokal vorhanden.`),
+            button(s.cloning ? 'Klone …' : `Nach ${s.workspaceDir || view.workspaceDisplay} klonen`, async () => {
+              s.cloning = true; render();
+              try {
+                s.projectDir = await invoke('clone_repo', { repo: s.cloneRepo, workspaceDir: s.workspaceDir });
+                s.cloneRepo = null; s.showPicker = false; repoCache = null;
+              } catch (error) { s.message = String(error); s.messageKind = 'error-text'; }
+              s.cloning = false; render();
+            }, { cls: 'primary', disabled: s.cloning })),
           row('Projektordner', h('div', { class: 'line' }, text('projectDir', { placeholder: '~/Code/meine-website' }),
             button('Auswählen …', async () => { const p = await call('pick_folder'); if (p) { s.projectDir = p; render(); } })), 's-project'),
-          h('div', { class: `note ${view.siteError && c.projectDir === s.projectDir ? 'error-text' : ''}` },
-            view.site && c.projectDir === s.projectDir ? `.openftpupdater/site.json gefunden: ${view.site.name}, Build „${view.site.build}“, Ausgabe ${view.site.output}`
-              : view.siteError && c.projectDir === s.projectDir ? view.siteError
-                : 'Der Ordner braucht eine Datei .openftpupdater/site.json (siehe README).')),
+          h('div', { class: `note ${view.siteError && sameProject ? 'error-text' : ''}` },
+            view.site && sameProject ? `.openftpupdater/site.json gefunden: ${view.site.name}, Build „${view.site.build}“, Ausgabe ${view.site.output}`
+              : view.siteError && sameProject ? view.siteError
+                : 'Der Projektordner braucht eine Datei .openftpupdater/site.json (siehe README); geprüft wird beim Sichern.'),
+          row('Repo-Ordner', h('div', { class: 'line' }, text('workspaceDir', { placeholder: `${view.workspaceDisplay} (automatisch)` }),
+            button('Auswählen …', async () => { const p = await call('pick_folder'); if (p) { s.workspaceDir = p; repoCache = null; render(); } })), 's-workspace'),
+          h('div', { class: 'note' }, 'Hier sucht die App die lokalen Klone von Website und Produkten und legt neue Klone an.')),
         h('fieldset', null, h('legend', null, 'SFTP-Ziel'),
           row('Server', text('host', { placeholder: 'ssh.strato.de' }), 's-host'),
           row('Port', text('port', { inputmode: 'numeric' }), 's-port'),
@@ -388,7 +473,7 @@ function settingsDialog() {
             s.messageKind = 'error-text';
           }
           s.busy = false; render();
-        }, { cls: 'left', disabled: s.busy }),
+        }, { cls: 'left', disabled: s.busy || s.cloning }),
         button('Abbrechen', close),
         button('Sichern', async () => {
           try {
@@ -397,11 +482,70 @@ function settingsDialog() {
           } catch (error) {
             s.message = String(error); s.messageKind = 'error-text'; render();
           }
-        }, { cls: 'primary', disabled: s.busy }),
+        }, { cls: 'primary', disabled: s.busy || s.cloning }),
       ],
     };
   });
   return dlg;
+}
+
+// MARK: New product
+
+function addProductDialog() {
+  const s = { repo: null, check: null, checking: false, error: null, name: '', localPath: '', instructions: '', cloning: false };
+  let render = () => {};
+  const inspect = async (repo) => {
+    s.repo = repo; s.check = null; s.error = null; s.checking = true;
+    s.name = repo.name; s.localPath = repo.localPath ?? '';
+    render();
+    try {
+      s.check = await invoke('inspect_repo', { repo: repo.fullName });
+      if (s.check.localPath) s.localPath = s.check.localPath;
+    } catch (error) { s.error = String(error); }
+    s.checking = false; render();
+  };
+  const picker = repoPicker({ include: (r) => !r.onSite && !r.isWebsite && !r.archived && !r.fork, onPick: inspect });
+  openDialog('Neues Produkt', (close, rerender) => {
+    render = rerender;
+    const info = s.check?.info;
+    return {
+      body: [
+        h('h2', null, 'Neues Produkt aufnehmen'),
+        h('p', { class: 'note', style: 'margin:0' }, 'Wähle das Repository des Produkts. Claude legt Produktseite (Deutsch und Englisch), Produktkarte, Navigation, Icon, Ablaufgrafik, llms.txt und den Eintrag in site.json an, nach dem Skill des Projekts. Danach baut die App und committet; live geht es erst mit Upload.'),
+        picker,
+        s.checking && h('div', { class: 'note' }, `${s.repo.fullName} wird geprüft …`),
+        s.error && h('div', { class: 'note error-text' }, s.error),
+        info && h('fieldset', null, h('legend', null, info.fullName),
+          h('div', { class: 'facts' },
+            h('span', null, h('strong', null, 'Release: '), s.check.latestTag ?? 'noch keins'),
+            h('span', null, h('strong', null, 'Lizenz: '), info.license ?? 'keine erkannt'),
+            info.private && h('span', { class: 'orange' }, h('strong', null, 'privat: '), 'Besucher können GitHub-Links darauf nicht öffnen')),
+          info.description && h('div', { class: 'muted' }, info.description),
+          !s.check.latestTag && h('div', { class: 'note orange' }, 'Ohne Release gibt es kein Versions-Badge, und der Precheck beobachtet das Produkt erst nach dem ersten Release.'),
+          row('Name', h('input', { type: 'text', value: s.name, spellcheck: 'false', oninput: (e) => { s.name = e.target.value; } }), 'n-name'),
+          row('Lokaler Klon', h('div', { class: 'line' },
+            h('span', { class: `spacer ${s.localPath ? 'mono' : 'muted'}` }, s.localPath || 'nicht vorhanden – Claude liest dann nur über GitHub'),
+            !s.localPath && button(s.cloning ? 'Klone …' : 'Klonen', async () => {
+              s.cloning = true; render();
+              try { s.localPath = await invoke('clone_repo', { repo: info.fullName, workspaceDir: '' }); repoCache = null; } catch (error) { s.error = String(error); }
+              s.cloning = false; render();
+            }, { disabled: s.cloning }),
+            button('Auswählen …', async () => { const p = await call('pick_folder'); if (p) { s.localPath = p; render(); } })), 'n-local'),
+          h('div', { class: 'field-col' },
+            h('label', { for: 'n-instructions' }, 'Anweisung an Claude (optional)'),
+            h('textarea', { id: 'n-instructions', rows: 3, value: s.instructions,
+              placeholder: 'z. B. Kategorie, Zielgruppe, Position in der Produktliste, welche Screenshots aus dem Repo',
+              oninput: (e) => { s.instructions = e.target.value; } }))),
+      ],
+      actions: [
+        button('Abbrechen', close),
+        button('Aufnehmen', async () => {
+          const ok = await call('run_add_product', { input: { repo: info.fullName, name: s.name, localPath: s.localPath, instructions: s.instructions } });
+          if (ok !== null) close();
+        }, { cls: 'primary', disabled: !info || s.checking || s.cloning || !s.name.trim() || !!view.running }),
+      ],
+    };
+  });
 }
 
 function hostKeyDialog() {

@@ -146,7 +146,8 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px;
 .step h2 { margin: 0; font-size: 14px; }
 .step .desc { color: var(--muted); font-size: 12px; min-height: 34px; }
 .step .summary { font-size: 12px; min-height: 18px; }
-.step button.run { justify-content: center; margin-top: auto; }
+.step-actions { display: flex; gap: 6px; margin-top: auto; }
+.step-actions button { flex: 1; justify-content: center; }
 
 .chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
 .chip.idle { background: var(--surface-2); color: var(--muted); border: 1px solid var(--border); }
@@ -249,3 +250,23 @@ legend { font-weight: 600; padding: 0 4px; }
 .empty img { width: 72px; height: 72px; }
 .empty h2 { margin: 0; }
 .note.orange { color: var(--orange); }
+
+.badge { display: inline-flex; align-items: center; padding: 0 7px; border-radius: 999px; font-size: 11px; border: 1px solid var(--border); color: var(--muted); }
+.badge.green { color: var(--green); border-color: color-mix(in srgb, var(--green) 40%, transparent); }
+.badge.orange { color: var(--orange); border-color: color-mix(in srgb, var(--orange) 40%, transparent); }
+.badge.accent { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.repo-picker { display: flex; flex-direction: column; gap: 6px; }
+.repo-picker .line { display: flex; gap: 6px; }
+.repo-picker input[type=search] { flex: 1; }
+.repo-list { max-height: 240px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); }
+.repo-row { display: flex; flex-direction: column; align-items: stretch; gap: 2px; width: 100%; text-align: left; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; background: transparent; padding: 7px 10px; white-space: normal; }
+.repo-row:last-child { border-bottom: 0; }
+.repo-row.picked { background: var(--accent-soft); }
+.repo-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.repo-list > .note { padding: 10px; }
+.field-col { display: flex; flex-direction: column; gap: 4px; }
+.field-col label { color: var(--muted); }
+.line { display: flex; gap: 6px; align-items: center; }
+.dialog-body { overflow-x: hidden; }
+.field-row > :last-child { min-width: 0; }
+.line .spacer { min-width: 0; overflow-wrap: anywhere; }

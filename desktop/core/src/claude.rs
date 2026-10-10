@@ -92,11 +92,63 @@ pub fn prompt(site: &Site, outdated: &[Outdated], instructions: &str) -> String 
     if !instructions.trim().is_empty() {
         text.push_str(&format!("\nZusätzliche Anweisung:\n{}\n", instructions.trim()));
     }
-    text.push_str(&format!(
+    text.push_str(&closing(site, "eine Zeile pro Produkt"));
+    text
+}
+
+fn closing(site: &Site, summary: &str) -> String {
+    format!(
         "\nDer Build ({}) muss am Ende fehlerfrei laufen. Committe und pushe nicht; das übernimmt die App. \
-         Beende deine Antwort mit einer kurzen Zusammenfassung auf Deutsch, eine Zeile pro Produkt, danach offene Punkte.",
+         Beende deine Antwort mit einer kurzen Zusammenfassung auf Deutsch, {summary}, danach offene Punkte.",
         site.build
-    ));
+    )
+}
+
+/// A repository that becomes a new product on the site.
+#[derive(Debug, Clone)]
+pub struct NewProduct {
+    pub repo: String,
+    pub name: String,
+    /// Local clone, as site.json should reference it (e.g. `../app`).
+    pub local_path: Option<String>,
+    pub latest_tag: Option<String>,
+    pub description: Option<String>,
+    pub license: Option<String>,
+    pub private: bool,
+}
+
+pub fn add_product_prompt(site: &Site, product: &NewProduct, instructions: &str) -> String {
+    let mut text = match &site.add_product_skill {
+        Some(skill) => format!("Nutze den Skill {skill}, um ein neues Produkt auf der Website {} aufzunehmen.\n\n", site.name),
+        None => format!(
+            "Nimm ein neues Produkt auf der Website {} auf: Produktseite, alle Produktlisten und einen Eintrag in .openftpupdater/site.json.\n\n",
+            site.name
+        ),
+    };
+    text.push_str(&format!("Produkt: {}\nGitHub-Repository: {}\n", product.name, product.repo));
+    if let Some(description) = &product.description {
+        text.push_str(&format!("Beschreibung auf GitHub: {description}\n"));
+    }
+    text.push_str(&format!("Lizenz laut GitHub: {}\n", product.license.as_deref().unwrap_or("keine erkannt")));
+    if product.private {
+        text.push_str("Achtung: Das Repository ist privat; Besucher können GitHub-Links darauf nicht öffnen.\n");
+    }
+    match &product.local_path {
+        Some(path) => text.push_str(&format!("Lokaler Klon (relativ zum Projekt): {path}. Lies daraus nur über git -C, auf dem Release-Tag.\n")),
+        None => text.push_str("Kein lokaler Klon: Inhalte über gh release view und die GitHub-Seite des Repos ermitteln.\n"),
+    }
+    match &product.latest_tag {
+        Some(tag) => text.push_str(&format!(
+            "Neuestes Release: {} (Tag {tag}). Der Eintrag in site.json bekommt documented \"{}\".\n",
+            tag.trim_start_matches('v'),
+            tag.trim_start_matches('v')
+        )),
+        None => text.push_str("Es gibt noch kein veröffentlichtes Release: kein Versions-Badge, und das Produkt kommt nicht in die products-Liste von site.json.\n"),
+    }
+    if !instructions.trim().is_empty() {
+        text.push_str(&format!("\nZusätzliche Anweisung:\n{}\n", instructions.trim()));
+    }
+    text.push_str(&closing(site, "welche Dateien angelegt oder geändert wurden"));
     text
 }
 

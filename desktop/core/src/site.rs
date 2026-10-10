@@ -7,6 +7,7 @@
 //!   "build": "npm run build",
 //!   "output": "dist",
 //!   "skill": "site-update",
+//!   "addProductSkill": "product-add",
 //!   "failOnOutput": ["[releases]"],
 //!   "products": [{ "id": "app", "name": "App", "repo": "owner/app", "tagPrefix": "v", "documented": "1.2.0" }],
 //!   "claude": { "allowedTools": ["Bash(node scripts/screenshots/*)"] }
@@ -33,6 +34,9 @@ pub struct Site {
     /// Claude Code skill that updates the site; the prompt asks Claude to use it.
     #[serde(default)]
     pub skill: Option<String>,
+    /// Claude Code skill that adds a new product (page, listings, site.json entry).
+    #[serde(default)]
+    pub add_product_skill: Option<String>,
     /// Build output lines that make the build count as failed, e.g. a fallback warning.
     #[serde(default)]
     pub fail_on_output: Vec<String>,

@@ -17,6 +17,21 @@ Four buttons, run one by one or all in a row:
 | **Upload** | Fresh build, `git push`, then only new or changed files via SFTP; files removed from the build are deleted on the server | server, remote repository |
 | **Verify** | Downloads every file of the last upload from the live site and compares SHA-256 with the build | no |
 
+**New product** (second button on the Update tile): pick one of your GitHub repositories, and Claude
+Code adds it to the site with the project's `addProductSkill` (product page, listings, icon, diagram,
+`site.json` entry), then the app builds and commits. It goes live with Upload.
+
+## Choosing repositories
+
+The app lists your GitHub repositories through the signed-in `gh` CLI, private ones included, and marks
+each one: local clone found, already on the site, website repository. Without a `gh` login it falls back
+to the public repositories of the owners already on the site.
+
+- **Website repository** (Settings): pick it from the list; the project folder follows from its local
+  clone. If there is none, the app clones it into the repo folder.
+- **Repo folder** (Settings): where local clones are searched and created; by default the parent of the
+  project folder. Product clones found there are handed to Claude as `localPath`.
+
 ## Requirements
 
 - macOS (developed on macOS 27; the code is cross-platform Tauri, Windows is untested)
@@ -37,6 +52,7 @@ Lives in the website repository and describes how to build and what to watch:
   "build": "npm run build",
   "output": "dist",
   "skill": "site-update",
+  "addProductSkill": "product-add",
   "failOnOutput": ["[releases]"],
   "products": [
     { "id": "app", "name": "App", "repo": "owner/app", "tagPrefix": "v", "documented": "1.2.0", "localPath": "../app" }
@@ -54,6 +70,7 @@ Lives in the website repository and describes how to build and what to watch:
 | `url` | Public URL; the build output root is served there (used by Precheck and Verify) |
 | `build`, `output` | Build command (run with `/bin/sh -c` in the project) and its output folder |
 | `skill` | Claude Code skill in the project (`.claude/skills/<name>/SKILL.md`) that knows how to update the site |
+| `addProductSkill` | Claude Code skill that adds a repository as a new product |
 | `failOnOutput` | Build output lines that fail the build even with exit code 0, e.g. a warning that versions fell back to stale values |
 | `products[].repo` | GitHub repository whose latest release (no pre-releases) is watched |
 | `products[].documented` | Release the site content describes; the skill raises it after updating |

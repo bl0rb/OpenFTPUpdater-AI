@@ -6,7 +6,7 @@ license = "MIT"
 
 [dependencies]
 anyhow = "1"
-base64 = "0.22"
+base64 = "0.23"
 dirs = "6"
 hex = "0.4"
 keyring = { version = "3", features = ["apple-native", "windows-native"] }

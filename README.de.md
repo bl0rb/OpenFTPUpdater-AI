@@ -17,6 +17,10 @@ Vier Schaltflächen, einzeln oder nacheinander:
 | **Upload** | Frischer Build, `git push`, dann nur neue oder geänderte Dateien per SFTP; aus dem Build entfernte Dateien werden auf dem Server gelöscht | Server, Remote-Repository |
 | **Verify** | Lädt jede Datei des letzten Uploads von der Live-Seite und vergleicht SHA-256 mit dem Build | nein |
 
+![Wann passiert was wo: Precheck, Update-Aufgaben in Claude Code mit ihren Skills, Build und Commit, Upload per SFTP, Verify gegen die Live-Seite](docs/diagrams/openftpupdater-flow.de.png)
+
+<sub>Quelle der Grafik: [docs/diagrams/openftpupdater-flow.de.html](docs/diagrams/openftpupdater-flow.de.html) (auch als SVG).</sub>
+
 **Neues Produkt** (zweiter Knopf in der Update-Kachel): eines deiner GitHub-Repositories wählen, Claude
 Code nimmt es mit dem `addProductSkill` des Projekts auf (Produktseite, Listen, Icon, Ablaufgrafik,
 Eintrag in `site.json`), danach baut und committet die App. Live geht es mit Upload.
@@ -51,16 +55,21 @@ Liegt im Website-Repository und beschreibt Build und beobachtete Produkte:
   "url": "https://example.com",
   "build": "npm run build",
   "output": "dist",
-  "skill": "site-update",
   "addProductSkill": "product-add",
+  "tasks": [
+    { "id": "texts", "label": "Texte", "skill": "site-texts", "effort": "high" },
+    { "id": "screenshots", "label": "Screenshots", "skill": "site-screenshots", "effort": "medium" }
+  ],
   "failOnOutput": ["[releases]"],
   "products": [
     { "id": "app", "name": "App", "repo": "owner/app", "tagPrefix": "v", "documented": "1.2.0", "localPath": "../app" }
   ],
   "claude": {
+    "model": "opus",
+    "effort": "high",
+    "maxBudgetUsd": 15,
     "allowedTools": ["Bash(node scripts/screenshots/*)"],
-    "disallowedTools": [],
-    "model": null
+    "disallowedTools": []
   }
 }
 ```
@@ -69,17 +78,41 @@ Liegt im Website-Repository und beschreibt Build und beobachtete Produkte:
 |---|---|
 | `url` | Öffentliche Adresse; dort liegt die Wurzel der Build-Ausgabe (für Precheck und Verify) |
 | `build`, `output` | Build-Befehl (läuft mit `/bin/sh -c` im Projekt) und sein Ausgabeordner |
-| `skill` | Claude-Code-Skill im Projekt (`.claude/skills/<name>/SKILL.md`), der weiß, wie die Seite aktualisiert wird |
+| `tasks` | Update-Aufgaben, in der App als Häkchen wählbar; je Aufgabe `id`, `label`, `skill` (`.claude/skills/<name>/SKILL.md`), optional `description`, `default` (gewählt, solange nicht abgewählt; Standard `true`), `model` und `effort` |
+| `skill` | Einzelner Update-Skill für Seiten ohne `tasks` |
 | `addProductSkill` | Claude-Code-Skill, der ein Repository als neues Produkt aufnimmt |
 | `failOnOutput` | Zeilen der Build-Ausgabe, die den Build trotz Exit-Code 0 scheitern lassen, z. B. eine Warnung, dass Versionen auf alte Werte zurückgefallen sind |
 | `products[].repo` | GitHub-Repository, dessen neuestes Release (ohne Pre-Releases) beobachtet wird |
 | `products[].documented` | Release, den die Inhalte beschreiben; der Skill setzt ihn nach dem Update hoch |
 | `products[].tagPrefix` | `v` bei Tags wie `v1.2.0`, leer bei `1.2.0` |
 | `products[].localPath` | Lokaler Klon relativ zum Projekt; Claude liest ihn über `git -C`, ändert ihn nie |
+| `claude.model`, `claude.effort` | Standard-Modell-Alias (`opus`, `sonnet`, `haiku`, `fable`) und Effort (`low` … `max`) für jeden Claude-Lauf |
+| `claude.maxBudgetUsd` | Kostengrenze je Claude-Lauf (`--max-budget-usd`) |
 | `claude.allowedTools` | Ergänzt die Freigabeliste der App (siehe unten) |
 
 Das eigentliche Wissen steckt im Skill: wo die Produkttexte stehen, wie Screenshots entstehen,
 welche Aussagen nie gemacht werden dürfen. Claude liest ihn bei jedem Update.
+
+## Update-Aufgaben und Modelle
+
+Jede gewählte Aufgabe läuft als eigene Claude-Code-Sitzung, in der Reihenfolge von `tasks`, mit
+eigenem Skill, Modell und Effort; die App committet am Ende einmal. Kleine Aufgaben-Skills halten
+jeden Lauf fokussiert, und Regeln für alle (Quellen, Stil, was nie behauptet werden darf) gehören in
+die `CLAUDE.md` des Projekts, die Claude Code bei jedem Lauf liest. In der App hat jede Aufgabe ein
+Häkchen und eine Modellwahl; beides bleibt gespeichert.
+
+Das Modell ist ein Claude-Code-Alias, der immer auf das neueste Modell seiner Familie zeigt:
+
+| Alias | Modell (Okt. 2026) | API-Preis je 1 Mio. Token (Eingabe / Ausgabe) | Einsatz |
+|---|---|---|---|
+| `opus` | Claude Opus 5.5 | 4 $ / 20 $ | Standard: öffentliche Produktaussagen in zwei Sprachen brauchen Genauigkeit |
+| `sonnet` | Claude Sonnet 5.5 | 2 $ / 10 $ | Einen Versuch wert bei mechanischen Aufgaben wie Screenshots und Grafiken |
+| `haiku` | Claude Haiku 4.5 | 1 $ / 5 $ | Kleine, klar per Skript vorgegebene Aufgaben |
+| `fable` | Claude Fable 5.1 | 10 $ / 50 $ | Nur wenn Opus nicht reicht, etwa bei einer neuen Produktseite |
+
+Effort ist der erste Hebel: `high` für Texte und Konsistenzprüfung, `medium` für Screenshots und
+Grafiken. Bei Anmeldung mit einem Claude-Abo sind die angezeigten Kosten ein rechnerischer API-Preis;
+die Läufe zählen stattdessen gegen die Nutzungsgrenzen des Abos.
 
 ## Was Claude darf
 

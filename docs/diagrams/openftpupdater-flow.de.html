@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenFTPUpdater-AI: Ablauf eines Website-Updates</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Inter', system-ui, sans-serif; background: #f8fafc; color: #0f172a; padding: 3rem 2rem; }
+    .frame { max-width: 1280px; margin: 0 auto; }
+    .eyebrow { font-family: 'Geist Mono', ui-monospace, monospace; font-size: 0.66rem; font-weight: 500; letter-spacing: 0.18em; text-transform: uppercase; color: #475569; margin-bottom: 0.5rem; }
+    h1 { font-family: 'Instrument Serif', serif; font-size: 1.75rem; font-weight: 400; letter-spacing: -0.02em; line-height: 1.15; margin-bottom: 1.5rem; }
+    .diagram { overflow-x: auto; }
+    svg { width: 100%; min-width: 960px; display: block; }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <p class="eyebrow">Swimlane · OpenFTPUpdater-AI</p>
+    <h1>Wann passiert was wo</h1>
+    <div class="diagram">
+<svg viewBox="0 0 1280 672" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="openftpupdater-flow-de-title openftpupdater-flow-de-desc">
+  <title id="openftpupdater-flow-de-title">OpenFTPUpdater-AI: Ablauf eines Website-Updates</title>
+  <desc id="openftpupdater-flow-de-desc">Swimlane-Diagramm: Precheck vergleicht Releases, bei neuen Releases arbeitet Claude Code die gewählten Aufgaben-Skills ab, die App baut und committet, pusht und lädt geänderte Dateien per SFTP hoch und prüft die Live-Seite; ein neues Produkt nimmt Claude mit dem Skill product-add auf.</desc>
+  <defs>
+    <marker id="openftpupdater-flow-de-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#475569"/></marker>
+    <marker id="openftpupdater-flow-de-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f46e5"/></marker>
+    <marker id="openftpupdater-flow-de-arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker>
+  </defs>
+  <rect width="100%" height="100%" fill="#f8fafc"/>
+  <g>
+    <line x1="32" y1="32" x2="1248" y2="32" stroke="rgba(15,23,42,0.22)" stroke-width="1"/>
+    <line x1="32" y1="128" x2="1248" y2="128" stroke="rgba(15,23,42,0.10)" stroke-width="1"/>
+    <line x1="32" y1="272" x2="1248" y2="272" stroke="rgba(15,23,42,0.10)" stroke-width="1"/>
+    <line x1="32" y1="384" x2="1248" y2="384" stroke="rgba(15,23,42,0.10)" stroke-width="1"/>
+    <line x1="32" y1="480" x2="1248" y2="480" stroke="rgba(15,23,42,0.10)" stroke-width="1"/>
+    <line x1="32" y1="576" x2="1248" y2="576" stroke="rgba(15,23,42,0.22)" stroke-width="1"/>
+    <line x1="160" y1="32" x2="160" y2="576" stroke="rgba(15,23,42,0.22)" stroke-width="1"/>
+    <text x="44" y="78" fill="#475569" font-size="9" font-weight="500" font-family="'Geist Mono', monospace" letter-spacing="0.18em">PRODUKT-REPOS</text>
+    <text x="44" y="92" fill="#64748b" font-size="8" font-family="'Geist Mono', monospace">GitHub · lokale Klone</text>
+    <text x="44" y="198" fill="#475569" font-size="9" font-weight="500" font-family="'Geist Mono', monospace" letter-spacing="0.18em">CLAUDE CODE</text>
+    <text x="44" y="212" fill="#64748b" font-size="8" font-family="'Geist Mono', monospace">claude -p · Skills</text>
+    <text x="44" y="326" fill="#475569" font-size="9" font-weight="500" font-family="'Geist Mono', monospace" letter-spacing="0.18em">APP</text>
+    <text x="44" y="340" fill="#64748b" font-size="8" font-family="'Geist Mono', monospace">OpenFTPUpdater-AI</text>
+    <text x="44" y="430" fill="#475569" font-size="9" font-weight="500" font-family="'Geist Mono', monospace" letter-spacing="0.18em">WEBSITE-REPO</text>
+    <text x="44" y="444" fill="#64748b" font-size="8" font-family="'Geist Mono', monospace">git · GitHub</text>
+    <text x="44" y="526" fill="#475569" font-size="9" font-weight="500" font-family="'Geist Mono', monospace" letter-spacing="0.18em">WEBSPACE</text>
+    <text x="44" y="540" fill="#64748b" font-size="8" font-family="'Geist Mono', monospace">SFTP · HTTPS</text>
+    <path d="M 424,80 H 272 Q 264,80 264,88 V 300" fill="none" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#openftpupdater-flow-de-arrow-link)"/>
+    <line x1="524" y1="104" x2="524" y2="144" stroke="#475569" stroke-width="1.2" marker-end="url(#openftpupdater-flow-de-arrow)"/>
+    <path d="M 344,316 H 468 Q 476,316 476,308 V 256" fill="none" stroke="#4f46e5" stroke-width="1.4" marker-end="url(#openftpupdater-flow-de-arrow-accent)"/>
+    <path d="M 572,256 V 332 Q 572,340 580,340 H 664" fill="none" stroke="#475569" stroke-width="1.2" marker-end="url(#openftpupdater-flow-de-arrow)"/>
+    <line x1="744" y1="224" x2="744" y2="300" stroke="#475569" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#openftpupdater-flow-de-arrow)"/>
+    <line x1="824" y1="328" x2="888" y2="328" stroke="#475569" stroke-width="1.2" marker-end="url(#openftpupdater-flow-de-arrow)"/>
+    <path d="M 912,356 V 424 Q 912,432 904,432 H 824" fill="none" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#openftpupdater-flow-de-arrow-link)"/>
+    <line x1="1008" y1="356" x2="1008" y2="504" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#openftpupdater-flow-de-arrow-link)"/>
+    <line x1="1168" y1="504" x2="1168" y2="356" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#openftpupdater-flow-de-arrow-link)"/>
+    <rect x="272" y="192" width="92" height="12" rx="2" fill="#f8fafc"/><text x="276" y="201" fill="#2e5aa8" font-size="8" font-family="'Geist Mono', monospace" text-anchor="start" letter-spacing="0.06em">RELEASE-STAND</text>
+    <rect x="532" y="112" width="48" height="12" rx="2" fill="#f8fafc"/><text x="536" y="121" fill="#64748b" font-size="8" font-family="'Geist Mono', monospace" text-anchor="start" letter-spacing="0.06em">AM TAG</text>
+    <rect x="366" y="296" width="92" height="12" rx="2" fill="#f8fafc"/><text x="412" y="305" fill="#4f46e5" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">NEUE RELEASES</text>
+    <rect x="584" y="320" width="72" height="12" rx="2" fill="#f8fafc"/><text x="620" y="329" fill="#64748b" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">ÄNDERUNGEN</text>
+    <rect x="844" y="412" width="36" height="12" rx="2" fill="#f8fafc"/><text x="862" y="421" fill="#2e5aa8" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">PUSH</text>
+    <rect x="1016" y="424" width="36" height="12" rx="2" fill="#f8fafc"/><text x="1020" y="433" fill="#2e5aa8" font-size="8" font-family="'Geist Mono', monospace" text-anchor="start" letter-spacing="0.06em">SFTP</text>
+    <rect x="1176" y="424" width="56" height="12" rx="2" fill="#f8fafc"/><text x="1180" y="433" fill="#2e5aa8" font-size="8" font-family="'Geist Mono', monospace" text-anchor="start" letter-spacing="0.06em">SHA-256</text>
+    <rect x="424" y="56" width="320" height="48" rx="6" fill="#f8fafc"/>
+    <rect x="424" y="56" width="320" height="48" rx="6" fill="rgba(15,23,42,0.03)" stroke="rgba(15,23,42,0.30)" stroke-width="1"/>
+    <text x="584" y="84" fill="#0f172a" font-size="12" font-weight="600" font-family="'Inter', sans-serif" text-anchor="middle">Produkt-Repos</text>
+    <text x="584" y="98" fill="#475569" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">Releases · README · Doku am Tag</text>
+    <rect x="424" y="144" width="200" height="112" rx="6" fill="#f8fafc"/>
+    <rect x="424" y="144" width="200" height="112" rx="6" fill="rgba(79,70,229,0.08)" stroke="#4f46e5" stroke-width="1"/>
+    <rect x="432" y="150" width="56" height="12" rx="2" fill="transparent" stroke="#4f46e5" stroke-opacity="0.45" stroke-width="0.8"/><text x="460" y="159" fill="#4f46e5" fill-opacity="0.85" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">SCHRITT 2</text>
+    <text x="524" y="180" fill="#0f172a" font-size="12" font-weight="600" font-family="'Inter', sans-serif" text-anchor="middle">Update-Aufgaben</text>
+    <text x="440" y="200" fill="#475569" font-size="9" font-family="'Geist Mono', monospace" text-anchor="start">1 Texte · site-texts</text>
+    <text x="440" y="214" fill="#475569" font-size="9" font-family="'Geist Mono', monospace" text-anchor="start">2 Screenshots · site-screenshots</text>
+    <text x="440" y="228" fill="#475569" font-size="9" font-family="'Geist Mono', monospace" text-anchor="start">3 Ablaufgrafiken · site-diagrams</text>
+    <text x="440" y="242" fill="#475569" font-size="9" font-family="'Geist Mono', monospace" text-anchor="start">4 Konsistenz · site-check</text>
+    <rect x="664" y="168" width="160" height="56" rx="6" fill="#f8fafc"/>
+    <rect x="664" y="168" width="160" height="56" rx="6" fill="rgba(15,23,42,0.02)" stroke="rgba(15,23,42,0.20)" stroke-width="1" stroke-dasharray="4,3"/>
+    <rect x="672" y="174" width="48" height="12" rx="2" fill="transparent" stroke="#475569" stroke-opacity="0.45" stroke-width="0.8"/><text x="696" y="183" fill="#475569" fill-opacity="0.85" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">OPTIONAL</text>
+    <text x="744" y="204" fill="#0f172a" font-size="12" font-weight="600" font-family="'Inter', sans-serif" text-anchor="middle">Neues Produkt</text>
+    <text x="744" y="218" fill="#475569" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">product-add</text>
+    <rect x="184" y="300" width="160" height="56" rx="6" fill="#f8fafc"/>
+    <rect x="184" y="300" width="160" height="56" rx="6" fill="#ffffff" stroke="#0f172a" stroke-width="1"/>
+    <rect x="192" y="306" width="56" height="12" rx="2" fill="transparent" stroke="#0f172a" stroke-opacity="0.45" stroke-width="0.8"/><text x="220" y="315" fill="#0f172a" fill-opacity="0.85" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">SCHRITT 1</text>
+    <text x="264" y="336" fill="#0f172a" font-size="12" font-weight="600" font-family="'Inter', sans-serif" text-anchor="middle">Precheck</text>
+    <text x="264" y="350" fill="#475569" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">liest nur, ändert nichts</text>
+    <rect x="664" y="300" width="160" height="56" rx="6" fill="#f8fafc"/>
+    <rect x="664" y="300" width="160" height="56" rx="6" fill="#ffffff" stroke="#0f172a" stroke-width="1"/>
+    <rect x="672" y="306" width="56" height="12" rx="2" fill="transparent" stroke="#0f172a" stroke-opacity="0.45" stroke-width="0.8"/><text x="700" y="315" fill="#0f172a" fill-opacity="0.85" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">SCHRITT 2</text>
+    <text x="744" y="336" fill="#0f172a" font-size="12" font-weight="600" font-family="'Inter', sans-serif" text-anchor="middle">Build &amp; Commit</text>
+    <text x="744" y="350" fill="#475569" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">npm run build · git commit</text>
+    <rect x="888" y="300" width="160" height="56" rx="6" fill="#f8fafc"/>
+    <rect x="888" y="300" width="160" height="56" rx="6" fill="#ffffff" stroke="#0f172a" stroke-width="1"/>
+    <rect x="896" y="306" width="56" height="12" rx="2" fill="transparent" stroke="#0f172a" stroke-opacity="0.45" stroke-width="0.8"/><text x="924" y="315" fill="#0f172a" fill-opacity="0.85" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">SCHRITT 3</text>
+    <text x="968" y="336" fill="#0f172a" font-size="12" font-weight="600" font-family="'Inter', sans-serif" text-anchor="middle">Upload</text>
+    <text x="968" y="350" fill="#475569" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">Build · Push · SFTP-Diff</text>
+    <rect x="1096" y="300" width="144" height="56" rx="6" fill="#f8fafc"/>
+    <rect x="1096" y="300" width="144" height="56" rx="6" fill="#ffffff" stroke="#0f172a" stroke-width="1"/>
+    <rect x="1104" y="306" width="56" height="12" rx="2" fill="transparent" stroke="#0f172a" stroke-opacity="0.45" stroke-width="0.8"/><text x="1132" y="315" fill="#0f172a" fill-opacity="0.85" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">SCHRITT 4</text>
+    <text x="1168" y="336" fill="#0f172a" font-size="12" font-weight="600" font-family="'Inter', sans-serif" text-anchor="middle">Verify</text>
+    <text x="1168" y="350" fill="#475569" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">SHA-256 je Datei</text>
+    <rect x="664" y="408" width="160" height="48" rx="6" fill="#f8fafc"/>
+    <rect x="664" y="408" width="160" height="48" rx="6" fill="rgba(15,23,42,0.03)" stroke="rgba(15,23,42,0.30)" stroke-width="1"/>
+    <text x="744" y="436" fill="#0f172a" font-size="12" font-weight="600" font-family="'Inter', sans-serif" text-anchor="middle">GitHub</text>
+    <text x="744" y="450" fill="#475569" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">origin/main</text>
+    <rect x="920" y="504" width="320" height="48" rx="6" fill="#f8fafc"/>
+    <rect x="920" y="504" width="320" height="48" rx="6" fill="rgba(15,23,42,0.03)" stroke="rgba(15,23,42,0.30)" stroke-width="1"/>
+    <text x="1080" y="532" fill="#0f172a" font-size="12" font-weight="600" font-family="'Inter', sans-serif" text-anchor="middle">Webspace</text>
+    <text x="1080" y="546" fill="#475569" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">SFTP-Zielordner → Live-Seite</text>
+    <text x="1236" y="60" fill="#0f172a" font-size="14" font-style="italic" font-family="'Instrument Serif', serif" text-anchor="end">Jede Aufgabe ist ein eigener Claude-Lauf</text>
+    <text x="1236" y="80" fill="#0f172a" font-size="14" font-style="italic" font-family="'Instrument Serif', serif" text-anchor="end">mit eigenem Modell und Effort. Committen,</text>
+    <text x="1236" y="100" fill="#0f172a" font-size="14" font-style="italic" font-family="'Instrument Serif', serif" text-anchor="end">pushen und hochladen darf nur die App.</text>
+    <path d="M 1012,100 Q 780,112 624,176" fill="none" stroke="rgba(15,23,42,0.40)" stroke-width="1" stroke-dasharray="4,3"/>
+    <circle cx="624" cy="176" r="2" fill="#0f172a"/>
+    <text x="184" y="520" fill="#0f172a" font-size="14" font-style="italic" font-family="'Instrument Serif', serif">Gelöscht wird nur, was die App selbst hochgeladen hat;</text>
+    <text x="184" y="540" fill="#0f172a" font-size="14" font-style="italic" font-family="'Instrument Serif', serif">hochgeladen wird nur ein committeter, sauberer Stand.</text>
+    <path d="M 472,532 Q 700,520 920,528" fill="none" stroke="rgba(15,23,42,0.40)" stroke-width="1" stroke-dasharray="4,3"/>
+    <circle cx="920" cy="528" r="2" fill="#0f172a"/>
+    <line x1="32" y1="608" x2="1248" y2="608" stroke="rgba(15,23,42,0.10)" stroke-width="0.8"/>
+    <text x="32" y="636" fill="#475569" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.14em">LEGENDE</text>
+    <rect x="112" y="628" width="20" height="12" rx="2" fill="rgba(79,70,229,0.08)" stroke="#4f46e5" stroke-width="1"/>
+    <text x="144" y="637" fill="#475569" font-size="9" font-family="'Inter', sans-serif">Claude-Aufgaben (Fokus)</text>
+    <rect x="316" y="628" width="20" height="12" rx="2" fill="rgba(15,23,42,0.02)" stroke="rgba(15,23,42,0.20)" stroke-width="1" stroke-dasharray="4,3"/>
+    <text x="348" y="637" fill="#475569" font-size="9" font-family="'Inter', sans-serif">optionaler Einstieg</text>
+    <rect x="496" y="628" width="20" height="12" rx="2" fill="#ffffff" stroke="#0f172a" stroke-width="1"/>
+    <text x="528" y="637" fill="#475569" font-size="9" font-family="'Inter', sans-serif">Schritt der App</text>
+    <rect x="652" y="628" width="20" height="12" rx="2" fill="rgba(15,23,42,0.03)" stroke="rgba(15,23,42,0.30)" stroke-width="1"/>
+    <text x="684" y="637" fill="#475569" font-size="9" font-family="'Inter', sans-serif">GitHub / Server</text>
+    <line x1="808" y1="634" x2="832" y2="634" stroke="#4f46e5" stroke-width="1.4" marker-end="url(#openftpupdater-flow-de-arrow-accent)"/>
+    <text x="840" y="637" fill="#475569" font-size="9" font-family="'Inter', sans-serif">Auslöser</text>
+    <line x1="920" y1="634" x2="944" y2="634" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#openftpupdater-flow-de-arrow-link)"/>
+    <text x="952" y="637" fill="#475569" font-size="9" font-family="'Inter', sans-serif">extern (API, SFTP, HTTPS)</text>
+  </g>
+</svg>
+    </div>
+  </div>
+</body>
+</html>

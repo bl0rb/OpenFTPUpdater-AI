@@ -64,6 +64,16 @@ impl SftpConfig {
     }
 }
 
+/// The user's choice for one update task.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TaskChoice {
+    /// `None` = the task's default from site.json.
+    pub enabled: Option<bool>,
+    /// Model alias; empty = the task's or site's default.
+    pub model: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Config {
@@ -72,6 +82,8 @@ pub struct Config {
     /// Folder that holds the local clones (website and products); empty = the project's parent.
     pub workspace_dir: String,
     pub sftp: SftpConfig,
+    /// Task id → choice.
+    pub tasks: std::collections::BTreeMap<String, TaskChoice>,
 }
 
 impl Config {

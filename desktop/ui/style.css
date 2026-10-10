@@ -270,3 +270,12 @@ legend { font-weight: 600; padding: 0 4px; }
 .dialog-body { overflow-x: hidden; }
 .field-row > :last-child { min-width: 0; }
 .line .spacer { min-width: 0; overflow-wrap: anywhere; }
+
+.task-panel { display: flex; flex-direction: column; gap: 8px; }
+.task-panel-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.tasks { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 8px; }
+.task { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); opacity: 0.6; }
+.task.on { opacity: 1; border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.task-head { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.task-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 2px; }
+.model-select { font-size: 12px; padding: 2px 6px; }

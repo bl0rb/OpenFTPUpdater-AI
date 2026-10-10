@@ -1,14 +1,14 @@
 //! The four steps. Each runs on its own thread, writes log lines as it goes and ends with a
 //! status and a one-line summary.
 
-use crate::{changed, load_site, with_model, Check, LogLine, Status, Step, UploadResult};
+use crate::{changed, load_site, with_model, Check, ClaudeRun, LogLine, Status, Step, UploadResult};
 use anyhow::{anyhow, bail, Context, Result};
 use openftpupdater_core::claude::{self, Event, Outdated};
 use openftpupdater_core::config::{AuthKind, Config};
 use openftpupdater_core::paths::expand_home;
 use openftpupdater_core::sftp::{self, ConnectError, Connection};
 use openftpupdater_core::shell::{self, Runner};
-use openftpupdater_core::site::Site;
+use openftpupdater_core::site::{Site, Task};
 use openftpupdater_core::{git, github, localrepo, manifest, secrets, verify};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -137,6 +137,53 @@ pub struct NewProductInput {
     /// Absolute path of the local clone, or empty.
     pub local_path: String,
     pub instructions: String,
+    /// Model alias; empty = the site's default.
+    #[serde(default)]
+    pub model: String,
+}
+
+/// One update task with the user's choice applied.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedTask {
+    #[serde(skip)]
+    pub task: Task,
+    pub id: String,
+    pub label: String,
+    pub description: Option<String>,
+    pub skill: String,
+    pub enabled: bool,
+    /// The user's model choice; empty = default.
+    pub chosen_model: String,
+    /// Model without a choice: task, else site; `None` = Claude Code's default.
+    pub default_model: Option<String>,
+    /// What the run uses.
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+pub fn resolve_tasks(site: &Site, config: &Config) -> Vec<ResolvedTask> {
+    site.update_tasks()
+        .into_iter()
+        .map(|task| {
+            let choice = config.tasks.get(&task.id).cloned().unwrap_or_default();
+            let default_model = task.model.clone().or_else(|| site.claude.model.clone());
+            let model = Some(choice.model.clone()).filter(|m| !m.is_empty()).or_else(|| default_model.clone());
+            let effort = task.effort.clone().or_else(|| site.claude.effort.clone());
+            ResolvedTask {
+                id: task.id.clone(),
+                label: task.label.clone(),
+                description: task.description.clone(),
+                skill: task.skill.clone(),
+                enabled: choice.enabled.unwrap_or(task.default),
+                chosen_model: choice.model,
+                default_model,
+                model,
+                effort,
+                task,
+            }
+        })
+        .collect()
 }
 
 /// Runs the jobs one after another on a background thread; stops at the first error.
@@ -418,12 +465,16 @@ fn prepare_tree(ctx: &Ctx, project: &std::path::Path) -> Result<()> {
 }
 
 /// Runs Claude Code with the prompt and fails unless it finished successfully.
-fn run_claude(ctx: &Ctx, site: &Site, project: &std::path::Path, prompt: &str) -> Result<claude::Outcome> {
-    ctx.cmd("$ claude -p … (Prompt unten)");
+fn run_claude(ctx: &Ctx, site: &Site, project: &std::path::Path, prompt: &str, label: &str, model: Option<&str>, effort: Option<&str>) -> Result<claude::Outcome> {
+    ctx.cmd(format!(
+        "$ claude -p … --model {} --effort {} (Prompt unten)",
+        model.unwrap_or("Standard"),
+        effort.unwrap_or("Standard")
+    ));
     for line in prompt.lines() {
         ctx.log("claude", format!("  {line}"));
     }
-    let args = claude::args(site, prompt);
+    let args = claude::args(site, prompt, model, effort);
     let mut outcome = None;
     let code = shell::stream("claude", &args, project, &github_env(), &ctx.runner, |line| match claude::parse(line) {
         Event::Line(text) => ctx.log("claude", text),
@@ -431,7 +482,9 @@ fn run_claude(ctx: &Ctx, site: &Site, project: &std::path::Path, prompt: &str) -
         Event::Ignore => {}
     })?;
     let outcome = outcome.ok_or_else(|| anyhow!("Claude Code hat ohne Ergebnis beendet (Exit-Code {code})"))?;
-    with_model(&ctx.app, |m| m.claude = Some(outcome.clone()));
+    with_model(&ctx.app, |m| {
+        m.claude_runs.push(ClaudeRun { task: label.to_owned(), model: model.unwrap_or("Standard").to_owned(), outcome: outcome.clone() })
+    });
     changed(&ctx.app);
     for denial in &outcome.denials {
         ctx.warn(format!("Nicht freigegeben: {denial}"));
@@ -446,7 +499,7 @@ fn run_claude(ctx: &Ctx, site: &Site, project: &std::path::Path, prompt: &str) -
 }
 
 /// Builds and commits what Claude changed; `None` if nothing changed.
-fn build_and_commit(ctx: &Ctx, site: &Site, project: &std::path::Path, subject: &str, outcome: &claude::Outcome) -> Result<Option<(String, usize)>> {
+fn build_and_commit(ctx: &Ctx, site: &Site, project: &std::path::Path, subject: &str, summary: &str) -> Result<Option<(String, usize)>> {
     let changes = git::changes(project)?;
     if changes.is_empty() {
         return Ok(None);
@@ -456,7 +509,7 @@ fn build_and_commit(ctx: &Ctx, site: &Site, project: &std::path::Path, subject: 
         ctx.log("out", format!("  {line}"));
     }
     build(ctx, site, project).context("Die Änderungen bleiben uncommittet im Arbeitsverzeichnis")?;
-    let body = format!("{}\n\nCo-Authored-By: Claude <noreply@anthropic.com>", outcome.text);
+    let body = format!("{summary}\n\nCo-Authored-By: Claude <noreply@anthropic.com>");
     ctx.cmd(format!("$ git commit -m \"{subject}\""));
     let sha = git::commit_all(project, subject, &body)?;
     ctx.ok(format!("Commit {sha}"));
@@ -474,9 +527,20 @@ fn update(ctx: &Ctx, instructions: &str) -> Result<(Status, String)> {
     if outdated.is_empty() && instructions.trim().is_empty() {
         return Ok((Status::Ok, "Nichts zu tun: alle Produkte aktuell".into()));
     }
-    ctx.runner.check()?;
+    let tasks: Vec<ResolvedTask> = resolve_tasks(&site, &ctx.config()).into_iter().filter(|t| t.enabled).collect();
+    if tasks.is_empty() {
+        bail!("Keine Aufgabe ausgewählt");
+    }
+    with_model(&ctx.app, |m| m.claude_runs.clear());
 
-    let outcome = run_claude(ctx, &site, &project, &claude::prompt(&site, &outdated, instructions))?;
+    let mut summaries = Vec::new();
+    for (i, task) in tasks.iter().enumerate() {
+        ctx.runner.check()?;
+        ctx.log("cmd", format!("━━ Aufgabe {}/{}: {} ━━", i + 1, tasks.len(), task.task.label));
+        let prompt = claude::task_prompt(&site, &task.task, &outdated, instructions);
+        let outcome = run_claude(ctx, &site, &project, &prompt, &task.task.label, task.model.as_deref(), task.effort.as_deref())?;
+        summaries.push(if tasks.len() > 1 { format!("{}:\n{}", task.task.label, outcome.text) } else { outcome.text });
+    }
     let subject = if outdated.is_empty() {
         let first = instructions.lines().next().unwrap_or("").trim();
         format!("Website-Update: {}", first.chars().take(60).collect::<String>())
@@ -486,7 +550,7 @@ fn update(ctx: &Ctx, instructions: &str) -> Result<(Status, String)> {
             outdated.iter().map(|o| format!("{} {}", o.name, o.latest_version())).collect::<Vec<_>>().join(", ")
         )
     };
-    match build_and_commit(ctx, &site, &project, &subject, &outcome)? {
+    match build_and_commit(ctx, &site, &project, &subject, &summaries.join("\n\n"))? {
         Some((sha, files)) => {
             with_model(&ctx.app, |m| m.outdated = None);
             Ok((Status::Ok, format!("Commit {sha}: {files} Dateien geändert")))
@@ -543,7 +607,11 @@ fn add_product(ctx: &Ctx, input: &NewProductInput) -> Result<(Status, String)> {
         license: info.license.clone(),
         private: info.private,
     };
-    let outcome = run_claude(ctx, &site, &project, &claude::add_product_prompt(&site, &product, &input.instructions))?;
+    with_model(&ctx.app, |m| m.claude_runs.clear());
+    let model = Some(input.model.trim().to_owned()).filter(|m| !m.is_empty()).or_else(|| site.claude.model.clone());
+    let effort = site.claude.effort.clone().unwrap_or_else(|| "high".into());
+    let prompt = claude::add_product_prompt(&site, &product, &input.instructions);
+    let outcome = run_claude(ctx, &site, &project, &prompt, "Neues Produkt", model.as_deref(), Some(&effort))?;
 
     if latest_tag.is_some() {
         let listed = ctx.site().map(|s| s.products.iter().any(|p| p.repo.eq_ignore_ascii_case(&info.full_name))).unwrap_or(false);
@@ -551,7 +619,7 @@ fn add_product(ctx: &Ctx, input: &NewProductInput) -> Result<(Status, String)> {
             ctx.warn("site.json enthält das Produkt nicht: Precheck und Update beobachten seine Releases nicht.");
         }
     }
-    match build_and_commit(ctx, &site, &project, &format!("Neues Produkt: {name}"), &outcome)? {
+    match build_and_commit(ctx, &site, &project, &format!("Neues Produkt: {name}"), &outcome.text)? {
         Some((sha, files)) => Ok((Status::Ok, format!("Commit {sha}: {name} aufgenommen, {files} Dateien"))),
         None => Ok((Status::Warning, "Claude hat keine Dateien geändert".into())),
     }

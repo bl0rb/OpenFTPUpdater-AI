@@ -9,6 +9,16 @@ const STEPS = [
   { id: 'verify', title: 'Verify', desc: 'Vergleicht die Live-Seite Datei für Datei mit dem hochgeladenen Build.' },
 ];
 const STATUS_TEXT = { idle: 'Bereit', running: 'Läuft', ok: 'OK', warning: 'Hinweis', error: 'Fehler' };
+// Claude Code model aliases; each follows the newest model of its family.
+const MODELS = [['opus', 'Opus'], ['sonnet', 'Sonnet'], ['haiku', 'Haiku'], ['fable', 'Fable']];
+const modelName = (alias) => MODELS.find(([id]) => id === alias)?.[1] ?? alias ?? 'Claude-Code-Standard';
+
+/** Model dropdown; the first entry stands for the default that applies without a choice. */
+function modelSelect(value, fallback, onChange, id) {
+  return h('select', { id, class: 'model-select', title: 'Modell für diesen Claude-Lauf', onchange: (e) => onChange(e.target.value) },
+    h('option', { value: '', selected: !value }, `Standard (${modelName(fallback)})`),
+    MODELS.map(([alias, name]) => h('option', { value: alias, selected: value === alias }, name)));
+}
 
 let view = null;
 let selected = 'precheck';
@@ -135,6 +145,7 @@ function renderMain() {
     // Built once, so the instruction field keeps focus and the log keeps its scroll position.
     skeleton = {
       steps: h('section', { class: 'steps' }),
+      tasks: h('div', { class: 'tasks' }),
       instructions: h('textarea', { id: 'instructions', rows: 2, placeholder: 'z. B. „Ergänze im nudgit-Abschnitt den Hinweis auf die Chrome-Erweiterung“ – leer lassen für ein reines Release-Update' }),
       runAll: null,
       detailHead: h('div', { class: 'detail-head' }),
@@ -145,6 +156,10 @@ function renderMain() {
       { iconName: 'forward', title: 'Precheck, Update (wenn nötig), Upload und Verify nacheinander; stoppt beim ersten Fehler' });
     main.replaceChildren(
       skeleton.steps,
+      h('section', { class: 'task-panel' },
+        h('div', { class: 'task-panel-head' }, h('strong', null, 'Aufgaben beim Update'),
+          h('span', { class: 'muted small' }, 'Jede Aufgabe läuft als eigener Claude-Lauf mit ihrem Skill, in dieser Reihenfolge.')),
+        skeleton.tasks),
       h('div', { class: 'run-row' },
         h('div', { class: 'field' }, h('label', { for: 'instructions' }, 'Zusätzliche Anweisung an Claude (optional, gilt für Update)'), skeleton.instructions),
         skeleton.runAll),
@@ -154,7 +169,23 @@ function renderMain() {
   skeleton.runAll.disabled = !!view.running || !view.site;
   skeleton.instructions.disabled = !!view.running;
   renderSteps();
+  renderTasks();
   renderDetail();
+}
+
+function renderTasks() {
+  skeleton.tasks.replaceChildren(...view.tasks.map((t) => {
+    const save = (enabled, model) => call('set_task', { id: t.id, enabled, model });
+    return h('div', { class: `task ${t.enabled ? 'on' : ''}` },
+      h('label', { class: 'task-head' },
+        h('input', { type: 'checkbox', checked: t.enabled, disabled: !!view.running, onchange: (e) => save(e.target.checked, t.chosenModel) }),
+        h('strong', null, t.label)),
+      t.description && h('div', { class: 'muted small' }, t.description),
+      h('div', { class: 'task-meta' },
+        modelSelect(t.chosenModel, t.defaultModel, (model) => save(t.enabled, model), `task-model-${t.id}`),
+        t.effort && h('span', { class: 'badge', title: 'Effort aus site.json' }, `Effort ${t.effort}`),
+        t.skill && h('span', { class: 'badge mono', title: 'Skill im Projekt' }, t.skill)));
+  }));
 }
 
 function ready(step) {
@@ -237,18 +268,19 @@ function precheckResult() {
 }
 
 function updateResult() {
-  const c = view.claude;
   const site = view.site;
   const items = [];
   if (site) {
     items.push(h('div', { class: 'facts' },
-      h('span', null, h('strong', null, 'Skill: '), site.skill ?? '—'),
+      h('span', null, h('strong', null, 'Aufgaben: '), view.tasks.filter((t) => t.enabled).map((t) => t.label).join(', ') || 'keine gewählt'),
       h('span', null, h('strong', null, 'Build: '), site.build),
       h('span', null, h('strong', null, 'Produkte: '), site.products.map((p) => `${p.name} ${p.documented}`).join(', ') || '—')));
   }
-  if (c) {
+  for (const run of view.claudeRuns) {
+    const c = run.outcome;
     items.push(h('div', { class: 'facts' },
-      h('span', null, h('strong', null, 'Ergebnis: '), c.success ? 'abgeschlossen' : 'nicht abgeschlossen'),
+      h('span', null, h('strong', null, `${run.task}: `), c.success ? 'abgeschlossen' : 'nicht abgeschlossen'),
+      h('span', null, h('strong', null, 'Modell: '), modelName(run.model === 'Standard' ? null : run.model)),
       c.turns != null && h('span', null, h('strong', null, 'Runden: '), c.turns),
       c.costUsd != null && h('span', null, h('strong', null, 'Kosten: '), `${c.costUsd.toFixed(2)} USD`),
       c.denials.length > 0 && h('span', { class: 'orange' }, h('strong', null, 'Nicht freigegeben: '), c.denials.join(' · '))));
@@ -492,7 +524,7 @@ function settingsDialog() {
 // MARK: New product
 
 function addProductDialog() {
-  const s = { repo: null, check: null, checking: false, error: null, name: '', localPath: '', instructions: '', cloning: false };
+  const s = { repo: null, check: null, checking: false, error: null, name: '', localPath: '', instructions: '', cloning: false, model: '' };
   let render = () => {};
   const inspect = async (repo) => {
     s.repo = repo; s.check = null; s.error = null; s.checking = true;
@@ -531,6 +563,7 @@ function addProductDialog() {
               s.cloning = false; render();
             }, { disabled: s.cloning }),
             button('Auswählen …', async () => { const p = await call('pick_folder'); if (p) { s.localPath = p; render(); } })), 'n-local'),
+          row('Modell', modelSelect(s.model, view.site?.claude?.model, (model) => { s.model = model; }, 'n-model'), 'n-model'),
           h('div', { class: 'field-col' },
             h('label', { for: 'n-instructions' }, 'Anweisung an Claude (optional)'),
             h('textarea', { id: 'n-instructions', rows: 3, value: s.instructions,
@@ -540,7 +573,7 @@ function addProductDialog() {
       actions: [
         button('Abbrechen', close),
         button('Aufnehmen', async () => {
-          const ok = await call('run_add_product', { input: { repo: info.fullName, name: s.name, localPath: s.localPath, instructions: s.instructions } });
+          const ok = await call('run_add_product', { input: { repo: info.fullName, name: s.name, localPath: s.localPath, instructions: s.instructions, model: s.model } });
           if (ok !== null) close();
         }, { cls: 'primary', disabled: !info || s.checking || s.cloning || !s.name.trim() || !!view.running }),
       ],

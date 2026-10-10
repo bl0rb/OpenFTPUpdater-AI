@@ -17,6 +17,10 @@ Four buttons, run one by one or all in a row:
 | **Upload** | Fresh build, `git push`, then only new or changed files via SFTP; files removed from the build are deleted on the server | server, remote repository |
 | **Verify** | Downloads every file of the last upload from the live site and compares SHA-256 with the build | no |
 
+![What happens when and where: Precheck, update tasks run by Claude Code with their skills, build and commit, upload via SFTP, verify against the live site](docs/diagrams/openftpupdater-flow.png)
+
+<sub>Diagram source: [docs/diagrams/openftpupdater-flow.html](docs/diagrams/openftpupdater-flow.html) (also as SVG).</sub>
+
 **New product** (second button on the Update tile): pick one of your GitHub repositories, and Claude
 Code adds it to the site with the project's `addProductSkill` (product page, listings, icon, diagram,
 `site.json` entry), then the app builds and commits. It goes live with Upload.
@@ -51,16 +55,21 @@ Lives in the website repository and describes how to build and what to watch:
   "url": "https://example.com",
   "build": "npm run build",
   "output": "dist",
-  "skill": "site-update",
   "addProductSkill": "product-add",
+  "tasks": [
+    { "id": "texts", "label": "Texts", "skill": "site-texts", "effort": "high" },
+    { "id": "screenshots", "label": "Screenshots", "skill": "site-screenshots", "effort": "medium" }
+  ],
   "failOnOutput": ["[releases]"],
   "products": [
     { "id": "app", "name": "App", "repo": "owner/app", "tagPrefix": "v", "documented": "1.2.0", "localPath": "../app" }
   ],
   "claude": {
+    "model": "opus",
+    "effort": "high",
+    "maxBudgetUsd": 15,
     "allowedTools": ["Bash(node scripts/screenshots/*)"],
-    "disallowedTools": [],
-    "model": null
+    "disallowedTools": []
   }
 }
 ```
@@ -69,17 +78,41 @@ Lives in the website repository and describes how to build and what to watch:
 |---|---|
 | `url` | Public URL; the build output root is served there (used by Precheck and Verify) |
 | `build`, `output` | Build command (run with `/bin/sh -c` in the project) and its output folder |
-| `skill` | Claude Code skill in the project (`.claude/skills/<name>/SKILL.md`) that knows how to update the site |
+| `tasks` | Update tasks, offered as checkboxes in the app; each has `id`, `label`, `skill` (`.claude/skills/<name>/SKILL.md`), optional `description`, `default` (selected unless turned off, default `true`), `model` and `effort` |
+| `skill` | Single update skill for sites without `tasks` |
 | `addProductSkill` | Claude Code skill that adds a repository as a new product |
 | `failOnOutput` | Build output lines that fail the build even with exit code 0, e.g. a warning that versions fell back to stale values |
 | `products[].repo` | GitHub repository whose latest release (no pre-releases) is watched |
 | `products[].documented` | Release the site content describes; the skill raises it after updating |
 | `products[].tagPrefix` | `v` for tags like `v1.2.0`, empty for `1.2.0` |
 | `products[].localPath` | Local clone, relative to the project; Claude reads it through `git -C`, never edits it |
+| `claude.model`, `claude.effort` | Default model alias (`opus`, `sonnet`, `haiku`, `fable`) and effort (`low` … `max`) for every Claude run |
+| `claude.maxBudgetUsd` | Cost limit per Claude run (`--max-budget-usd`) |
 | `claude.allowedTools` | Added to the app's allowlist (see below) |
 
 The skill is the actual know-how: where the product texts live, how screenshots are made,
 which statements must never be made. Claude reads it on every update.
+
+## Update tasks and models
+
+Each selected task runs as its own Claude Code session, in the order of `tasks`, with its own skill,
+model and effort; the app commits once at the end. Small task skills keep each run focused, and rules
+that apply to all of them (sources, style, what must never be claimed) belong in the project's
+`CLAUDE.md`, which Claude Code reads on every run. In the app, every task has a checkbox and a model
+choice; both are remembered.
+
+The model is a Claude Code alias that always points to the newest model of its family:
+
+| Alias | Model (Oct 2026) | API price per 1M tokens (input / output) | Use |
+|---|---|---|---|
+| `opus` | Claude Opus 5.5 | $4 / $20 | Default: public product claims in two languages need accuracy |
+| `sonnet` | Claude Sonnet 5.5 | $2 / $10 | Worth trying for mechanical tasks such as screenshots and diagrams |
+| `haiku` | Claude Haiku 4.5 | $1 / $5 | Small, clearly scripted tasks |
+| `fable` | Claude Fable 5.1 | $10 / $50 | Only if Opus results fall short, e.g. for a new product page |
+
+Effort is the first lever: `high` for texts and the consistency check, `medium` for screenshots and
+diagrams. With a Claude subscription login, the cost shown per run is a notional API price; the runs
+count against the subscription's usage limits instead.
 
 ## What Claude may do
 

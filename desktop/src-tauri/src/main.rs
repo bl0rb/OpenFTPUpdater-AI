@@ -81,13 +81,22 @@ pub struct Model {
     pub checks: Vec<Check>,
     /// `None` until a precheck has looked at the releases.
     pub outdated: Option<Vec<Outdated>>,
-    pub claude: Option<Outcome>,
+    /// Claude runs of the last Update or New product, one per task.
+    pub claude_runs: Vec<ClaudeRun>,
     pub upload: Option<UploadResult>,
     pub verify: Option<Report>,
     /// Fingerprint the user has to confirm before the first SFTP connection.
     pub pending_host_key: Option<String>,
     pub notice: Option<String>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeRun {
+    pub task: String,
+    pub model: String,
+    pub outcome: Outcome,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -112,7 +121,7 @@ impl Model {
             runner: None,
             checks: Vec::new(),
             outdated: None,
-            claude: None,
+            claude_runs: Vec::new(),
             upload: None,
             verify: None,
             pending_host_key: None,
@@ -174,7 +183,8 @@ struct View {
     running: Option<Step>,
     checks: Vec<Check>,
     outdated: Option<Vec<Outdated>>,
-    claude: Option<Outcome>,
+    tasks: Vec<steps::ResolvedTask>,
+    claude_runs: Vec<ClaudeRun>,
     upload: Option<UploadResult>,
     verify: Option<Report>,
     last_upload: Option<LastUpload>,
@@ -199,7 +209,8 @@ fn get_view(app: AppHandle) -> View {
         running: m.running,
         checks: m.checks.clone(),
         outdated: m.outdated.clone(),
-        claude: m.claude.clone(),
+        tasks: m.site.as_ref().map(|site| steps::resolve_tasks(site, &m.config)).unwrap_or_default(),
+        claude_runs: m.claude_runs.clone(),
         upload: m.upload.clone(),
         verify: m.verify.clone(),
         last_upload: manifest::load_last(&m.config.sftp).map(|last| LastUpload {
@@ -349,6 +360,20 @@ fn open_url(app: AppHandle, url: String) -> Result<(), String> {
         return Err("Nur http(s)-Adressen".into());
     }
     app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
+}
+
+/// Turns an update task on or off and sets its model (empty = default).
+#[tauri::command]
+fn set_task(app: AppHandle, id: String, enabled: bool, model: String) -> Result<(), String> {
+    let next = with_model(&app, |m| {
+        let choice = m.config.tasks.entry(id).or_default();
+        choice.enabled = Some(enabled);
+        choice.model = model.trim().to_owned();
+        m.config.clone()
+    });
+    config::save(&next).map_err(|e| format!("{e:#}"))?;
+    changed(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -518,6 +543,7 @@ fn main() {
             run_step,
             run_all,
             run_add_product,
+            set_task,
             list_repos,
             clone_repo,
             inspect_repo,

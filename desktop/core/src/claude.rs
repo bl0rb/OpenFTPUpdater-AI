@@ -5,7 +5,7 @@
 //! and run the build. Everything else is denied without a prompt, because `-p` cannot ask.
 //! Committing, pushing and uploading are the app's job, never Claude's.
 
-use crate::site::{Product, Site};
+use crate::site::{Product, Site, Task};
 use serde_json::Value;
 
 /// Tools Claude may use without asking; site.json `claude.allowedTools` adds to it.
@@ -75,12 +75,12 @@ impl Outdated {
     }
 }
 
-pub fn prompt(site: &Site, outdated: &[Outdated], instructions: &str) -> String {
-    let mut text = String::new();
-    match &site.skill {
-        Some(skill) => text.push_str(&format!("Nutze den Skill {skill}, um die Website {} zu aktualisieren.\n\n", site.name)),
-        None => text.push_str(&format!("Aktualisiere die Website {} in diesem Repository.\n\n", site.name)),
-    }
+pub fn task_prompt(site: &Site, task: &Task, outdated: &[Outdated], instructions: &str) -> String {
+    let mut text = if task.skill.is_empty() {
+        format!("Aktualisiere die Website {} in diesem Repository.\n\n", site.name)
+    } else {
+        format!("Aufgabe „{}“ für die Website {}: Nutze den Skill {}.\n\n", task.label, site.name, task.skill)
+    };
     if outdated.is_empty() {
         text.push_str("Kein Produkt hat ein neues Release.\n");
     } else {
@@ -91,6 +91,9 @@ pub fn prompt(site: &Site, outdated: &[Outdated], instructions: &str) -> String 
     }
     if !instructions.trim().is_empty() {
         text.push_str(&format!("\nZusätzliche Anweisung:\n{}\n", instructions.trim()));
+    }
+    if !site.tasks.is_empty() {
+        text.push_str("\nBearbeite nur diese Aufgabe; die anderen Aufgaben laufen in eigenen Durchgängen.\n");
     }
     text.push_str(&closing(site, "eine Zeile pro Produkt"));
     text
@@ -152,7 +155,8 @@ pub fn add_product_prompt(site: &Site, product: &NewProduct, instructions: &str)
     text
 }
 
-pub fn args(site: &Site, prompt: &str) -> Vec<String> {
+/// `model` and `effort` already resolved (task → site → Claude Code default).
+pub fn args(site: &Site, prompt: &str, model: Option<&str>, effort: Option<&str>) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-p".into(),
         prompt.into(),
@@ -162,8 +166,14 @@ pub fn args(site: &Site, prompt: &str) -> Vec<String> {
         "--permission-mode".into(),
         "acceptEdits".into(),
     ];
-    if let Some(model) = &site.claude.model {
-        args.extend(["--model".into(), model.clone()]);
+    if let Some(model) = model.filter(|m| !m.is_empty()) {
+        args.extend(["--model".into(), model.to_owned()]);
+    }
+    if let Some(effort) = effort.filter(|e| !e.is_empty()) {
+        args.extend(["--effort".into(), effort.to_owned()]);
+    }
+    if let Some(budget) = site.claude.max_budget_usd {
+        args.extend(["--max-budget-usd".into(), budget.to_string()]);
     }
     args.push("--allowedTools".into());
     args.extend(DEFAULT_ALLOWED.iter().map(|s| s.to_string()));

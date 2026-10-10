@@ -6,11 +6,11 @@
 //!   "url": "https://example.com",
 //!   "build": "npm run build",
 //!   "output": "dist",
-//!   "skill": "site-update",
 //!   "addProductSkill": "product-add",
+//!   "tasks": [{ "id": "texts", "label": "Texte", "skill": "site-texts", "effort": "high" }],
 //!   "failOnOutput": ["[releases]"],
 //!   "products": [{ "id": "app", "name": "App", "repo": "owner/app", "tagPrefix": "v", "documented": "1.2.0" }],
-//!   "claude": { "allowedTools": ["Bash(node scripts/screenshots/*)"] }
+//!   "claude": { "model": "opus", "effort": "high", "maxBudgetUsd": 15, "allowedTools": ["Bash(node scripts/screenshots/*)"] }
 //! }
 //! ```
 
@@ -31,9 +31,12 @@ pub struct Site {
     pub build: String,
     /// Build output folder, relative to the project.
     pub output: String,
-    /// Claude Code skill that updates the site; the prompt asks Claude to use it.
+    /// Single update skill, for sites without `tasks`.
     #[serde(default)]
     pub skill: Option<String>,
+    /// Selectable update tasks, each backed by its own skill and run as its own Claude session.
+    #[serde(default)]
+    pub tasks: Vec<Task>,
     /// Claude Code skill that adds a new product (page, listings, site.json entry).
     #[serde(default)]
     pub add_product_skill: Option<String>,
@@ -63,6 +66,31 @@ pub struct Product {
     pub local_path: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Task {
+    pub id: String,
+    pub label: String,
+    /// Skill that does the task; empty means a plain prompt.
+    #[serde(default)]
+    pub skill: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Selected unless the user turns it off.
+    #[serde(default = "selected_by_default")]
+    pub default: bool,
+    /// Model alias or id (`opus`, `sonnet`, `fable`, `haiku`, …); falls back to `claude.model`.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// `low` … `max`; falls back to `claude.effort`.
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
+fn selected_by_default() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaudeSettings {
@@ -73,9 +101,30 @@ pub struct ClaudeSettings {
     pub disallowed_tools: Vec<String>,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// Cost limit per Claude run (`--max-budget-usd`).
+    #[serde(default)]
+    pub max_budget_usd: Option<f64>,
 }
 
 impl Site {
+    /// The update tasks; a site with only `skill` gets one task for it.
+    pub fn update_tasks(&self) -> Vec<Task> {
+        if !self.tasks.is_empty() {
+            return self.tasks.clone();
+        }
+        vec![Task {
+            id: "update".into(),
+            label: "Update".into(),
+            skill: self.skill.clone().unwrap_or_default(),
+            description: None,
+            default: true,
+            model: None,
+            effort: None,
+        }]
+    }
+
     pub fn output_dir(&self, project: &Path) -> PathBuf {
         project.join(&self.output)
     }

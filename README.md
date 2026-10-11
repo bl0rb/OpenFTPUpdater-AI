@@ -59,7 +59,7 @@ not signed, so macOS blocks it on the first open; allow it once under **System S
 Security → Open Anyway**, or install it in the terminal:
 
 ```bash
-sudo installer -pkg OpenFTPUpdater-AI-0.1.2.pkg -target /
+sudo installer -pkg OpenFTPUpdater-AI-0.1.3.pkg -target /
 ```
 
 The same package can be distributed through Microsoft Intune as a "macOS app (PKG)"; then turn off

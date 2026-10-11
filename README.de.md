@@ -77,7 +77,7 @@ SHA-256-Prüfsumme, die GitHub für das Release-Asset veröffentlicht (ohne Prü
 ## Voraussetzungen
 
 - macOS (entwickelt unter macOS 27; der Code ist plattformübergreifendes Tauri, Windows ist ungetestet)
-- Auf dem Rechner: `git`, Node.js/npm (für den Build der Seite), angemeldetes [Claude Code](https://claude.com/claude-code), empfohlen die angemeldete GitHub-CLI `gh` (hebt das GitHub-API-Limit von 60 auf 5000 Anfragen pro Stunde; das Token geht auch als `GITHUB_TOKEN` an den Build)
+- Auf dem Rechner: `git`, Node.js/npm (für den Build der Seite), angemeldetes [Claude Code](https://claude.com/claude-code), empfohlen die angemeldete GitHub-CLI `gh` (hebt das GitHub-API-Limit von 60 auf 5000 Anfragen pro Stunde; das Token geht auch als `GITHUB_TOKEN` an den Build, den die App ausführt, aber nie an Claude Code)
 - Ein SFTP-Zugang zum Webspace
 
 Die App startet aus dem Finder und fragt einmal die Login-Shell nach dem `PATH`, damit
@@ -162,7 +162,7 @@ Headless-Lauf kann nicht nachfragen, alles außerhalb der Freigabeliste wird abg
 - `gh release list|view`, `grep`, `ls`, der Build-Befehl des Projekts
 - was `claude.allowedTools` in site.json ergänzt
 
-Immer abgelehnt: `git push`, `git commit`, `git reset`, `git checkout`, `rm -rf`. Committen,
+Immer abgelehnt: `git push`, `git commit`, `git reset`, `git checkout`, `rm`. Committen,
 pushen und hochladen macht die App. Abgelehnte Aufrufe stehen nach dem Lauf in der Übersicht,
 damit die Freigabeliste bewusst erweitert werden kann.
 

@@ -528,11 +528,19 @@ fn run_claude(ctx: &Ctx, site: &Site, project: &std::path::Path, prompt: &str, l
     }
     let args = claude::args(site, prompt, model, effort);
     let mut outcome = None;
-    let code = shell::stream("claude", &args, project, &github_env(), &ctx.runner, |line| match claude::parse(line) {
+    // No GITHUB_TOKEN here: whatever Claude runs (the build included) must not get the user's token.
+    let code = shell::stream("claude", &args, project, &HashMap::new(), &ctx.runner, |line| match claude::parse(line) {
         Event::Line(text) => ctx.log("claude", text),
         Event::Done(done) => outcome = Some(done),
         Event::Ignore => {}
     })?;
+    if !openftpupdater_core::site::load(project).is_ok_and(|after| site.same_permissions(&after)) {
+        bail!(
+            "Claude hat build, output oder claude.allowedTools/disallowedTools in {} geändert oder die Datei unbrauchbar gemacht. \
+             Bitte die Änderung prüfen; sie wird weder gebaut noch hochgeladen.",
+            openftpupdater_core::site::SITE_FILE
+        );
+    }
     let outcome = outcome.ok_or_else(|| anyhow!("Claude Code hat ohne Ergebnis beendet (Exit-Code {code})"))?;
     with_model(&ctx.app, |m| {
         m.claude_runs.push(ClaudeRun { task: label.to_owned(), model: model.unwrap_or("Standard").to_owned(), outcome: outcome.clone() })

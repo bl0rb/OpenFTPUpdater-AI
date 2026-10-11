@@ -21,10 +21,33 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: desktop/update-key.pub
+          sparse-checkout-cone-mode: false
+
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: dist
           merge-multiple: true
+
+      # The app installs an update only with a valid signature by the key in desktop/update-key.pub.
+      # The trusted comment names the file, so an old signed package cannot pass as a newer one.
+      - name: Sign installer
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          if [ -z "$MINISIGN_SECRET_KEY" ]; then
+            echo "::error::Secret MINISIGN_SECRET_KEY is missing; refusing to publish an unsigned installer"
+            exit 1
+          fi
+          sudo apt-get install -y -qq minisign
+          KEY="$RUNNER_TEMP/update.key"
+          (umask 077 && printf '%s\n' "$MINISIGN_SECRET_KEY" > "$KEY")
+          f="dist/OpenFTPUpdater-AI-$GITHUB_REF_NAME.pkg"
+          minisign -S -s "$KEY" -m "$f" -t "$(basename "$f")"
+          minisign -V -p desktop/update-key.pub -m "$f"
+          rm -f "$KEY"
 
       - name: Publish release
         env:
@@ -34,4 +57,5 @@ jobs:
           PRE=()
           [[ "$GITHUB_REF_NAME" == *-* ]] && PRE=(--prerelease)
           gh release create "$GITHUB_REF_NAME" "dist/OpenFTPUpdater-AI-$GITHUB_REF_NAME.pkg" "dist/OpenFTPUpdater-AI-$GITHUB_REF_NAME.pkg.sha256" \
+            "dist/OpenFTPUpdater-AI-$GITHUB_REF_NAME.pkg.minisig" \
             --title "OpenFTPUpdater-AI $GITHUB_REF_NAME" --generate-notes "${PRE[@]}"

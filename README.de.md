@@ -70,8 +70,10 @@ Einrichtung „Beim Start nach neuen Versionen suchen“ abschalten.
 Wie bei ClaudeKeyZapper: Beim Start fragt die App einmal still das neueste Release dieses Repositories
 auf GitHub ab; manuell geht es über **Nach Updates suchen** in der Fußzeile. Ist eine neuere Version da,
 erscheint oben ein Banner. **Installieren** lädt die `.pkg` von `github.com`, prüft sie gegen die
-SHA-256-Prüfsumme, die GitHub für das Release-Asset veröffentlicht (ohne Prüfsumme wird abgelehnt), und
-öffnet den macOS-Installer; danach die App neu starten. Beta-Versionen (`X.Y.Z-beta.N`) gibt es nur über
+SHA-256-Prüfsumme, die GitHub für das Release-Asset veröffentlicht, und gegen die minisign-Signatur des
+Releases (`<Paket>.minisig`, geprüft mit dem in die App eingebauten öffentlichen Schlüssel,
+[desktop/update-key.pub](desktop/update-key.pub)) und öffnet den macOS-Installer; ohne Prüfsumme oder
+gültige Signatur wird abgelehnt; danach die App neu starten. Beta-Versionen (`X.Y.Z-beta.N`) gibt es nur über
 **Beta-Version suchen** oder wenn schon eine Beta installiert ist. Entwicklungs-Builds prüfen nicht.
 
 ## Voraussetzungen
@@ -115,7 +117,7 @@ Liegt im Website-Repository und beschreibt Build und beobachtete Produkte:
 | Feld | Bedeutung |
 |---|---|
 | `url` | Öffentliche Adresse; dort liegt die Wurzel der Build-Ausgabe (für Precheck und Verify) |
-| `build`, `output` | Build-Befehl (läuft mit `/bin/sh -c` im Projekt) und sein Ausgabeordner |
+| `build`, `output` | Build-Befehl (läuft mit `/bin/sh -c` im Projekt) und sein Ausgabeordner (ein Unterordner des Projekts: kein absoluter Pfad, kein `..`) |
 | `tasks` | Update-Aufgaben, in der App als Häkchen wählbar; je Aufgabe `id`, `label`, `skill` (`.claude/skills/<name>/SKILL.md`), optional `description`, `default` (gewählt, solange nicht abgewählt; Standard `true`), `model` und `effort` |
 | `skill` | Einzelner Update-Skill für Seiten ohne `tasks` |
 | `addProductSkill` | Claude-Code-Skill, der ein Repository als neues Produkt aufnimmt |
@@ -126,7 +128,7 @@ Liegt im Website-Repository und beschreibt Build und beobachtete Produkte:
 | `products[].localPath` | Lokaler Klon relativ zum Projekt; Claude liest ihn über `git -C`, ändert ihn nie |
 | `claude.model`, `claude.effort` | Standard-Modell-Alias (`opus`, `sonnet`, `haiku`, `fable`) und Effort (`low` … `max`) für jeden Claude-Lauf |
 | `claude.maxBudgetUsd` | Kostengrenze je Claude-Lauf (`--max-budget-usd`) |
-| `claude.allowedTools` | Ergänzt die Freigabeliste der App (siehe unten) |
+| `claude.allowedTools` | Ergänzt die Freigabeliste der App (siehe unten); CLI-Flags und ein uneingeschränktes `Bash` werden abgelehnt |
 
 Das eigentliche Wissen steckt im Skill: wo die Produkttexte stehen, wie Screenshots entstehen,
 welche Aussagen nie gemacht werden dürfen. Claude liest ihn bei jedem Update.
@@ -165,6 +167,11 @@ Headless-Lauf kann nicht nachfragen, alles außerhalb der Freigabeliste wird abg
 Immer abgelehnt: `git push`, `git commit`, `git reset`, `git checkout`, `rm`. Committen,
 pushen und hochladen macht die App. Abgelehnte Aufrufe stehen nach dem Lauf in der Übersicht,
 damit die Freigabeliste bewusst erweitert werden kann.
+
+Claude bekommt kein `GITHUB_TOKEN`. Nach jedem Lauf lädt die App `site.json` neu und stoppt vor Build,
+Commit und Upload, wenn sich `build`, `output` oder `claude.allowedTools`/`disallowedTools` geändert
+haben; ein Lauf kann seine eigenen Rechte so nicht erweitern. Neue Produkte anlegen ist davon nicht
+betroffen.
 
 ## Upload
 
@@ -213,8 +220,10 @@ desktop/ui         Web-Oberfläche (HTML, JS, CSS), ohne Build-Schritt
 - `.github/workflows/ci.yml`: Jeder Pull Request und jeder Push auf `main` führt die Tests des Kerns und
   den Release-Build aus (`build.yml`, macOS 15, Apple Silicon).
 - `.github/workflows/release.yml`: Ein Tag `X.Y.Z` (oder `X.Y.Z-beta.N` für ein Pre-Release) baut mit
-  dieser Version und veröffentlicht ein GitHub-Release mit `.pkg` und Prüfsumme. Veröffentlicht wird erst
-  nach grünen Tests und grünem Build.
+  dieser Version, signiert die `.pkg` mit minisign und veröffentlicht ein GitHub-Release mit `.pkg`,
+  Prüfsumme und `.minisig`. Veröffentlicht wird erst nach grünen Tests und grünem Build, und nur mit dem
+  Repository-Secret `MINISIGN_SECRET_KEY` (der geheime Schlüssel zu `desktop/update-key.pub`); ohne
+  Secret bricht der Workflow ab, statt einen unsignierten Installer zu veröffentlichen.
 - Alle Actions sind auf Commit-SHAs gepinnt (Version als Kommentar); Dependabot schlägt jeden Montag
   Updates für Actions, Crates und die Tauri-CLI vor.
 

@@ -22,6 +22,8 @@ function modelSelect(value, fallback, onChange, id) {
 
 let view = null;
 let selected = 'precheck';
+// Tab of the detail panel: 'result' or 'log'.
+let detailTab = 'result';
 let lastRunning = null;
 let hostKeyOpen = false;
 
@@ -91,9 +93,13 @@ async function refresh() {
 function setView(next) {
   view = next;
   if (view.running && view.running !== lastRunning) {
-    // Follow the step that just started.
+    // Follow the step that just started and watch its log.
     selected = view.running;
+    detailTab = 'log';
     clearLog();
+  } else if (!view.running && lastRunning === selected && hasResult(selected)) {
+    // The step is done: show what came out of it. Without a result the log has the details.
+    detailTab = 'result';
   }
   lastRunning = view.running;
   renderToolbar();
@@ -181,8 +187,10 @@ function renderMain() {
       instructions: h('textarea', { id: 'instructions', rows: 1, placeholder: 'z. B. „Ergänze im nudgit-Abschnitt den Hinweis auf die Chrome-Erweiterung“ – leer lassen für ein reines Release-Update' }),
       runAll: null,
       detailHead: h('div', { class: 'detail-head' }),
-      detailResult: h('div', { class: 'detail-result' }),
-      log: h('pre', { class: 'log', id: 'log' }),
+      tabResult: h('button', { type: 'button', class: 'tab', role: 'tab', id: 'tab-result', 'aria-controls': 'detail-result', onclick: () => showTab('result') }, 'Ergebnis'),
+      tabLog: h('button', { type: 'button', class: 'tab', role: 'tab', id: 'tab-log', 'aria-controls': 'log', onclick: () => showTab('log') }),
+      detailResult: h('div', { class: 'detail-result', id: 'detail-result', role: 'tabpanel', 'aria-labelledby': 'tab-result' }),
+      log: h('pre', { class: 'log', id: 'log', role: 'tabpanel', 'aria-labelledby': 'tab-log', tabindex: '0' }),
     };
     skeleton.runAll = button('Alle Schritte', () => call('run_all', { instructions: skeleton.instructions.value }),
       { iconName: 'forward', title: 'Precheck, Update (wenn nötig), Upload und Verify nacheinander; stoppt beim ersten Fehler' });
@@ -203,7 +211,9 @@ function renderMain() {
             h('span', { class: 'muted small' }, 'je ein Claude-Lauf, in dieser Reihenfolge')),
           skeleton.tasks,
           h('div', { class: 'field-col' }, h('label', { for: 'instructions' }, 'Zusätzliche Anweisung an Claude (optional)'), skeleton.instructions))),
-      h('section', { class: 'detail' }, skeleton.detailHead, skeleton.detailResult, skeleton.log));
+      h('section', { class: 'detail' }, skeleton.detailHead,
+        h('div', { class: 'tabs', role: 'tablist', 'aria-label': 'Ansicht', onkeydown: tabKey }, skeleton.tabResult, skeleton.tabLog),
+        skeleton.detailResult, skeleton.log));
     loadLog(selected);
   }
   skeleton.runAll.disabled = !!view.running || !view.site;
@@ -228,17 +238,20 @@ function renderProducts() {
   skeleton.productAll.checked = products.length > 0 && on === products.length;
   skeleton.productAll.indeterminate = on > 0 && on < products.length;
   skeleton.productAll.disabled = !!view.running || !products.length;
-  skeleton.products.replaceChildren(...(products.length ? products.map((p) => h('div', { class: `row ${p.enabled ? 'on' : ''}` },
+  skeleton.products.replaceChildren(...(products.length ? [
+    h('div', { class: 'row head' }, h('span', null, 'Produkt · Repository'), h('span'), h('span', null, 'Stand')),
+    ...products.map((p) => h('div', { class: `row ${p.enabled ? 'on' : ''}` },
     h('label', { class: 'row-name' },
       h('input', { type: 'checkbox', checked: p.enabled, disabled: !!view.running, onchange: (e) => call('set_products', { ids: [p.id], enabled: e.target.checked }) }),
       h('span', { class: 'row-text inline' }, h('strong', null, p.name), h('span', { class: 'muted small mono ellipsis', title: p.repo }, p.repo))),
     p.local ? h('span') : h('span', { class: 'badge orange', title: p.localPath ? `Kein lokaler Klon unter ${p.localPath}` : 'Kein localPath in site.json' }, 'kein Klon'),
-    versionBadge(p)))
+    versionBadge(p)))]
     : [h('div', { class: 'note empty-list' }, 'Noch keine Produkte: „Neues Produkt …“ in der Kopfleiste nimmt eins auf.')]));
 }
 
 function renderTasks() {
-  skeleton.tasks.replaceChildren(...view.tasks.map((t) => {
+  const head = h('div', { class: 'row head' }, h('span', null, 'Aufgabe'), h('span', null, 'Skill'), h('span', null, 'Effort'), h('span', null, 'Modell'));
+  skeleton.tasks.replaceChildren(head, ...view.tasks.map((t) => {
     const save = (enabled, model) => call('set_task', { id: t.id, enabled, model });
     // One row per task; the columns line up across rows (CSS subgrid).
     return h('div', { class: `row ${t.enabled ? 'on' : ''}` },
@@ -298,20 +311,64 @@ function renderSteps() {
 function selectStep(step) {
   if (selected === step) return;
   selected = step;
+  if (view.running === step) detailTab = 'log';
   renderSteps();
   renderDetail();
   loadLog(step);
 }
+
+const RESULTS = { precheck: precheckResult, update: updateResult, upload: uploadResult, verify: verifyResult };
+const HAS_RESULT = {
+  precheck: () => view.checks.length > 0,
+  update: () => view.claudeRuns.length > 0,
+  upload: () => !!view.upload,
+  verify: () => !!view.verify,
+};
+const hasResult = (step) => HAS_RESULT[step]();
 
 function renderDetail() {
   const step = STEPS.find((s) => s.id === selected);
   const state = view.steps[selected];
   skeleton.detailHead.replaceChildren(
     h('h3', null, step.title), statusChip(state.status, state.stale),
+    state.summary && !state.stale && h('span', { class: `detail-summary ${state.status === 'error' ? 'red' : state.status === 'warning' ? 'orange' : ''}` }, state.summary),
+    h('span', { class: 'spacer' }),
     h('span', { class: 'muted small' }, state.finishedAt ? `zuletzt ${formatTime(state.finishedAt)}` : ''));
-  skeleton.detailResult.replaceChildren(...({
-    precheck: precheckResult, update: updateResult, upload: uploadResult, verify: verifyResult,
-  }[selected]()).filter(Boolean));
+  const empty = !hasResult(selected) && (state.status === 'idle'
+    ? h('div', { class: 'note' }, 'Dieser Schritt ist noch nicht gelaufen.')
+    : h('div', { class: 'note' }, view.running === selected ? 'Läuft gerade. Die Ausgabe steht im ' : 'Kein Ergebnis. Was passiert ist, steht im ',
+      button('Log', () => showTab('log'), { cls: 'link' }), '.'));
+  skeleton.detailResult.replaceChildren(...[...RESULTS[selected](), empty].filter(Boolean));
+  renderTabs();
+}
+
+function renderTabs() {
+  const log = detailTab === 'log';
+  const showsLog = !skeleton.log.hidden;
+  for (const [tab, on] of [[skeleton.tabResult, !log], [skeleton.tabLog, log]]) {
+    tab.setAttribute('aria-selected', String(on));
+    tab.tabIndex = on ? 0 : -1;
+  }
+  skeleton.tabLog.replaceChildren(view.running === selected ? h('span', { class: 'spinner' }) : '', 'Log');
+  skeleton.detailResult.hidden = log;
+  skeleton.log.hidden = !log;
+  // A hidden log loses its scroll position; show the newest lines again.
+  if (log && !showsLog) skeleton.log.scrollTop = skeleton.log.scrollHeight;
+}
+
+function showTab(tab) {
+  if (detailTab === tab) return;
+  detailTab = tab;
+  renderTabs();
+}
+
+/** Arrow keys move between the two tabs, as in any tab bar. */
+function tabKey(e) {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+  e.preventDefault();
+  const next = e.key === 'Home' ? 'result' : e.key === 'End' ? 'log' : detailTab === 'log' ? 'result' : 'log';
+  showTab(next);
+  (next === 'log' ? skeleton.tabLog : skeleton.tabResult).focus();
 }
 
 function precheckResult() {
@@ -329,24 +386,69 @@ function precheckResult() {
   ]))];
 }
 
-function updateResult() {
-  const site = view.site;
-  const items = [];
-  if (site) {
-    items.push(h('div', { class: 'facts' },
-      h('span', null, h('strong', null, 'Aufgaben: '), view.tasks.filter((t) => t.enabled).map((t) => t.label).join(', ') || 'keine gewählt'),
-      h('span', null, h('strong', null, 'Build: '), site.build),
-      h('span', null, h('strong', null, 'Produkte: '), view.products.filter((p) => p.enabled).map((p) => `${p.name} ${p.documented}`).join(', ') || 'keine gewählt')));
+const usd = (n) => `${n.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD`;
+
+/** Claude's answer with the little Markdown it writes: paragraphs, headings, "- " lists, **bold**, `code`.
+ *  Built as DOM nodes, never as HTML. */
+function markdown(text) {
+  const inline = (line) => line.split(/(\*\*[^*]+\*\*|`[^`]+`)/).filter(Boolean).map((part) =>
+    part.length > 4 && part.startsWith('**') && part.endsWith('**') ? h('strong', null, part.slice(2, -2))
+      : part.length > 2 && part.startsWith('`') && part.endsWith('`') ? h('code', null, part.slice(1, -1))
+        : part);
+  const blocks = [];
+  let list = null;
+  for (const line of text.split('\n')) {
+    const item = line.match(/^\s*[-*] (.*)$/);
+    if (item) {
+      if (!list) blocks.push(list = h('ul'));
+      list.append(h('li', null, inline(item[1])));
+      continue;
+    }
+    list = null;
+    if (!line.trim()) continue;
+    const heading = line.match(/^#{1,4} (.*)$/);
+    blocks.push(h('p', null, heading ? h('strong', null, inline(heading[1])) : inline(line)));
   }
-  for (const run of view.claudeRuns) {
-    const c = run.outcome;
-    items.push(h('div', { class: 'facts' },
-      h('span', null, h('strong', null, `${run.task}: `), c.success ? 'abgeschlossen' : 'nicht abgeschlossen'),
-      h('span', null, h('strong', null, 'Modell: '), modelName(run.model === 'Standard' ? null : run.model)),
-      c.turns != null && h('span', null, h('strong', null, 'Runden: '), c.turns),
-      c.costUsd != null && h('span', null, h('strong', null, 'Kosten: '), `${c.costUsd.toFixed(2)} USD`),
-      c.denials.length > 0 && h('span', { class: 'orange' }, h('strong', null, 'Nicht freigegeben: '), c.denials.join(' · '))));
-    if (c.text) items.push(h('div', { class: 'result-text' }, c.text));
+  return h('div', { class: 'md selectable' }, blocks);
+}
+
+// Which Claude runs the user opened or closed; survives re-rendering.
+const runOpen = new Map();
+
+function runItem(run, index, count) {
+  const c = run.outcome;
+  const key = `${index}:${run.task}`;
+  const open = runOpen.get(key) ?? (count === 1 || !c.success || c.denials.length > 0);
+  return h('details', { class: 'run', open, ontoggle: (e) => runOpen.set(key, e.target.open) },
+    h('summary', null,
+      h('strong', null, run.task),
+      h('span', { class: 'muted small' }, [modelName(run.model === 'Standard' ? null : run.model),
+        c.turns != null && `${c.turns} Runden`, c.costUsd != null && usd(c.costUsd)].filter(Boolean).join(' · ')),
+      c.denials.length > 0 && h('span', { class: 'badge orange' }, `${c.denials.length} nicht freigegeben`),
+      h('span', { class: 'spacer' }),
+      h('span', { class: `chip ${c.success ? 'ok' : 'error'}` }, c.success ? 'Abgeschlossen' : 'Nicht abgeschlossen')),
+    h('div', { class: 'run-body' },
+      c.denials.length > 0 && h('div', { class: 'denials' },
+        h('div', null, h('strong', null, 'Nicht freigegeben: '),
+          'Claude durfte diese Befehle nicht ausführen und hat ohne sie weitergearbeitet. Dauerhaft erlauben lässt sich ein Befehl über ',
+          h('code', null, 'claude.allowedTools'), ' in ', h('code', null, '.openftpupdater/site.json'), '.'),
+        h('ul', null, c.denials.map((d) => h('li', { class: 'mono selectable', title: d }, h('span', { class: 'clamp' }, d))))),
+      c.text ? markdown(c.text) : h('div', { class: 'muted' }, 'Keine Antwort von Claude.')));
+}
+
+function updateResult() {
+  const runs = view.claudeRuns;
+  if (!runs.length) runOpen.clear();
+  const items = [h('div', { class: 'facts' },
+    h('span', null, h('strong', null, 'Gewählte Aufgaben: '), view.tasks.filter((t) => t.enabled).map((t) => t.label).join(', ') || 'keine'),
+    view.site && h('span', null, h('strong', null, 'Build: '), h('span', { class: 'mono' }, view.site.build)))];
+  if (runs.length) {
+    const cost = runs.reduce((sum, r) => sum + (r.outcome.costUsd ?? 0), 0);
+    const turns = runs.reduce((sum, r) => sum + (r.outcome.turns ?? 0), 0);
+    items.push(h('div', { class: 'runs' },
+      h('div', { class: 'runs-head' }, h('strong', null, runs.length === 1 ? '1 Claude-Lauf' : `${runs.length} Claude-Läufe`),
+        h('span', { class: 'muted small' }, `${turns} Runden · ${usd(cost)}`)),
+      runs.map((run, i) => runItem(run, i, runs.length))));
   }
   return items;
 }

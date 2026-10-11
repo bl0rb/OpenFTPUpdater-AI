@@ -110,7 +110,9 @@ pub fn task_prompt(site: &Site, task: &Task, outdated: &[Outdated], skipped: &[S
 
 fn closing(site: &Site, summary: &str) -> String {
     format!(
-        "\nDer Build ({}) muss am Ende fehlerfrei laufen. Committe und pushe nicht; das übernimmt die App. \
+        "\nAndere Repositories liest du nur mit einzelnen Befehlen wie `git -C <Pfad> show <Tag>:<Datei>`, ohne cd, Pipes oder &&; \
+         zusammengesetzte Befehle werden ohne Rückfrage abgelehnt.\
+         \nDer Build ({}) muss am Ende fehlerfrei laufen. Committe und pushe nicht; das übernimmt die App. \
          Beende deine Antwort mit einer kurzen Zusammenfassung auf Deutsch, {summary}, danach offene Punkte.",
         site.build
     )

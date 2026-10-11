@@ -260,6 +260,13 @@ pub fn start(app: &AppHandle, jobs: Vec<Job>) -> Result<(), String> {
                 state.summary.clear();
                 state.stale = false;
                 state.log.clear();
+                // Results of an earlier run must not show up under the new status.
+                match step {
+                    Step::Precheck => m.checks.clear(),
+                    Step::Update => m.claude_runs.clear(),
+                    Step::Upload => m.upload = None,
+                    Step::Verify => m.verify = None,
+                }
             });
             changed(&app);
             let result = match &job {
@@ -594,7 +601,6 @@ fn update(ctx: &Ctx, instructions: &str) -> Result<(Status, String)> {
     if tasks.is_empty() {
         bail!("Keine Aufgabe ausgewählt");
     }
-    with_model(&ctx.app, |m| m.claude_runs.clear());
 
     let mut summaries = Vec::new();
     for (i, task) in tasks.iter().enumerate() {
@@ -670,7 +676,6 @@ fn add_product(ctx: &Ctx, input: &NewProductInput) -> Result<(Status, String)> {
         license: info.license.clone(),
         private: info.private,
     };
-    with_model(&ctx.app, |m| m.claude_runs.clear());
     let model = Some(input.model.trim().to_owned()).filter(|m| !m.is_empty()).or_else(|| site.claude.model.clone());
     let effort = site.claude.effort.clone().unwrap_or_else(|| "high".into());
     let prompt = claude::add_product_prompt(&site, &product, &input.instructions);

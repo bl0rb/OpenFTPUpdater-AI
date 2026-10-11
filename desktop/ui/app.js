@@ -8,8 +8,6 @@ const STEPS = [
   { id: 'upload', title: 'Upload', desc: 'Build, Push, dann nur geänderte Dateien per SFTP auf den Server.' },
   { id: 'verify', title: 'Verify', desc: 'Vergleicht die Live-Seite Datei für Datei mit dem Build.' },
 ];
-// Not a card in the flow: started from „Repos pflegen …“, its log and result show in the detail panel.
-const REPOS_STEP = { id: 'repos', title: 'Repos pflegen' };
 const STATUS_TEXT = { idle: 'Bereit', running: 'Läuft', ok: 'OK', warning: 'Hinweis', error: 'Fehler' };
 // Claude Code model aliases; each follows the newest model of its family.
 const MODELS = [['opus', 'Opus'], ['sonnet', 'Sonnet'], ['haiku', 'Haiku'], ['fable', 'Fable']];
@@ -23,9 +21,18 @@ function modelSelect(value, fallback, onChange, id) {
 }
 
 let view = null;
+// Main area: 'overview' (the website's four steps) or 'repos' (the products' repositories).
+let area = 'overview';
 let selected = 'precheck';
 // Tab of the detail panel: 'result' or 'log'.
 let detailTab = 'result';
+// The same for the care panel in Repositories.
+let careTab = 'result';
+// Repository whose details are open; null = the list. The list's scroll position for the way back.
+let repoKey = null;
+let repoListScroll = 0;
+// Project whose repositories were read once on first opening the area.
+let reposReadFor = null;
 let lastRunning = null;
 let hostKeyOpen = false;
 
@@ -60,6 +67,7 @@ const ICONS = {
   plus: '<path d="M12 5v14M5 12h14"/>',
   refresh: '<path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/>',
   branch: '<circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="7" r="2"/><path d="M6 7v10M18 9c0 5-6 4-11 8"/>',
+  back: '<path d="M19 12H5M11 6l-6 6 6 6"/>',
 };
 
 function icon(name) {
@@ -68,15 +76,26 @@ function icon(name) {
   return span.firstElementChild;
 }
 
-function button(label, onClick, { iconName, cls, disabled, title, iconOnly } = {}) {
+function button(label, onClick, { iconName, cls, disabled, title, iconOnly, id } = {}) {
   return h('button', {
-    type: 'button', class: [cls, iconOnly && 'icon-only'].filter(Boolean).join(' ') || null, disabled,
+    type: 'button', id, class: [cls, iconOnly && 'icon-only'].filter(Boolean).join(' ') || null, disabled,
     title: title ?? (iconOnly ? label : null), 'aria-label': iconOnly ? label : null,
     onclick: (e) => { e.stopPropagation(); onClick?.(e); },
   }, iconName && icon(iconName), !iconOnly && label);
 }
 
 const formatTime = (secs) => new Date(secs * 1000).toLocaleString('de-DE', { dateStyle: 'medium', timeStyle: 'short' });
+
+/** `vor 3 Min.` for a Unix time. */
+function ago(secs) {
+  const d = Math.max(0, Math.round(Date.now() / 1000 - secs));
+  if (d < 45) return 'gerade eben';
+  if (d < 3600) return `vor ${Math.round(d / 60)} Min.`;
+  if (d < 86400) return `vor ${Math.round(d / 3600)} Std.`;
+  return `am ${formatTime(secs)}`;
+}
+
+const short = (sha) => (sha ?? '').slice(0, 7);
 
 async function call(command, args) {
   try {
@@ -97,9 +116,17 @@ function setView(next) {
   view = next;
   if (view.running && view.running !== lastRunning) {
     // Follow the step that just started and watch its log.
-    selected = view.running;
-    detailTab = 'log';
-    clearLog();
+    // Load the whole log: lines that arrived before this view must not be lost.
+    if (view.running === 'repos') {
+      careTab = 'log';
+      loadCareLog();
+    } else {
+      selected = view.running;
+      detailTab = 'log';
+      loadLog(selected);
+    }
+  } else if (!view.running && lastRunning === 'repos') {
+    if (view.repoPlan || view.repoReports.length) careTab = 'result';
   } else if (!view.running && lastRunning === selected && hasResult(selected)) {
     // The step is done: show what came out of it. Without a result the log has the details.
     detailTab = 'result';
@@ -113,19 +140,41 @@ function setView(next) {
 }
 
 function renderToolbar() {
+  const attention = view.repositories.filter((r) => r.health.state === 'blocked' || r.health.state === 'needsAttention').length;
+  const nav = (id, label, extra) => h('button', {
+    type: 'button', class: `nav-item ${area === id ? 'active' : ''}`, 'aria-current': area === id ? 'page' : null,
+    onclick: () => showArea(id),
+  }, label, extra);
   document.getElementById('toolbar').replaceChildren(
     h('div', { class: 'brand' },
       h('img', { src: 'icon.svg', alt: '' }),
       h('div', null,
         h('h1', null, 'OpenReleasePilot'),
         h('div', { class: 'project' }, view.site ? `${view.site.name} · ${view.projectDisplay}` : view.projectDisplay || 'Kein Projekt eingerichtet'))),
+    view.config.projectDir && h('nav', { class: 'nav', 'aria-label': 'Bereiche' },
+      nav('overview', 'Übersicht'),
+      nav('repos', 'Repositories', attention > 0 && h('span', { class: 'nav-badge', title: `${attention} brauchen Aufmerksamkeit`, 'aria-label': `${attention} brauchen Aufmerksamkeit` }, attention))),
     h('span', { class: 'spacer' }),
     view.site && button(view.site.url.replace(/^https?:\/\//, ''), () => call('open_url', { url: view.site.url }), { iconName: 'external', cls: 'link', title: 'Live-Seite öffnen' }),
     view.site && button('Neues Produkt …', addProductDialog,
       { iconName: 'plus', disabled: !!view.running, title: 'Ein Repository als neues Produkt auf der Website aufnehmen' }),
-    view.site && button('Repos pflegen …', reposDialog,
-      { iconName: 'branch', disabled: !!view.running, title: 'In den ausgewählten Produkten: offene PRs mergen, Patch-Tag setzen, gemergte Branches löschen' }),
     button('Einrichtung', settingsDialog, { iconName: 'gear', disabled: !!view.running }));
+}
+
+function showArea(id) {
+  const main = document.getElementById('main');
+  if (area === id) {
+    if (id === 'repos' && repoKey) closeRepo();
+    return;
+  }
+  if (area === 'repos' && !repoKey) repoListScroll = main.scrollTop;
+  area = id;
+  renderToolbar();
+  renderMain();
+  if (id === 'repos') {
+    main.scrollTop = repoKey ? 0 : repoListScroll;
+    readReposOnce();
+  }
 }
 
 function banner(kind, text, actions = []) {
@@ -169,11 +218,14 @@ function renderBanners() {
 }
 
 let skeleton = null;
+let reposUi = null;
 
 function renderMain() {
   const main = document.getElementById('main');
   if (!view.config.projectDir) {
     skeleton = null;
+    reposUi = null;
+    area = 'overview';
     main.replaceChildren(h('div', { class: 'empty' },
       h('img', { src: 'icon.svg', alt: '' }),
       h('h2', null, 'Willkommen'),
@@ -199,7 +251,7 @@ function renderMain() {
     };
     skeleton.runAll = button('Alle Schritte', () => call('run_all', { instructions: skeleton.instructions.value }),
       { iconName: 'forward', title: 'Precheck, Update (wenn nötig), Upload und Verify nacheinander; stoppt beim ersten Fehler' });
-    main.replaceChildren(
+    skeleton.root = h('div', { class: 'area' },
       h('section', { class: 'section' },
         h('div', { class: 'section-head' }, h('h2', null, 'Ablauf'),
           h('span', { class: 'muted small' }, 'Schritte einzeln starten oder alle nacheinander'),
@@ -219,7 +271,16 @@ function renderMain() {
       h('section', { class: 'detail' }, skeleton.detailHead,
         h('div', { class: 'tabs', role: 'tablist', 'aria-label': 'Ansicht', onkeydown: tabKey }, skeleton.tabResult, skeleton.tabLog),
         skeleton.detailResult, skeleton.log));
+    buildRepos();
+    main.replaceChildren(skeleton.root, reposUi.root);
     loadLog(selected);
+    loadCareLog();
+  }
+  skeleton.root.hidden = area !== 'overview';
+  reposUi.root.hidden = area !== 'repos';
+  if (area === 'repos') {
+    renderRepos();
+    return;
   }
   skeleton.runAll.disabled = !!view.running || !view.site;
   skeleton.instructions.disabled = !!view.running;
@@ -322,26 +383,23 @@ function selectStep(step) {
   loadLog(step);
 }
 
-const RESULTS = { precheck: precheckResult, update: updateResult, upload: uploadResult, verify: verifyResult, repos: reposResult };
+const RESULTS = { precheck: precheckResult, update: updateResult, upload: uploadResult, verify: verifyResult };
 const HAS_RESULT = {
   precheck: () => view.checks.length > 0,
   update: () => view.claudeRuns.length > 0,
   upload: () => !!view.upload,
   verify: () => !!view.verify,
-  repos: () => !!view.repoPlans || view.repoReports.length > 0,
 };
-const hasResult = (step) => HAS_RESULT[step]();
+const hasResult = (step) => HAS_RESULT[step]?.() ?? false;
 
 function renderDetail() {
-  const step = STEPS.find((s) => s.id === selected) ?? REPOS_STEP;
+  const step = STEPS.find((s) => s.id === selected);
   const state = view.steps[selected];
   skeleton.detailHead.replaceChildren(...[
     h('h3', null, step.title), statusChip(state.status, state.stale),
     state.summary && !state.stale && h('span', { class: `detail-summary ${state.status === 'error' ? 'red' : state.status === 'warning' ? 'orange' : ''}` }, state.summary),
     h('span', { class: 'spacer' }),
     h('span', { class: 'muted small' }, state.finishedAt ? `zuletzt ${formatTime(state.finishedAt)}` : ''),
-    // Steps without a card have no other place to stop them.
-    view.running === selected && step === REPOS_STEP && button('Abbrechen', () => invoke('cancel'), { iconName: 'stop', cls: 'danger' }),
   ].filter(Boolean));
   const empty = !hasResult(selected) && (state.status === 'idle'
     ? h('div', { class: 'note' }, 'Dieser Schritt ist noch nicht gelaufen.')
@@ -491,6 +549,425 @@ function verifyResult() {
   ];
 }
 
+// MARK: Repositories
+
+const HEALTH = {
+  blocked: ['error', 'Blockiert'],
+  needsAttention: ['warning', 'Aufmerksamkeit nötig'],
+  unknown: ['idle', 'Unbekannt'],
+  healthy: ['ok', 'In Ordnung'],
+};
+const CI_TEXT = { passed: 'erfolgreich', failed: 'fehlgeschlagen', pending: 'läuft noch', noChecks: 'keine Checks gefunden', unknown: 'unklar' };
+const LOCAL_TEXT = {
+  notConfigured: 'keine lokale Kopie eingetragen', found: 'lokale Kopie vorhanden', missing: 'lokale Kopie fehlt',
+  foreign: 'lokale Kopie ungültig', conflict: 'lokale Kopie widersprüchlich',
+};
+const RISKS = { green: ['green', 'Risiko grün'], yellow: ['orange', 'Risiko gelb'], red: ['red', 'Risiko rot'] };
+const badge = (cls, text, title) => h('span', { class: `badge ${cls}`, title }, text);
+/** The value of a read part of the facts (`{ state: 'ok', value }`), else undefined. */
+const ok = (fetch) => (fetch?.state === 'ok' ? fetch.value : undefined);
+/** An id from a repository key, so focus survives re-rendering. */
+const domId = (prefix, key) => `${prefix}-${key.replace(/[^a-z0-9]+/gi, '-')}`;
+// Care options, shared by the detail view and the dialog while the window is open.
+const careOptions = { merge: true, cleanup: true, model: '' };
+// Pull request details asked for once per reading of a repository.
+const detailsAsked = new Set();
+
+function buildRepos() {
+  reposUi = {
+    root: h('div', { class: 'area repos-area' }),
+    head: h('div', { class: 'section-head wrap' }),
+    care: h('section', { class: 'detail care', 'aria-label': 'Pflege' }),
+    careHead: h('div', { class: 'detail-head' }),
+    careTabResult: h('button', { type: 'button', class: 'tab', role: 'tab', id: 'care-tab-result', 'aria-controls': 'care-result', onclick: () => showCareTab('result') }, 'Ergebnis'),
+    careTabLog: h('button', { type: 'button', class: 'tab', role: 'tab', id: 'care-tab-log', 'aria-controls': 'care-log', onclick: () => showCareTab('log') }),
+    careResult: h('div', { class: 'detail-result', id: 'care-result', role: 'tabpanel', 'aria-labelledby': 'care-tab-result' }),
+    careLog: h('pre', { class: 'log', id: 'care-log', role: 'tabpanel', 'aria-labelledby': 'care-tab-log', tabindex: '0' }),
+    body: h('div', { class: 'repos-body' }),
+  };
+  reposUi.care.append(reposUi.careHead,
+    h('div', { class: 'tabs', role: 'tablist', 'aria-label': 'Pflege', onkeydown: careTabKey }, reposUi.careTabResult, reposUi.careTabLog),
+    reposUi.careResult, reposUi.careLog);
+  reposUi.root.append(
+    h('section', { class: 'section' }, reposUi.head,
+      h('div', { class: 'note' }, '„Status aktualisieren“ liest nur und kostet nichts. Pflegen erstellt zuerst eine Vorschau mit Claudes Bewertung der offenen PRs (kostet Claude-Nutzung); geändert wird erst, wenn du sie bestätigst.')),
+    reposUi.care, reposUi.body);
+}
+
+/** Reads every repository once when the area first opens for a project; later only on request. */
+function readReposOnce() {
+  if (!view.repositories.length || reposReadFor === view.config.projectDir) return;
+  reposReadFor = view.config.projectDir;
+  const unread = view.repositories.filter((r) => !r.facts && !r.loading).map((r) => r.key);
+  if (unread.length) call('refresh_repos', { keys: unread });
+}
+
+/** Re-renders, then gives the focus back to the element with the same id. */
+function keepFocus(render) {
+  const id = document.activeElement?.id;
+  render();
+  if (id && document.activeElement?.id !== id) document.getElementById(id)?.focus({ preventScroll: true });
+}
+
+function renderRepos() {
+  keepFocus(() => {
+    const repos = view.repositories;
+    const reading = repos.some((r) => r.loading || r.detailsLoading);
+    const chosen = repos.filter((r) => r.selected);
+    reposUi.head.replaceChildren(...[
+      h('h2', null, 'Repositories'),
+      h('span', { class: 'muted small' }, [repos.length && `${repos.length} aus den Produkten der Website`, view.siteRepo && `Website-Repository ${view.siteRepo}`].filter(Boolean).join(' · ')),
+      h('span', { class: 'spacer' }),
+      reading && button('Lesen abbrechen', () => call('cancel_repo_refresh'), { id: 'repos-cancel-read' }),
+      button(reading ? 'Wird gelesen …' : 'Status aktualisieren', () => call('refresh_repos', { keys: [] }),
+        { id: 'repos-refresh', iconName: 'refresh', disabled: reading || !repos.length, title: 'Liest den Stand aller Repositories auf GitHub: nur lesend, ohne Claude' }),
+      button('Ausgewählte pflegen …', () => careDialog(chosen),
+        { id: 'repos-care', iconName: 'branch', disabled: !!view.running || !chosen.length, title: 'Pflege-Vorschau für die Repositories der ausgewählten Produkte' }),
+    ].filter(Boolean));
+    renderCare();
+    let body;
+    if (!view.site) body = h('div', { class: 'note' }, view.siteError ? `site.json nicht lesbar: ${view.siteError}` : 'Kein Projekt geladen.');
+    else if (!repos.length) body = h('div', { class: 'note' }, 'In site.json steht noch kein Produkt mit Repository. „Neues Produkt …“ in der Kopfleiste nimmt eins auf.');
+    else {
+      const repo = repoKey && repos.find((r) => r.key === repoKey);
+      if (!repo) repoKey = null;
+      body = repo ? repoDetail(repo) : h('div', { class: 'repo-cards' }, repos.map(repoCard));
+    }
+    reposUi.body.replaceChildren(body);
+  });
+}
+
+function openRepo(key) {
+  const main = document.getElementById('main');
+  repoListScroll = main.scrollTop;
+  repoKey = key;
+  renderRepos();
+  main.scrollTop = 0;
+  document.getElementById('repo-back')?.focus({ preventScroll: true });
+}
+
+function closeRepo() {
+  const key = repoKey;
+  repoKey = null;
+  renderRepos();
+  document.getElementById('main').scrollTop = repoListScroll;
+  if (key) document.getElementById(domId('repo-row', key))?.focus({ preventScroll: true });
+}
+
+// MARK: Repositories: overview
+
+function healthChip(r) {
+  if (r.loading && !r.facts) return h('span', { class: 'chip running' }, h('span', { class: 'spinner' }), 'Wird gelesen');
+  const [cls, text] = HEALTH[r.health.state];
+  return h('span', { class: `chip ${cls}` }, text);
+}
+
+function mainReason(r) {
+  if (r.loading && !r.facts) return 'GitHub wird abgefragt …';
+  return r.health.reasons[0] ?? r.health.gaps[0] ?? 'Alles gelesen, kein Befund';
+}
+
+function prSummary(r) {
+  const prs = r.facts?.prs;
+  if (!prs || prs.state === 'notQueried') return 'PRs nicht abgefragt';
+  if (prs.state === 'failed') return 'PR-Abfrage fehlgeschlagen';
+  const { items, complete } = prs.value;
+  const dependabot = items.filter((p) => p.dependabot).length;
+  if (!items.length) return 'keine offenen PRs';
+  return `${complete ? '' : 'mind. '}${items.length} offene${items.length === 1 ? 'r PR' : ' PRs'}${dependabot ? `, ${dependabot} von Dependabot` : ''}`;
+}
+
+function ciSummary(r) {
+  const ci = r.facts?.ci;
+  const branch = ok(r.facts?.access)?.defaultBranch ?? 'Default-Branch';
+  if (!ci || ci.state === 'notQueried') return `CI ${branch} nicht abgefragt`;
+  if (ci.state === 'failed') return `CI ${branch}: Abfrage fehlgeschlagen`;
+  return `CI ${branch}: ${CI_TEXT[ci.value.state]}`;
+}
+
+function releaseSummary(r) {
+  const f = r.facts;
+  if (!f) return null;
+  if (ok(f.release)) return `Release ${f.release.value}`;
+  if (f.release.state === 'failed') return 'Release-Abfrage fehlgeschlagen';
+  if (ok(f.tag)) return `kein Release, Tag ${f.tag.value}`;
+  return f.release.state === 'ok' ? 'kein veröffentlichtes Release' : null;
+}
+
+function checkedSummary(r) {
+  const f = r.facts;
+  if (!f) return r.error ? `nicht gelesen: ${r.error}` : 'noch nicht gelesen';
+  return `gelesen ${ago(f.checkedAt)}${r.health.stale ? ', veraltet' : ''}${r.error ? ', letzte Abfrage fehlgeschlagen' : ''}`;
+}
+
+function repoCard(r) {
+  const [owner, name] = r.repo.split('/');
+  const products = r.products.map((p) => `${p.name}${p.enabled ? '' : ' (abgewählt)'}`).join(', ');
+  return h('button', { type: 'button', id: domId('repo-row', r.key), class: `repo-card ${r.loading && !r.facts ? '' : HEALTH[r.health.state][0]}`, onclick: () => openRepo(r.key) },
+    h('span', { class: 'repo-card-head' },
+      h('strong', { class: 'ellipsis' }, name), h('span', { class: 'muted small ellipsis' }, owner),
+      h('span', { class: 'spacer' }),
+      r.loading && r.facts && h('span', { class: 'spinner muted', title: 'wird neu gelesen' }),
+      healthChip(r)),
+    h('span', { class: 'repo-card-reason' }, mainReason(r)),
+    h('span', { class: 'repo-card-meta' }, (r.facts ? [prSummary(r), ciSummary(r), releaseSummary(r)] : []).concat(LOCAL_TEXT[r.local.state], checkedSummary(r))
+      .filter(Boolean).map((text) => h('span', null, text))),
+    h('span', { class: 'repo-card-rel' }, `Produkte: ${products}${r.website ? ' · Website-Repository' : ''}`));
+}
+
+// MARK: Repositories: details
+
+function repoDetail(r) {
+  const f = r.facts;
+  const access = ok(f?.access);
+  const branch = access?.defaultBranch ?? 'Default-Branch';
+  const plan = view.repoPlan?.plans.find((p) => p.key === r.key);
+  if (f && !r.details && !r.detailsLoading && ok(f.prs)?.items.length) {
+    const mark = `${r.key}:${f.checkedAt}`;
+    if (!detailsAsked.has(mark)) {
+      detailsAsked.add(mark);
+      queueMicrotask(() => call('load_repo_details', { key: r.key }));
+    }
+  }
+  return h('div', { class: 'repo-detail' },
+    h('div', { class: 'repo-detail-head' },
+      button('Alle Repositories', closeRepo, { id: 'repo-back', iconName: 'back' }),
+      h('h2', { class: 'ellipsis', title: r.repo }, r.repo), healthChip(r),
+      h('span', { class: 'spacer' }),
+      button(r.loading ? 'Wird gelesen …' : 'Status aktualisieren', () => call('refresh_repos', { keys: [r.key] }),
+        { id: 'repo-refresh', iconName: 'refresh', disabled: r.loading, title: 'Nur lesend, ohne Claude' }),
+      access?.url && button('Auf GitHub', () => call('open_url', { url: access.url }), { id: 'repo-github', iconName: 'external' })),
+    findings(r),
+    h('section', { class: 'panel section' }, h('h3', null, 'Status'), statusFacts(r, branch)),
+    h('section', { class: 'panel section' }, prSection(r, branch, plan)),
+    h('section', { class: 'panel section' }, careSection(r, plan)));
+}
+
+function findings(r) {
+  const { state, reasons, gaps, notes } = r.health;
+  const list = (title, items, cls) => items.length > 0 && h('div', { class: 'finding' },
+    h('strong', { class: `small ${cls}` }, title), h('ul', null, items.map((text) => h('li', { class: 'selectable' }, text))));
+  const blocks = [
+    list('Befunde', reasons, state === 'blocked' ? 'red' : 'orange'),
+    list('Datenlücken', gaps, ''),
+    list('Hinweise', notes, 'muted'),
+    r.error && h('div', { class: 'note orange' }, `Letzte Abfrage fehlgeschlagen, gezeigt wird der ältere Stand: ${r.error}`),
+  ].filter(Boolean);
+  if (!reasons.length && !gaps.length && r.facts) blocks.unshift(h('div', { class: 'note green' }, 'Alles gelesen, kein Befund.'));
+  return h('div', { class: 'findings' }, blocks);
+}
+
+function fetchText(fetch, render) {
+  if (!fetch) return 'noch nicht gelesen';
+  if (fetch.state === 'failed') return `Abfrage fehlgeschlagen: ${fetch.value}`;
+  if (fetch.state === 'notQueried') return `nicht abgefragt${fetch.value ? `: ${fetch.value}` : ''}`;
+  return render(fetch.value);
+}
+
+function releaseText(f) {
+  if (f.release.state === 'failed') return `Abfrage fehlgeschlagen: ${f.release.value}`;
+  if (ok(f.release)) return `${f.release.value} (veröffentlichtes Release)`;
+  if (f.release.state !== 'ok') return 'nicht abgefragt';
+  if (ok(f.tag)) return `kein veröffentlichtes Release · höchster passender Tag ${f.tag.value}`;
+  if (f.tag.state === 'failed') return `kein veröffentlichtes Release · Tags: ${f.tag.value}`;
+  return 'kein veröffentlichtes Release, kein passender Tag';
+}
+
+function localText(local) {
+  switch (local.state) {
+    case 'found': return local.path;
+    case 'missing': return `fehlt: ${local.path}`;
+    case 'foreign': return `${local.path} ist keine Kopie dieses Repositorys (${local.origin ?? 'ohne GitHub-origin'})`;
+    case 'conflict': return `Produkte nennen verschiedene Ordner: ${local.paths.join(', ')}`;
+    default: return 'nicht eingetragen (localPath in site.json)';
+  }
+}
+
+function statusFacts(r, branch) {
+  const f = r.facts;
+  const access = ok(f?.access);
+  const row = (label, value, cls = '') => [h('span', { class: 'label' }, label), h('span', { class: `detail-text selectable ${cls}` }, value)];
+  const since = f?.since;
+  const sinceLabel = ok(since) ? `Commits seit ${since.value.baseKind === 'release' ? 'Release' : 'Tag'} ${since.value.base}` : 'Commits seit Release';
+  return h('div', { class: 'fact-grid' },
+    row('Repository', access ? [access.private ? 'privat' : 'öffentlich', access.archived && 'archiviert'].filter(Boolean).join(' · ') : fetchText(f?.access, () => '')),
+    access && row('Schreibzugriff', access.canPush == null ? 'unbekannt (ohne gh-Anmeldung meldet GitHub keine Rechte)' : access.canPush ? 'ja' : 'nein, nur lesbar', access.canPush === false ? 'orange' : ''),
+    row('Default-Branch', access ? `${branch}${ok(f.head) ? ` · HEAD ${short(f.head.value)}` : ''}` : '–'),
+    row('CI', fetchText(f?.ci, (ci) => `${CI_TEXT[ci.state]}: ${ci.detail} (Commit ${short(ci.sha)})`),
+      ok(f?.ci)?.state === 'failed' ? 'red' : ok(f?.ci)?.state === 'passed' ? 'green' : ''),
+    row('Release', f ? releaseText(f) : '–'),
+    row(sinceLabel, !since ? '–' : ok(since) ? String(since.value.commits) : since.state === 'failed' ? since.value : `nicht bestimmbar${since.value ? `: ${since.value}` : ''}`),
+    row('Tag-Präfix', r.tagConflict ?? (r.tagPrefix ? `„${r.tagPrefix}“` : 'ohne'), r.tagConflict ? 'orange' : ''),
+    row('Lokale Kopie', localText(r.local), ['found', 'notConfigured'].includes(r.local.state) ? '' : 'orange'),
+    row('Website', [...r.products.map((p) => `${p.name}: dokumentiert ${p.documented}${p.enabled ? '' : ', nicht ausgewählt'}`),
+      r.website && 'zugleich das Website-Repository'].filter(Boolean).join(' · ')),
+    row('Gelesen', f ? `${formatTime(f.checkedAt)} (${ago(f.checkedAt)})${r.health.stale ? ', veraltet' : ''}` : 'noch nicht', r.health.stale ? 'orange' : ''));
+}
+
+const PLANNED = { merge: 'mergen', close: 'schließen', rebase: 'Rebase anstoßen', keep: 'bleibt offen' };
+
+function prSection(r, branch, plan) {
+  const prs = r.facts?.prs;
+  const list = ok(prs);
+  const head = (info) => h('div', { class: 'section-head wrap' }, h('h3', null, 'Pull Requests'), info, h('span', { class: 'spacer' }),
+    list?.items.length > 0 && button(r.detailsLoading ? 'Wird gelesen …' : 'CI und Mergebarkeit neu lesen', () => call('load_repo_details', { key: r.key }),
+      { id: 'repo-details', iconName: 'refresh', disabled: r.detailsLoading }));
+  if (!list) return [head(), h('div', { class: 'note' }, fetchText(prs, () => ''))];
+  if (!list.items.length) return [head(), h('div', { class: 'note' }, 'Keine offenen Pull Requests.')];
+  const dependabot = list.items.filter((p) => p.dependabot).length;
+  const intoDefault = list.items.filter((p) => p.intoDefault).length;
+  const details = new Map((r.details?.prs ?? []).map((d) => [d.number, d]));
+  return [
+    head(h('span', { class: 'muted small' },
+      `${list.complete ? '' : 'mindestens '}${list.items.length} offen, davon ${dependabot} von Dependabot; ${intoDefault} auf ${branch} kommen für die Pflege in Frage`)),
+    r.detailsLoading && !r.details && h('div', { class: 'note' }, 'CI und Mergebarkeit werden gelesen …'),
+    r.details && !r.details.complete && h('div', { class: 'note' }, `CI und Mergebarkeit gelesen für die ersten ${r.details.prs.length}.`),
+    h('div', { class: 'items' }, list.items.map((pr) => prItem(pr, details.get(pr.number), plan?.prs.find((p) => p.number === pr.number), branch))),
+  ].filter(Boolean);
+}
+
+function prItem(pr, detail, planned, branch) {
+  const ci = detail?.ci;
+  const ciBadge = !detail ? null : ok(ci)
+    ? badge({ passed: 'green', failed: 'red', pending: '', noChecks: 'orange', unknown: 'orange' }[ci.value.state], `CI ${CI_TEXT[ci.value.state]}`, ci.value.detail)
+    : badge('orange', 'CI nicht abfragbar', ci?.value);
+  const merge = detail && badge(['clean', 'has_hooks'].includes(detail.mergeableState) ? 'green' : detail.mergeableState === 'dirty' ? 'red' : '', detail.mergeable);
+  const risk = planned?.risk && RISKS[planned.risk];
+  return h('div', { class: 'item' },
+    h('div', { class: 'item-line' },
+      button(`#${pr.number}`, () => call('open_url', { url: pr.url }), { cls: 'link mono', title: 'Auf GitHub öffnen' }),
+      h('span', { class: 'item-title', title: pr.title }, pr.title),
+      pr.dependabot ? badge('accent', 'Dependabot') : h('span', { class: 'muted small' }, pr.author),
+      pr.draft && badge('', 'Entwurf'),
+      h('span', { class: 'spacer' }),
+      ciBadge, merge),
+    h('div', { class: 'item-reason' }, [
+      pr.intoDefault ? `Ziel ${pr.base}` : `Ziel ${pr.base}, nicht ${branch}: kommt nicht in den Pflegeplan`,
+      planned && `Vorschau: ${PLANNED[planned.action]}${risk ? `, Claude: ${risk[1]}` : ''}`,
+      !detail && 'CI und Mergebarkeit noch nicht gelesen',
+    ].filter(Boolean).join(' · ')));
+}
+
+/** The care options; `onChange` runs after each change, the model row hides without a merge. */
+function careFields(onChange, idPrefix) {
+  const modelId = `${idPrefix}-model`;
+  const modelRow = h('div', { class: 'field-row', hidden: !careOptions.merge }, h('label', { for: modelId }, 'Modell für die Prüfung'),
+    modelSelect(careOptions.model, view.site?.claude?.model, (model) => { careOptions.model = model; }, modelId));
+  const option = (key, title, note) => h('label', { class: 'check-line top' },
+    h('input', { type: 'checkbox', id: `${idPrefix}-${key}`, checked: careOptions[key],
+      onchange: (e) => { careOptions[key] = e.target.checked; modelRow.hidden = !careOptions.merge; onChange(); } }),
+    h('span', null, h('strong', null, title), h('div', { class: 'note' }, note)));
+  return [
+    option('merge', 'Offene PRs prüfen, mergen und Patch-Tag setzen',
+      'Claude bewertet jeden offenen PR auf den Default-Branch nach den Regeln des dependabot-pr-Skills (Risikoklasse, Release-Notes, SHA-Pins, zusammengehörige Abhängigkeiten, Nutzung im Code); das kostet Claude-Nutzung. Gemergt wird nur, was GitHub mergebar mit grüner CI meldet und Claude grün oder gelb einstuft. Überflüssige PRs werden mit Begründung geschlossen, Dependabot-PRs mit Konflikt neu aufgebaut. Den Tag x.y.(z+1) setzt die App nur, wenn alle geplanten Merges gelingen und die CI genau dieses Commits grün ist.'),
+    modelRow,
+    option('cleanup', 'Gemergte Branches löschen',
+      'Branches, deren Commits vollständig im Default-Branch sind oder deren PR gemergt wurde, auf GitHub und in der lokalen Kopie. Geschützte, ausgecheckte (auch in Worktrees) und Branches offener PRs bleiben.'),
+  ];
+}
+
+function careSection(r, plan) {
+  const locked = r.capabilities.care;
+  const blocked = () => !!view.running || !!locked || (!careOptions.merge && !careOptions.cleanup);
+  const check = button('Dieses Repository prüfen', () => checkRepos([r.key]),
+    { id: domId('care-check', r.key), cls: 'primary', iconName: 'play', disabled: blocked() });
+  return [
+    h('div', { class: 'section-head wrap' }, h('h3', null, 'Pflege'), h('span', { class: 'muted small' }, 'erst Vorschau, ausgeführt wird nach Bestätigung')),
+    locked && h('div', { class: 'note orange' }, `Pflege gesperrt: ${locked}. Status und Details bleiben lesbar.`),
+    r.capabilities.tag && h('div', { class: 'note orange' }, `Kein automatischer Tag: ${r.capabilities.tag}.`),
+    r.local.state !== 'notConfigured' && r.capabilities.local && h('div', { class: 'note orange' }, `Lokale Branches bleiben unberührt: ${r.capabilities.local}.`),
+    plan && h('div', { class: 'note' }, 'Die Vorschau für dieses Repository steht oben unter „Pflege“.'),
+    ...careFields(() => { check.disabled = blocked(); }, domId('care', r.key)),
+    h('div', { class: 'line' }, check, view.running && h('span', { class: 'note' }, 'Erst nach dem laufenden Schritt.')),
+  ].filter(Boolean);
+}
+
+async function checkRepos(keys) {
+  await invoke('check_repos', { keys, merge: careOptions.merge, cleanup: careOptions.cleanup, model: careOptions.model });
+  careTab = 'log';
+  document.getElementById('main').scrollTop = 0;
+}
+
+/** Care for the repositories of the selected products: names them first, without the locked ones. */
+function careDialog(chosen) {
+  const allowed = chosen.filter((r) => !r.capabilities.care);
+  const locked = chosen.filter((r) => r.capabilities.care);
+  const s = { error: '' };
+  const blocked = () => !allowed.length || (!careOptions.merge && !careOptions.cleanup) || !!view.running;
+  const entry = (r, extra) => h('li', null, h('span', { class: 'mono' }, r.repo), ' ', h('span', { class: 'muted small' }, extra));
+  openDialog('Repositories pflegen', (close, render) => ({
+    body: [
+      h('h2', null, 'Repositories der ausgewählten Produkte pflegen'),
+      h('div', null,
+        h('strong', { class: 'small' }, allowed.length ? `Geprüft ${allowed.length === 1 ? 'wird' : 'werden'}:` : 'Keins dieser Repositories lässt sich pflegen.'),
+        allowed.length > 0 && h('ul', { class: 'plain-list' }, allowed.map((r) => entry(r, r.products.map((p) => p.name).join(', '))))),
+      locked.length > 0 && h('div', null, h('strong', { class: 'small' }, 'Ausgenommen:'),
+        h('ul', { class: 'plain-list' }, locked.map((r) => entry(r, r.capabilities.care)))),
+      ...careFields(() => { const b = document.getElementById('care-dialog-check'); if (b) b.disabled = blocked(); }, 'care-dialog'),
+      h('div', { class: 'note' }, 'Zuerst entsteht nur eine Vorschau; ausgeführt wird erst, wenn du sie bestätigst. Die Produktauswahl der Website bleibt, wie sie ist.'),
+      s.error && h('div', { class: 'note error-text' }, s.error),
+    ],
+    actions: [
+      button('Abbrechen', close),
+      button('Prüfen', async () => {
+        try {
+          await checkRepos(allowed.map((r) => r.key));
+          close();
+        } catch (error) { s.error = String(error); render(); }
+      }, { id: 'care-dialog-check', cls: 'primary', disabled: blocked() }),
+    ],
+  }));
+}
+
+// MARK: Repositories: care panel
+
+function renderCare() {
+  const state = view.steps.repos;
+  const running = view.running === 'repos';
+  const visible = running || !!view.repoPlan || view.repoReports.length > 0 || state.status !== 'idle';
+  reposUi.care.hidden = !visible;
+  if (!visible) return;
+  reposUi.careHead.replaceChildren(...[
+    h('h3', null, 'Pflege'), statusChip(state.status),
+    state.summary && h('span', { class: `detail-summary ${state.status === 'error' ? 'red' : state.status === 'warning' ? 'orange' : ''}` }, state.summary),
+    h('span', { class: 'spacer' }),
+    h('span', { class: 'muted small' }, state.finishedAt ? `zuletzt ${formatTime(state.finishedAt)}` : ''),
+    running && button('Abbrechen', () => invoke('cancel'), { id: 'care-cancel', iconName: 'stop', cls: 'danger' }),
+  ].filter(Boolean));
+  const content = view.repoPlan ? planView(view.repoPlan)
+    : view.repoReports.length ? [h('div', { class: 'note' }, 'Erledigtes bleibt bestehen, auch nach Fehlern oder Abbruch. Für Übersprungenes eine neue Vorschau erstellen.'), reportView(view.repoReports)]
+      : [h('div', { class: 'note' }, running ? 'Läuft gerade. Die Ausgabe steht im ' : 'Kein Ergebnis. Was passiert ist, steht im ', button('Log', () => showCareTab('log'), { cls: 'link' }), '.')];
+  reposUi.careResult.replaceChildren(...content.filter(Boolean));
+  renderCareTabs();
+}
+
+function renderCareTabs() {
+  const log = careTab === 'log';
+  const showsLog = !reposUi.careLog.hidden;
+  for (const [tab, on] of [[reposUi.careTabResult, !log], [reposUi.careTabLog, log]]) {
+    tab.setAttribute('aria-selected', String(on));
+    tab.tabIndex = on ? 0 : -1;
+  }
+  reposUi.careTabLog.replaceChildren(view.running === 'repos' ? h('span', { class: 'spinner' }) : '', 'Log');
+  reposUi.careResult.hidden = log;
+  reposUi.careLog.hidden = !log;
+  if (log && !showsLog) reposUi.careLog.scrollTop = reposUi.careLog.scrollHeight;
+}
+
+function showCareTab(tab) {
+  if (careTab === tab) return;
+  careTab = tab;
+  renderCareTabs();
+}
+
+function careTabKey(e) {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+  e.preventDefault();
+  const next = e.key === 'Home' ? 'result' : e.key === 'End' ? 'log' : careTab === 'log' ? 'result' : 'log';
+  showCareTab(next);
+  (next === 'log' ? reposUi.careTabLog : reposUi.careTabResult).focus();
+}
+
 // Which repository blocks the user opened or closed; survives re-rendering.
 const repoOpen = new Map();
 
@@ -500,27 +977,33 @@ function repoDetails(key, open, summary, body) {
     h('summary', null, summary), h('div', { class: 'run-body' }, body));
 }
 
-const badge = (cls, text, title) => h('span', { class: `badge ${cls}`, title }, text);
-// In this order: what the run does to each pull request.
-const ACTIONS = { merge: 'Wird gemergt', close: 'Wird geschlossen', rebase: 'Dependabot-Rebase anstoßen', keep: 'Bleibt offen' };
-const RISKS = { green: ['green', 'Risiko grün'], yellow: ['orange', 'Risiko gelb'], red: ['red', 'Risiko rot'] };
+// What the app checks again right before each kind of write.
+const APP_CHECK = {
+  merge: 'App-Prüfung direkt davor: noch offen, gleicher Commit und Ziel, mergebar, CI des PR-Commits grün; GitHub bekommt den erwarteten Commit mit.',
+  close: 'App-Prüfung direkt davor: noch offen, gleicher Commit und Ziel; ein genannter Ersatz-PR muss offen oder gemergt sein. Kommentar und Schließen werden einzeln gemeldet.',
+  rebase: 'App-Prüfung direkt davor: noch offen, von Dependabot, gleicher Commit, weiterhin Konflikt oder Rückstand.',
+};
 
-function prRow(pr) {
+function planPr(pr) {
   const risk = pr.risk && RISKS[pr.risk];
   return h('div', { class: 'item' },
     h('div', { class: 'item-line' },
-      h('span', { class: 'mono muted' }, `#${pr.number}`),
+      button(`#${pr.number}`, () => call('open_url', { url: pr.url }), { cls: 'link mono', title: 'Auf GitHub öffnen' }),
       h('span', { class: 'item-title', title: pr.title }, pr.bump ? `${pr.title.replace(/ from .* to .*$/, '')} ${pr.bump}` : pr.title),
       !pr.dependabot && h('span', { class: 'muted small' }, pr.author),
       h('span', { class: 'spacer' }),
-      risk && badge(risk[0], risk[1], 'Claudes Einschätzung')),
-    pr.reason && h('div', { class: 'item-reason selectable' }, pr.reason));
+      risk && badge(risk[0], `Claude: ${risk[1]}`)),
+    pr.reason && h('div', { class: 'item-reason selectable' }, pr.reviewed ? `Claude: ${pr.reason}` : pr.reason),
+    pr.supersededBy && h('div', { class: 'item-reason' }, `Ersetzt durch #${pr.supersededBy}`),
+    APP_CHECK[pr.action] && h('div', { class: 'item-check' }, APP_CHECK[pr.action]),
+    pr.action === 'merge' && pr.dependabot && h('div', { class: 'item-check' }, 'Bedingt: Verursacht ein vorheriger Merge dieses Laufs einen Konflikt, stößt die App statt des Merges @dependabot rebase an.'));
 }
 
-function branchChips(title, branches) {
-  return branches.length > 0 && h('div', { class: 'item' },
-    h('div', { class: 'item-line' }, h('strong', { class: 'small' }, title), badge('', String(branches.length))),
-    h('div', { class: 'chips' }, branches.map((b) => h('span', { class: 'chip-ref mono', title: b.reason }, b.name))));
+function branchItems(branches) {
+  return branches.map((b) => h('div', { class: 'item' },
+    h('div', { class: 'item-line' }, h('span', { class: 'mono item-title', title: b.name }, b.name), h('span', { class: 'spacer' }),
+      b.proof.kind === 'afterMerge' && badge('', 'bedingt')),
+    h('div', { class: 'item-reason' }, `${b.reason}${b.proof.kind === 'afterMerge' ? '; nur wenn dieser Merge gelingt' : ''}. Vorher: gleicher Commit, nicht geschützt, kein offener PR, Nachweis gilt noch.`)));
 }
 
 /** Badges for the closed block: what happens in the repository. */
@@ -538,7 +1021,37 @@ function planBadges(p) {
   ].filter(Boolean);
 }
 
-function planView(plans) {
+function repoPlan(p, open) {
+  const group = (title, items) => items.length > 0 && [h('div', { class: 'item-group' }, `${title} (${items.length})`), ...items];
+  const prs = (action) => p.prs.filter((pr) => pr.action === action).map(planPr);
+  const tag = p.tag ? [h('div', { class: 'item' },
+    h('div', { class: 'item-line' }, h('strong', null, p.tag), h('span', { class: 'muted small' }, `nach ${p.lastTag}`), h('span', { class: 'spacer' }), badge('', 'bedingt')),
+    h('div', { class: 'item-check' }, `Nur wenn alle geplanten Merges gelingen, ${p.defaultBranch} sich sonst nicht bewegt und die CI genau dieses Commits grün ist (bis zu 30 Minuten Warten); ohne CI-Checks kein Tag. Startet gegebenenfalls den Release-Workflow des Repositorys; veröffentlicht ist damit noch nichts.`))] : [];
+  return repoDetails(p.key, open,
+    [h('strong', null, p.name), h('span', { class: 'muted small mono' }, p.repo), h('span', { class: 'spacer' }), ...planBadges(p)],
+    [
+      p.error && h('div', { class: 'note error-text' }, p.error),
+      p.reviewNote && h('div', { class: 'note orange' }, p.reviewNote),
+      h('div', { class: 'items' },
+        group('Mergen', prs('merge')),
+        group('Schließen', prs('close')),
+        group('Rebase anstoßen', prs('rebase')),
+        group('Tag', tag),
+        !p.tag && p.tagNote && [h('div', { class: 'item-group' }, 'Tag'), h('div', { class: 'item-reason' }, `Kein Tag: ${p.tagNote}`)],
+        group('Aufräumen auf GitHub', branchItems(p.branches)),
+        p.localSync && [h('div', { class: 'item-group' }, 'Lokale Kopie abgleichen'),
+          h('div', { class: 'item-reason' }, `git fetch --prune origin vor dem Löschen, weil ${p.localSync}. Danach prüft die App nur die hier genannten Branches erneut; neu entdeckte brauchen eine neue Vorschau.`)],
+        group('Aufräumen lokal', branchItems(p.localBranches)),
+        group('Bleibt offen', prs('keep'))),
+      p.cleanupNote && h('div', { class: 'note orange' }, p.cleanupNote),
+      p.cloneNote && h('div', { class: 'note orange' }, `Lokale Branches übersprungen: ${p.cloneNote}`),
+      p.githubDeletesMerged && p.prs.some((pr) => pr.action === 'merge') && h('div', { class: 'note' }, 'GitHub löscht die Branches gemergter PRs in diesem Repository selbst.'),
+      !p.error && !p.prs.length && !p.tag && !p.tagNote && !p.branches.length && !p.localBranches.length && h('div', { class: 'note' }, 'Nichts zu tun.'),
+    ]);
+}
+
+function planView(set) {
+  const plans = set.plans;
   const total = (pick) => plans.reduce((sum, p) => sum + pick(p), 0);
   const count = (action) => total((p) => p.prs.filter((pr) => pr.action === action).length);
   const parts = [[count('merge'), 'PR mergen', 'PRs mergen'], [count('close'), 'PR schließen', 'PRs schließen'],
@@ -549,46 +1062,32 @@ function planView(plans) {
   const busy = !!view.running;
   return [
     h('div', { class: 'plan-bar' },
-      h('div', null, h('strong', null, 'Vorschau'), h('div', { class: 'muted small' },
-        `${parts.join(' · ') || 'Nichts zu tun'}${cost ? ` · Claude-Prüfung ${usd(cost)}` : ''}. Vor jeder Aktion prüft die App erneut.`)),
+      h('div', null, h('strong', null, `Vorschau von ${formatTime(set.createdAt)}`), h('div', { class: 'muted small' },
+        `${parts.join(' · ') || 'Nichts zu tun'}${cost ? ` · Claude-Prüfung ${usd(cost)}` : ''}. Vor jeder Aktion prüft die App erneut; was sich geändert hat, wird übersprungen.`)),
       h('span', { class: 'spacer' }),
-      button('Verwerfen', () => call('discard_repo_plan'), { disabled: busy }),
-      button('Ausführen', () => call('run_repos'), { cls: 'primary', iconName: 'play', disabled: busy || !parts.length })),
-    h('div', { class: 'runs' }, plans.map((p) => repoDetails(p.repo, plans.length === 1,
-      [h('strong', null, p.name), h('span', { class: 'muted small mono' }, p.repo), h('span', { class: 'spacer' }), ...planBadges(p)],
-      [
-        p.error && h('div', { class: 'note error-text' }, p.error),
-        p.reviewNote && h('div', { class: 'note orange' }, p.reviewNote),
-        p.prs.length > 0 && h('div', { class: 'items' }, Object.entries(ACTIONS).map(([action, title]) => {
-          const prs = p.prs.filter((pr) => pr.action === action);
-          return prs.length > 0 && [h('div', { class: 'item-group' }, `${title} (${prs.length})`), ...prs.map(prRow)];
-        })),
-        (p.tag || p.tagNote) && h('div', { class: 'item' }, h('div', { class: 'item-line' }, h('strong', { class: 'small' }, 'Tag'),
-          h('span', { class: p.tag ? '' : 'muted' }, p.tag ? `${p.tag} nach ${p.lastTag}, sobald die CI auf ${p.defaultBranch} nach den Merges grün ist` : p.tagNote))),
-        branchChips('Branches auf GitHub löschen', p.branches),
-        p.cloneNote && h('div', { class: 'note orange' }, `Lokale Branches übersprungen: ${p.cloneNote}`),
-        branchChips('Lokale Branches löschen', p.localBranches),
-        !p.error && !p.prs.length && !p.tag && !p.tagNote && !p.branches.length && !p.localBranches.length && h('div', { class: 'note' }, 'Nichts zu tun.'),
-      ]))),
+      button('Verwerfen', () => call('discard_repo_plan', { planId: set.id }), { id: 'plan-discard', disabled: busy }),
+      button('Ausführen', () => call('run_repos', { planId: set.id }), { id: 'plan-run', cls: 'primary', iconName: 'play', disabled: busy || !parts.length })),
+    view.repoPlanMoved.length > 0 && h('div', { class: 'note orange' },
+      `Seit der Vorschau hat sich der Default-Branch bewegt: ${view.repoPlanMoved.join(', ')}. Die Ausführung prüft jede Aktion neu, einen Tag setzt sie dort aber nicht. Für einen Tag neu prüfen.`),
+    h('div', { class: 'runs' }, plans.map((p) => repoPlan(p, plans.length === 1))),
   ];
 }
 
+const OUTCOMES = { done: ['ok', 'Erledigt'], skipped: ['warning', 'Übersprungen'], failed: ['error', 'Fehlgeschlagen'], cancelled: ['idle', 'Abgebrochen'] };
+
 function reportView(reports) {
   return h('div', { class: 'runs' }, reports.map((r) => {
-    const problems = r.items.filter((c) => c.status !== 'ok').length;
-    return repoDetails(r.repo, problems > 0 || reports.length === 1,
+    const open = r.items.filter((c) => c.outcome !== 'done').length;
+    return repoDetails(`report:${r.repo}`, open > 0 || reports.length === 1,
       [h('strong', null, r.name), h('span', { class: 'muted small mono' }, r.repo), h('span', { class: 'spacer' }),
-        badge(problems ? 'orange' : 'green', problems ? `${problems} offen` : `${r.items.length} erledigt`)],
-      r.items.length ? h('div', { class: 'items' }, r.items.map((c) => h('div', { class: 'item' },
-        h('div', { class: 'item-line' }, h('span', { class: `status-dot ${c.status}` }), h('strong', { class: 'small' }, c.label)),
-        h('div', { class: 'item-reason selectable' }, c.detail))))
-        : h('div', { class: 'note' }, 'Nichts zu tun.'));
+        badge(open ? 'orange' : 'green', open ? `${open} nicht erledigt` : `${r.items.length} erledigt`)],
+      r.items.length ? h('div', { class: 'items' }, r.items.map((c) => {
+        const [cls, text] = OUTCOMES[c.outcome];
+        return h('div', { class: 'item' },
+          h('div', { class: 'item-line' }, h('strong', { class: 'small' }, c.label), h('span', { class: 'spacer' }), h('span', { class: `chip ${cls}` }, text)),
+          h('div', { class: 'item-reason selectable' }, c.detail));
+      })) : h('div', { class: 'note' }, 'Nichts zu tun.'));
   }));
-}
-
-function reposResult() {
-  if (view.repoPlans) return planView(view.repoPlans);
-  return view.repoReports.length ? [reportView(view.repoReports)] : [];
 }
 
 // MARK: Log
@@ -597,12 +1096,14 @@ function clearLog() {
   if (skeleton) skeleton.log.replaceChildren();
 }
 
-function appendLog(lines) {
-  if (!skeleton) return;
-  const log = skeleton.log;
+function appendTo(log, lines) {
   const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
   log.append(...lines.map((l) => h('span', { class: `l-${l.kind}` }, `${l.text}\n`)));
   if (atBottom) log.scrollTop = log.scrollHeight;
+}
+
+function appendLog(lines) {
+  if (skeleton) appendTo(skeleton.log, lines);
 }
 
 async function loadLog(step) {
@@ -610,6 +1111,17 @@ async function loadLog(step) {
   if (step !== selected || !skeleton) return;
   clearLog();
   appendLog(lines);
+}
+
+function clearCareLog() {
+  if (reposUi) reposUi.careLog.replaceChildren();
+}
+
+async function loadCareLog() {
+  const lines = await invoke('get_log', { step: 'repos' });
+  if (!reposUi) return;
+  clearCareLog();
+  appendTo(reposUi.careLog, lines);
 }
 
 // MARK: Dialogs
@@ -852,43 +1364,12 @@ function addProductDialog() {
       actions: [
         button('Abbrechen', close),
         button('Aufnehmen', async () => {
-          const ok = await call('run_add_product', { input: { repo: info.fullName, name: s.name, localPath: s.localPath, instructions: s.instructions, model: s.model } });
-          if (ok !== null) close();
+          // A command without a return value resolves to null, so success is "no exception".
+          try {
+            await invoke('run_add_product', { input: { repo: info.fullName, name: s.name, localPath: s.localPath, instructions: s.instructions, model: s.model } });
+            close();
+          } catch (error) { s.error = String(error); render(); }
         }, { cls: 'primary', disabled: !info || s.checking || s.cloning || !s.name.trim() || !!view.running }),
-      ],
-    };
-  });
-}
-
-// MARK: Repos pflegen
-
-function reposDialog() {
-  const products = view.products.filter((p) => p.enabled);
-  const s = { merge: true, cleanup: true, model: '', error: '' };
-  openDialog('Repos pflegen', (close, render) => {
-    const option = (key, title, note) => h('label', { class: 'check-line top' },
-      h('input', { type: 'checkbox', checked: s[key], onchange: (e) => { s[key] = e.target.checked; render(); } }),
-      h('span', null, h('strong', null, title), h('div', { class: 'note' }, note)));
-    return {
-      body: [
-        h('h2', null, 'Repos pflegen'),
-        h('div', { class: 'note' }, products.length ? `Gilt für die ausgewählten Produkte: ${products.map((p) => p.name).join(', ')}.`
-          : 'Keine Produkte ausgewählt; in der Produktliste mindestens eins anhaken.'),
-        option('merge', 'Offene PRs prüfen, mergen und Patch-Tag setzen',
-          'Claude bewertet jeden offenen PR wie der dependabot-pr-Skill: Risikoklasse, Release-Notes, SHA-Pins, zusammengehörige Abhängigkeiten, Nutzung im Code. Gemergt wird nur, was GitHub mit grünen Checks meldet und Claude als sicher einstuft; überflüssige PRs werden mit Begründung geschlossen, Dependabot-PRs mit Konflikt neu aufgebaut. Der Tag x.y.(z+1) kommt erst, wenn die CI auf main grün ist.'),
-        s.merge && h('div', { class: 'field-row' }, h('label', { for: 'repos-model' }, 'Modell für die Prüfung'),
-          modelSelect(s.model, view.site?.claude?.model, (model) => { s.model = model; }, 'repos-model')),
-        option('cleanup', 'Gemergte Branches löschen',
-          'Branches, deren Commits vollständig im Hauptbranch sind oder deren PR gemergt wurde, auf GitHub und im lokalen Klon. Geschützte, ausgecheckte und Branches offener PRs bleiben.'),
-        h('div', { class: 'note' }, 'Zuerst entsteht nur eine Vorschau; ausgeführt wird erst, wenn du sie unter „Ergebnis“ bestätigst.'),
-        s.error && h('div', { class: 'note error-text' }, s.error),
-      ],
-      actions: [
-        (view.repoPlans || view.repoReports.length > 0) && button(view.repoPlans ? 'Offene Vorschau' : 'Letztes Ergebnis', () => { close(); selectStep('repos'); }, { cls: 'left' }),
-        button('Abbrechen', close),
-        button('Prüfen', async () => {
-          try { await invoke('check_repos', { merge: s.merge, cleanup: s.cleanup, model: s.model }); close(); } catch (error) { s.error = String(error); render(); }
-        }, { cls: 'primary', disabled: (!s.merge && !s.cleanup) || !products.length || !!view.running }),
       ],
     };
   });
@@ -920,9 +1401,13 @@ function hostKeyDialog() {
 async function start() {
   await listen('changed', refresh);
   await listen('log', (event) => {
-    if (event.payload.step === selected) appendLog([event.payload.line]);
+    if (event.payload.step === 'repos') {
+      if (reposUi) appendTo(reposUi.careLog, [event.payload.line]);
+    } else if (event.payload.step === selected) appendLog([event.payload.line]);
   });
   await refresh();
+  // Ages and "veraltet" move on without an event; a fresh view keeps them right. Reads nothing remote.
+  setInterval(() => { if (area === 'repos' && document.visibilityState === 'visible') refresh(); }, 30000);
 }
 
 start();

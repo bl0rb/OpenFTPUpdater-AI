@@ -101,8 +101,9 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent-soft
 
 .toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: 8px 10px;
   padding: 10px 16px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
@@ -133,10 +134,22 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent-soft
 .check-line input { margin: 0; }
 
 main { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px; padding: 14px 16px 16px; overflow: auto; }
+/* One per main area; the hidden one keeps its state (log, input, scroll). */
+.area { flex: 1 0 auto; display: flex; flex-direction: column; gap: 12px; }
+button:focus-visible, .repo-card:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Main navigation in the toolbar. */
+.nav { display: flex; gap: 2px; margin-left: 14px; padding: 2px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); }
+.nav-item { height: 26px; border: 0; border-radius: 6px; background: none; color: var(--muted); }
+.nav-item:hover:not(:disabled) { background: var(--surface); color: var(--text); }
+.nav-item.active { background: var(--surface); color: var(--text); font-weight: 600; box-shadow: 0 0 0 1px var(--border); }
+.nav-badge { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--orange-soft); color: var(--orange); font-size: 11px; font-weight: 600; display: inline-grid; place-items: center; }
 
 .section { display: flex; flex-direction: column; gap: 8px; }
 .section-head { display: flex; align-items: center; gap: 10px; min-height: var(--control-h); }
 .section-head h2 { margin: 0; font-size: 13px; }
+.section-head h3 { margin: 0; font-size: 13px; }
+.section-head.wrap { flex-wrap: wrap; row-gap: 6px; }
 .panel { padding: 10px 12px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
 
 .steps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
@@ -238,7 +251,7 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px;
 .status-dot.error { background: var(--red); }
 .status-dot.idle, .status-dot.running { background: var(--muted); }
 
-/* Repos pflegen: a bar to run the preview, then one collapsible block per repository. */
+/* Repository care: a bar to run the preview, then one collapsible block per repository. */
 .plan-bar { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 8px; border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); background: var(--accent-soft); }
 .run.repo > summary { flex-wrap: wrap; row-gap: 4px; }
 .items { display: flex; flex-direction: column; gap: 8px; }
@@ -359,3 +372,45 @@ legend { font-weight: 600; padding: 0 4px; }
 .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .empty-list { grid-column: 1 / -1; padding: 10px; }
 .model-select { width: 100%; font-size: 12px; }
+
+
+/* Repositories: one card per repository, state in words, never by colour alone. */
+.repo-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr)); gap: 10px; }
+.repo-card {
+  display: flex; flex-direction: column; align-items: stretch; gap: 4px; height: auto; min-width: 0;
+  padding: 10px 12px; text-align: left; white-space: normal; border-radius: 12px; border-left-width: 4px;
+}
+.repo-card.error { border-left-color: var(--red); }
+.repo-card.warning { border-left-color: var(--orange); }
+.repo-card.ok { border-left-color: var(--green); }
+.repo-card-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.repo-card-head strong { font-size: 14px; min-width: 0; }
+.repo-card-head .chip { align-self: center; flex: none; }
+.repo-card-head .spinner { align-self: center; flex: none; }
+.repo-card-reason { font-weight: 500; overflow-wrap: anywhere; }
+.repo-card-meta { display: flex; flex-wrap: wrap; gap: 2px 14px; color: var(--muted); font-size: 12px; }
+.repo-card-rel { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+
+.repo-detail { display: flex; flex-direction: column; gap: 12px; }
+.repo-detail-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.repo-detail-head h2 { margin: 0; font-size: 16px; min-width: 0; }
+.repo-detail h3 { margin: 0; font-size: 13px; }
+.findings { display: flex; flex-direction: column; gap: 6px; }
+.finding ul { margin: 2px 0 0; padding-left: 18px; }
+.finding li { margin: 1px 0; overflow-wrap: anywhere; }
+.note.green { color: var(--green); }
+.fact-grid { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 14px; align-items: baseline; }
+.fact-grid .label { font-weight: 600; white-space: nowrap; }
+.fact-grid .detail-text { color: var(--muted); overflow-wrap: anywhere; }
+.fact-grid .detail-text.red { color: var(--red); }
+.fact-grid .detail-text.green { color: var(--green); }
+.fact-grid .detail-text.orange { color: var(--orange); }
+.item-check { font-size: 12px; color: var(--muted); padding-left: 10px; border-left: 2px solid var(--border); }
+.item-line > button.link { flex: none; }
+.plain-list { margin: 4px 0 0; padding-left: 18px; }
+.plain-list li { margin: 2px 0; overflow-wrap: anywhere; }
+
+/* The care panel above the list: only while a preview, a run or a result exists. */
+.detail.care { flex: none; min-height: 0; }
+.care .log { min-height: 220px; max-height: 50vh; }
+@media (max-width: 700px) { .fact-grid { grid-template-columns: minmax(0, 1fr); } .fact-grid .label { margin-top: 4px; } }

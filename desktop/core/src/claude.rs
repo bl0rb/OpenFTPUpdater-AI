@@ -197,7 +197,7 @@ pub fn args(site: &Site, prompt: &str, model: Option<&str>, effort: Option<&str>
     args
 }
 
-// MARK: Pull request review for "Repos pflegen"
+// MARK: Pull request review for the repository care
 
 /// Read-only: the product's clone, pull requests and releases through gh, the web.
 pub const REVIEW_ALLOWED: &[&str] = &[
@@ -252,7 +252,7 @@ pub const REVIEW_DISALLOWED: &[&str] = &[
 ];
 
 /// One entry per pull request; see `repocare::Review`.
-pub const REVIEW_SCHEMA: &str = r#"{"type":"object","properties":{"prs":{"type":"array","items":{"type":"object","properties":{"number":{"type":"integer"},"action":{"type":"string","enum":["merge","keep","close"]},"risk":{"type":"string","enum":["green","yellow","red"]},"bump":{"type":"string"},"reason":{"type":"string"}},"required":["number","action","risk","reason"]}}},"required":["prs"]}"#;
+pub const REVIEW_SCHEMA: &str = r#"{"type":"object","properties":{"prs":{"type":"array","items":{"type":"object","properties":{"number":{"type":"integer"},"action":{"type":"string","enum":["merge","keep","close"]},"risk":{"type":"string","enum":["green","yellow","red"]},"bump":{"type":"string"},"reason":{"type":"string"},"supersededBy":{"type":"integer"}},"required":["number","action","risk","reason"]}}},"required":["prs"]}"#;
 
 /// The rules of the dependabot-pr skill, so the review does not depend on it being installed.
 const REVIEW_RULES: &str = "\
@@ -261,7 +261,9 @@ So entscheidest du (action):
 Release-Notes nichts enthalten, was diesen Code betrifft.
 - keep: alles Rote und alles Unklare. Lieber offen lassen, als die Software zu brechen.
 - close: nur wenn der PR überflüssig ist: von einem anderen offenen PR überholt (gleiche Abhängigkeit, höhere \
-Version), schon im Zielbranch enthalten oder gegenstandslos. Deine Begründung wird als Kommentar gepostet.
+Version), schon im Zielbranch enthalten oder gegenstandslos. Deine Begründung wird als Kommentar gepostet. \
+Ist er überholt, gib die Nummer des neueren PRs in supersededBy an; die App prüft vor dem Schließen, ob es ihn \
+noch gibt.
 PRs, die GitHub nicht als mergebar meldet, kommen für merge nicht in Frage; prüfe bei ihnen nur, ob sie \
 überflüssig sind, sonst keep. Wäre ein solcher Dependabot-PR nach einem Rebase mergbar, sag merge: die App \
 stößt dann `@dependabot rebase` an.

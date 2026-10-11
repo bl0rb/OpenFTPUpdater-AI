@@ -1,7 +1,7 @@
-//! The four steps. Each runs on its own thread, writes log lines as it goes and ends with a
-//! status and a one-line summary.
+//! The four steps and the repository care. Each runs on its own thread, writes log lines as it goes
+//! and ends with a status and a one-line summary.
 
-use crate::{changed, load_site, with_model, Check, ClaudeRun, LogLine, RepoReport, Status, Step, UploadResult};
+use crate::{changed, load_site, with_model, Check, ClaudeRun, ItemOutcome, LogLine, Model, RepoItem, RepoReport, Status, Step, UploadResult};
 use anyhow::{anyhow, bail, Context, Result};
 use openreleasepilot_core::claude::{self, Event, Outdated};
 use openreleasepilot_core::config::{AuthKind, Config};
@@ -10,7 +10,7 @@ use openreleasepilot_core::sftp::{self, ConnectError, Connection};
 use openreleasepilot_core::shell::{self, Runner};
 use openreleasepilot_core::site::{Site, Task};
 use openreleasepilot_core::repocare::{self, Done};
-use openreleasepilot_core::{git, github, localrepo, manifest, secrets, verify};
+use openreleasepilot_core::{git, github, localrepo, manifest, repos, secrets, verify};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -19,7 +19,7 @@ use tauri::{AppHandle, Emitter};
 
 const MAX_LOG_LINES: usize = 5000;
 
-fn now() -> u64 {
+pub fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
@@ -117,10 +117,10 @@ pub enum Job {
     Upload,
     Verify,
     AddProduct(NewProductInput),
-    /// "Repos pflegen": the preview, with Claude's review.
+    /// Repository care: the preview, with Claude's review.
     ReposCheck(RepoOptions),
-    /// "Repos pflegen": a confirmed preview.
-    Repos(Vec<repocare::Plan>),
+    /// Repository care: a confirmed preview.
+    Repos(repocare::PlanSet),
 }
 
 impl Job {
@@ -232,21 +232,30 @@ pub fn resolve_products(site: &Site, config: &Config, latest_tags: &std::collect
         .collect()
 }
 
+/// `runner` is set as soon as a start is accepted, `running` only once its thread runs: either means busy.
+fn busy(runner: Option<&Arc<Runner>>, running: Option<Step>) -> bool {
+    runner.is_some() || running.is_some()
+}
+
 /// Runs the jobs one after another on a background thread; stops at the first error.
 pub fn start(app: &AppHandle, jobs: Vec<Job>) -> Result<(), String> {
+    start_with(app, |_| Ok(jobs))
+}
+
+/// Like `start`, but `jobs` builds the jobs under the same lock that marks the app busy: taking a
+/// preview and starting its run happen together, so a second click finds the app busy.
+pub fn start_with(app: &AppHandle, jobs: impl FnOnce(&mut Model) -> Result<Vec<Job>, String>) -> Result<(), String> {
     let runner = Arc::new(Runner::default());
-    let busy = with_model(app, |m| {
-        if m.running.is_some() {
-            return true;
+    let jobs = with_model(app, |m| {
+        if busy(m.runner.as_ref(), m.running) {
+            return Err("Es läuft bereits ein Schritt.".to_owned());
         }
+        let jobs = jobs(m)?;
         m.runner = Some(runner.clone());
         m.error = None;
         m.notice = None;
-        false
-    });
-    if busy {
-        return Err("Es läuft bereits ein Schritt.".into());
-    }
+        Ok(jobs)
+    })?;
     let app = app.clone();
     std::thread::spawn(move || {
         let all = jobs.len() > 1;
@@ -275,7 +284,7 @@ pub fn start(app: &AppHandle, jobs: Vec<Job>) -> Result<(), String> {
                     Step::Repos => {
                         m.repo_reports.clear();
                         if matches!(job, Job::ReposCheck(_)) {
-                            m.repo_plans = None;
+                            m.repo_plan = None;
                         }
                     }
                 }
@@ -288,7 +297,7 @@ pub fn start(app: &AppHandle, jobs: Vec<Job>) -> Result<(), String> {
                 Job::Verify => verify(&ctx),
                 Job::AddProduct(input) => add_product(&ctx, input),
                 Job::ReposCheck(options) => repos_check(&ctx, options),
-                Job::Repos(plans) => repos_run(&ctx, plans),
+                Job::Repos(set) => repos_run(&ctx, set),
             };
             let (status, summary) = match result {
                 Ok(done) => done,
@@ -898,36 +907,37 @@ fn verify(ctx: &Ctx) -> Result<(Status, String)> {
     }
 }
 
-// MARK: Repos pflegen
+// MARK: Repository care
 
-/// What "Repos pflegen" looks at.
+/// What a care preview looks at.
 #[derive(Debug, Clone)]
 pub struct RepoOptions {
+    /// Exactly these repositories, each once.
+    pub targets: Vec<repos::RepoTarget>,
     pub merge: bool,
     pub cleanup: bool,
     /// Model alias for the review; empty = the site's default.
     pub model: String,
+    /// Project the preview is for; dropped if the project changes meanwhile.
+    pub project: String,
 }
 
-/// The preview: GitHub's state of every selected product's repository, then Claude judges the open
-/// pull requests. Ends with a plan the user confirms under "Ergebnis".
+/// The preview: GitHub's state of the chosen repositories (read only), then Claude judges the open
+/// pull requests. Ends with a plan the user confirms or discards.
 fn repos_check(ctx: &Ctx, options: &RepoOptions) -> Result<(Status, String)> {
     if github::token().is_none() {
-        bail!("Für „Repos pflegen“ die GitHub-CLI anmelden: gh auth login");
+        bail!("Für die Pflege die GitHub-CLI anmelden: gh auth login");
     }
-    let products = crate::selected_products(&ctx.app).map_err(|e| anyhow!(e))?;
-    if products.is_empty() {
-        bail!("Keine Produkte ausgewählt");
+    if options.targets.is_empty() {
+        bail!("Kein Repository gewählt");
     }
     let site = ctx.site()?;
-    ctx.info(format!("Lese den Stand von {} Repositories auf GitHub …", products.len()));
+    let names: Vec<&str> = options.targets.iter().map(|t| t.repo.as_str()).collect();
+    ctx.info(format!("Lese den Stand auf GitHub (nur lesend): {}", names.join(", ")));
     let (merge, cleanup) = (options.merge, options.cleanup);
     // One thread per repository: each needs a dozen or more API calls.
     let mut plans: Vec<repocare::Plan> = std::thread::scope(|scope| {
-        let handles: Vec<_> = products
-            .iter()
-            .map(|(p, clone)| scope.spawn(move || repocare::scan(&p.name, &p.repo, &p.tag_prefix, clone.as_deref(), merge, cleanup)))
-            .collect();
+        let handles: Vec<_> = options.targets.iter().map(|target| scope.spawn(move || repocare::scan(target, merge, cleanup))).collect();
         handles.into_iter().map(|h| h.join().expect("scan thread panicked")).collect()
     });
     if merge && plans.iter().any(|p| !p.prs.is_empty()) {
@@ -963,9 +973,19 @@ fn repos_check(ctx: &Ctx, options: &RepoOptions) -> Result<(Status, String)> {
         repocare::finish(plan, merge, cleanup);
     }
     let summary = plan_summary(&plans);
-    let errors = plans.iter().filter(|p| p.error.is_some() || p.review_note.is_some()).count();
-    with_model(&ctx.app, |m| m.repo_plans = Some(plans));
-    Ok((if errors > 0 { Status::Warning } else { Status::Ok }, format!("Vorschau: {summary}. Unter „Ergebnis“ ausführen oder verwerfen.")))
+    let notes = plans.iter().filter(|p| p.error.is_some() || p.review_note.is_some()).count();
+    let set = repocare::PlanSet {
+        id: crate::next_token(),
+        project: options.project.clone(),
+        created_at: now(),
+        merge,
+        cleanup,
+        model: options.model.clone(),
+        targets: options.targets.iter().map(|t| (t.key.clone(), t.fingerprint())).collect(),
+        plans,
+    };
+    with_model(&ctx.app, |m| repocare::store_plan(&mut m.repo_plan, &m.config.project_dir, set)).map_err(|e| anyhow!(e))?;
+    Ok((if notes > 0 { Status::Warning } else { Status::Ok }, format!("Vorschau: {summary}. Bestätigen oder verwerfen.")))
 }
 
 /// `3 PRs mergen, 1 Tag, 5 Branches löschen`, or `nichts zu tun`.
@@ -1018,21 +1038,42 @@ fn review(ctx: &Ctx, plan: &mut repocare::Plan, options: &RepoOptions, site: &Si
     }
     let review: repocare::Review = serde_json::from_value(outcome.structured.context("Claude hat keine strukturierte Antwort geliefert")?)
         .context("Claudes Antwort passt nicht zum Schema")?;
-    repocare::apply_review(plan, &review.prs);
+    let problems = repocare::apply_review(plan, &review.prs);
+    for problem in &problems {
+        ctx.warn(format!("  Bewertung verworfen: {problem}"));
+    }
+    if !problems.is_empty() {
+        plan.review_note = Some(format!("Nicht verwendbare Bewertungen, die betroffenen PRs bleiben offen: {}", problems.join("; ")));
+    }
     Ok(())
 }
 
+/// Counts of what the run did, for the summary.
+#[derive(Default)]
+struct Tally {
+    done: HashMap<&'static str, usize>,
+    skipped: usize,
+    failed: usize,
+    cancelled: usize,
+}
+
 /// Carries out a confirmed preview in three rounds over all repositories, so their CI runs while
-/// the app works on the next one: pull requests (close, merge, rebase), then the tags once the CI
-/// is green, then the branches. Each item is checked again first (see `repocare`).
-fn repos_run(ctx: &Ctx, plans: &[repocare::Plan]) -> Result<(Status, String)> {
-    use repocare::Action;
+/// the app works on the next one: pull requests (close, merge, rebase), then the tags, then the
+/// branches. Each item is checked again right before it writes (see `repocare`). A cancel stops
+/// before the next item and lists the rest as not done; nothing done is rolled back.
+fn repos_run(ctx: &Ctx, set: &repocare::PlanSet) -> Result<(Status, String)> {
+    use repocare::{Action, CiWait, RunState};
     if github::token().is_none() {
-        bail!("Für „Repos pflegen“ die GitHub-CLI anmelden: gh auth login");
+        bail!("Für die Pflege die GitHub-CLI anmelden: gh auth login");
     }
+    let config = ctx.config();
+    let current = crate::repo_targets(&ctx.site().map_err(|e| format!("{e:#}")), &config);
+    set.check_binding(&config.project_dir, &current).map_err(|e| anyhow!(e))?;
+
+    let plans = &set.plans;
     let mut reports: Vec<RepoReport> = plans.iter().map(|p| RepoReport { name: p.name.clone(), repo: p.repo.clone(), items: Vec::new() }).collect();
-    let mut merged: Vec<std::collections::HashSet<u64>> = vec![Default::default(); plans.len()];
-    let (mut done, mut problems) = (HashMap::<&str, usize>::new(), 0);
+    let mut states: Vec<RunState> = plans.iter().map(RunState::new).collect();
+    let mut tally = Tally::default();
     let publish = |reports: &Vec<RepoReport>| {
         with_model(&ctx.app, |m| m.repo_reports = reports.clone());
         changed(&ctx.app);
@@ -1040,29 +1081,27 @@ fn repos_run(ctx: &Ctx, plans: &[repocare::Plan]) -> Result<(Status, String)> {
 
     ctx.info("Pull Requests …");
     for (i, plan) in plans.iter().enumerate() {
-        ctx.runner.check()?;
         ctx.cmd(format!("{} · {}", plan.name, plan.repo));
-        let items = &mut reports[i].items;
         if let Some(error) = &plan.error {
-            record(ctx, items, "Repository".into(), "", Err(anyhow!("{error}")));
-            problems += 1;
+            let result = Ok(Done::Skipped(format!("in der Vorschau nicht lesbar ({error}); nichts ausgeführt")));
+            record(ctx, &mut reports[i].items, &mut tally, None, "Repository".into(), "", result);
             continue;
         }
         for (action, key) in [(Action::Close, "geschlossen"), (Action::Merge, "gemergt"), (Action::Rebase, "Rebase")] {
             for pr in plan.prs.iter().filter(|pr| pr.action == action) {
-                ctx.runner.check()?;
-                let result = match action {
-                    Action::Close => repocare::close(plan, pr),
-                    Action::Merge => repocare::merge(plan, pr),
-                    _ => repocare::rebase(plan, pr),
-                };
-                if record(ctx, items, format!("PR #{}", pr.number), &pr.title, result) {
-                    *done.entry(key).or_default() += 1;
-                    if action == Action::Merge {
-                        merged[i].insert(pr.number);
-                    }
+                let label = format!("PR #{}", pr.number);
+                let outcome = if ctx.runner.is_cancelled() {
+                    not_run(ctx, &mut reports[i].items, &mut tally, label)
                 } else {
-                    problems += 1;
+                    let result = match action {
+                        Action::Close => repocare::close(plan, pr),
+                        Action::Merge => repocare::merge(plan, pr, &mut states[i]),
+                        _ => repocare::rebase(plan, pr),
+                    };
+                    record(ctx, &mut reports[i].items, &mut tally, Some(key), label, &pr.title, result)
+                };
+                if action == Action::Merge && outcome != ItemOutcome::Done {
+                    states[i].missed.push(pr.number);
                 }
             }
         }
@@ -1070,19 +1109,16 @@ fn repos_run(ctx: &Ctx, plans: &[repocare::Plan]) -> Result<(Status, String)> {
     }
 
     if plans.iter().any(|p| p.tag.is_some() && p.error.is_none()) {
-        ctx.info("Tags, sobald die CI grün ist …");
+        ctx.info("Tags, sobald die CI des Ziel-Commits grün ist …");
     }
     for (i, plan) in plans.iter().enumerate() {
         let Some(tag) = plan.tag.as_ref().filter(|_| plan.error.is_none()) else { continue };
-        ctx.runner.check()?;
-        let result = repocare::head(plan).and_then(|sha| repocare::tag(plan, &sha, &ctx.runner, &|text| ctx.info(format!("  {}: {text}", plan.name))));
-        if result.is_err() && ctx.runner.is_cancelled() {
-            bail!("Abgebrochen");
-        }
-        if record(ctx, &mut reports[i].items, format!("Tag {tag}"), "", result) {
-            *done.entry("Tag").or_default() += 1;
+        let label = format!("Tag {tag}");
+        if ctx.runner.is_cancelled() {
+            not_run(ctx, &mut reports[i].items, &mut tally, label);
         } else {
-            problems += 1;
+            let result = repocare::tag(plan, &states[i], &ctx.runner, &CiWait::default(), &|text| ctx.info(format!("  {}: {text}", plan.name)));
+            record(ctx, &mut reports[i].items, &mut tally, Some("Tag"), label, "", result);
         }
         publish(&reports);
     }
@@ -1095,28 +1131,36 @@ fn repos_run(ctx: &Ctx, plans: &[repocare::Plan]) -> Result<(Status, String)> {
             continue;
         }
         for branch in &plan.branches {
-            ctx.runner.check()?;
-            let result = match branch.after_merge {
-                Some(number) if !merged[i].contains(&number) => Ok(Done::Skipped(format!("PR #{number} wurde nicht gemergt"))),
-                _ => repocare::delete_branch(plan, branch),
-            };
-            let ok = record(ctx, &mut reports[i].items, format!("Branch {}", branch.name), "", result);
-            if ok {
-                *done.entry("Branch").or_default() += 1;
-            } else if branch.after_merge.is_none() {
-                problems += 1;
+            let label = format!("Branch {}", branch.name);
+            if ctx.runner.is_cancelled() {
+                not_run(ctx, &mut reports[i].items, &mut tally, label);
+            } else {
+                let result = repocare::delete_branch(plan, branch, &states[i]);
+                record(ctx, &mut reports[i].items, &mut tally, Some("Branch"), label, "", result);
+            }
+        }
+        if !plan.local_branches.is_empty() && plan.local_sync.is_some() {
+            let label = "Lokale Kopie abgleichen".to_owned();
+            if ctx.runner.is_cancelled() {
+                not_run(ctx, &mut reports[i].items, &mut tally, label);
+            } else {
+                record(ctx, &mut reports[i].items, &mut tally, None, label, "", repocare::sync_local(plan));
             }
         }
         for branch in &plan.local_branches {
-            ctx.runner.check()?;
-            if record(ctx, &mut reports[i].items, format!("Lokal {}", branch.name), "", repocare::delete_local_branch(plan, branch)) {
-                *done.entry("Branch").or_default() += 1;
+            let label = format!("Lokal {}", branch.name);
+            if ctx.runner.is_cancelled() {
+                not_run(ctx, &mut reports[i].items, &mut tally, label);
             } else {
-                problems += 1;
+                let result = repocare::delete_local_branch(plan, branch, &states[i]);
+                record(ctx, &mut reports[i].items, &mut tally, Some("Branch"), label, "", result);
             }
         }
         publish(&reports);
     }
+
+    // What changed is read again (read only), so the overview shows the new state.
+    crate::refresh_status(&ctx.app, &plans.iter().map(|p| p.key.clone()).collect::<Vec<_>>());
 
     let mut parts = Vec::new();
     for (key, one, many) in [
@@ -1126,27 +1170,69 @@ fn repos_run(ctx: &Ctx, plans: &[repocare::Plan]) -> Result<(Status, String)> {
         ("Tag", "Tag gesetzt", "Tags gesetzt"),
         ("Branch", "Branch gelöscht", "Branches gelöscht"),
     ] {
-        let n = done.get(key).copied().unwrap_or(0);
+        let n = tally.done.get(key).copied().unwrap_or(0);
         if n > 0 {
             parts.push(format!("{n} {}", if n == 1 { one } else { many }));
         }
     }
-    if problems > 0 {
-        parts.push(format!("{problems} übersprungen oder fehlgeschlagen"));
+    for (n, what) in [(tally.skipped, "übersprungen"), (tally.failed, "fehlgeschlagen"), (tally.cancelled, "abgebrochen")] {
+        if n > 0 {
+            parts.push(format!("{n} {what}"));
+        }
     }
     let summary = if parts.is_empty() { "Nichts zu tun".to_owned() } else { parts.join(", ") };
-    Ok((if problems > 0 { Status::Warning } else { Status::Ok }, summary))
+    let status = if tally.failed > 0 {
+        Status::Error
+    } else if tally.skipped + tally.cancelled > 0 {
+        Status::Warning
+    } else {
+        Status::Ok
+    };
+    Ok((status, summary))
 }
 
-/// Logs one item and adds it to the result; `true` if it was done.
-fn record(ctx: &Ctx, items: &mut Vec<Check>, label: String, context: &str, result: Result<Done>) -> bool {
-    let (status, text, done) = match result {
-        Ok(Done::Ok(text)) => (Status::Ok, text, true),
-        Ok(Done::Skipped(text)) => (Status::Warning, text, false),
-        Err(e) => (Status::Error, format!("{e:#}"), false),
+/// Logs one item and adds it to the result; `done` names what it counts as when it worked.
+fn record(ctx: &Ctx, items: &mut Vec<RepoItem>, tally: &mut Tally, done: Option<&'static str>, label: String, context: &str, result: Result<Done>) -> ItemOutcome {
+    let (outcome, text) = match result {
+        Ok(Done::Ok(text)) => (ItemOutcome::Done, text),
+        Ok(Done::Skipped(text)) => (ItemOutcome::Skipped, text),
+        Err(e) if ctx.runner.is_cancelled() => (ItemOutcome::Cancelled, format!("abgebrochen ({e:#})")),
+        Err(e) => (ItemOutcome::Failed, format!("{e:#}")),
     };
+    match outcome {
+        ItemOutcome::Done => *tally.done.entry(done.unwrap_or("")).or_default() += 1,
+        ItemOutcome::Skipped => tally.skipped += 1,
+        ItemOutcome::Failed => tally.failed += 1,
+        ItemOutcome::Cancelled => tally.cancelled += 1,
+    }
     let detail = if context.is_empty() { text } else { format!("{context} – {text}") };
-    ctx.log(match status { Status::Ok => "ok", Status::Warning => "warn", _ => "error" }, format!("  {label}: {detail}"));
-    items.push(Check { label, status, detail });
-    done
+    let kind = match outcome {
+        ItemOutcome::Done => "ok",
+        ItemOutcome::Skipped | ItemOutcome::Cancelled => "warn",
+        ItemOutcome::Failed => "error",
+    };
+    ctx.log(kind, format!("  {label}: {detail}"));
+    items.push(RepoItem { label, outcome, detail });
+    outcome
+}
+
+/// An item the run did not get to because it was cancelled.
+fn not_run(ctx: &Ctx, items: &mut Vec<RepoItem>, tally: &mut Tally, label: String) -> ItemOutcome {
+    tally.cancelled += 1;
+    ctx.log("warn", format!("  {label}: nicht ausgeführt, abgebrochen"));
+    items.push(RepoItem { label, outcome: ItemOutcome::Cancelled, detail: "nicht ausgeführt, abgebrochen".into() });
+    ItemOutcome::Cancelled
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_start_counts_as_busy_before_its_thread_runs() {
+        let runner = Arc::new(Runner::default());
+        assert!(busy(Some(&runner), None), "a second click right after the first");
+        assert!(busy(None, Some(Step::Repos)));
+        assert!(!busy(None, None));
+    }
 }

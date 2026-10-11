@@ -5,6 +5,7 @@
 //! - `shell`, `git`, `github`, `claude`: external tools
 //! - `sftp`, `manifest`, `verify`, `secrets`: upload, change tracking, live check, password storage
 //! - `update`: updates of the app itself from its GitHub releases
+//! - `repos`: the products' repositories, what GitHub reports about them, their health (read only)
 //! - `repocare`: merging, tagging and branch cleanup in the products' repositories
 
 pub mod claude;
@@ -15,6 +16,7 @@ pub mod localrepo;
 pub mod manifest;
 pub mod paths;
 pub mod repocare;
+pub mod repos;
 pub mod secrets;
 pub mod sftp;
 pub mod shell;

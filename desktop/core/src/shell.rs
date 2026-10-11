@@ -67,8 +67,16 @@ fn command(program: &str, cwd: &Path) -> Command {
     cmd
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Commands `output` ran on this thread, so a test can assert that nothing wrote (no fetch, no delete).
+    pub(crate) static RAN: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// Runs a command to completion and returns stdout; fails with stderr on a non-zero exit.
 pub fn output(program: &str, args: &[&str], cwd: &Path) -> Result<String> {
+    #[cfg(test)]
+    RAN.with(|ran| ran.borrow_mut().push(format!("{program} {}", args.join(" "))));
     let out = command(program, cwd).args(args).output().with_context(|| format!("{program} nicht gefunden"))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);

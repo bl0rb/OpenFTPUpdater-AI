@@ -6,9 +6,13 @@
 
 Desktop-App, die eine statische Website auf dem Stand der Releases hält, die sie beschreibt,
 und sie veröffentlicht: Claude Code aktualisiert die Inhalte, die App baut, committet, pusht und
-lädt das Ergebnis per SFTP hoch und prüft danach die Live-Seite Byte für Byte.
+lädt das Ergebnis per SFTP hoch und prüft danach die Live-Seite Byte für Byte. Ein zweiter
+Bereich, **Repositories**, zeigt den Zustand der Produkt-Repositories und pflegt sie: geprüfte Pull
+Requests mergen, die nächste Patch-Version taggen, gemergte Branches löschen.
 
-Vier Schaltflächen, einzeln oder nacheinander:
+Die App hat zwei Hauptbereiche, umschaltbar in der Kopfleiste: **Übersicht** (die Website) und
+**Repositories**; die Einstellungen bleiben unter **Einrichtung**. Die Übersicht hat vier Schaltflächen,
+einzeln oder nacheinander:
 
 | Schritt | Was passiert | Ändert etwas? |
 |---|---|---|
@@ -31,43 +35,99 @@ Das Hauptfenster listet die Produkte aus `site.json` mit je einer Checkbox. Prec
 sich nur um ausgewählte Produkte: Abgewählte fragt der Precheck nicht ab, und Claude bekommt sie beim
 Update als „nicht ausgewählt, daran nichts ändern“ genannt. Jede Zeile zeigt den dokumentierten Stand,
 nach einem Precheck auch, ob ein neueres Release vorliegt, und „kein Klon“, wenn `localPath` fehlt. Die
-Auswahl merkt sich die App in ihren Einstellungen, nicht im Website-Repository.
+Auswahl merkt sich die App in ihren Einstellungen, nicht im Website-Repository. In **Repositories**
+blendet sie nichts aus: Abgewählte Produkte stehen dort weiterhin.
 
-## Repos pflegen
+## Repositories
 
-**Repos pflegen …** in der Kopfleiste arbeitet in den Repositories der ausgewählten Produkte, über die
+Der Bereich **Repositories** listet das Repository jedes Produkts aus `site.json`, jedes nur einmal, auch
+wenn sich mehrere Produkte eins teilen (`owner/name`, ohne Rücksicht auf Groß- und Kleinschreibung), und
+auch die in der Übersicht abgewählten. Jede Zeile zeigt einen Zustand in Worten mit seinem Hauptgrund,
+offene Pull Requests (davon wie viele von Dependabot), die CI des Default-Branches, das neueste
+veröffentlichte Release (ohne eines den höchsten passenden Tag, als Tag gekennzeichnet), die lokale Kopie
+und wann zuletzt gelesen wurde. Das Repository der Website selbst steht in der Kopfzeile.
+
+**Status aktualisieren** liest nur bei GitHub: kein Claude, keine Kosten, kein Schreiben, kein
+`git fetch`. Gelesen wird beim ersten Öffnen des Bereichs und auf Anforderung, nie im Hintergrund; schlägt
+das Lesen fehl, bleibt der ältere Stand sichtbar, aber als alt markiert, und Daten älter als fünf Minuten
+gelten als veraltet. Ohne `gh`-Anmeldung lassen sich öffentliche Repositories trotzdem lesen (GitHub
+erlaubt dann 60 Anfragen pro Stunde; ein Repository braucht etwa acht).
+
+| Zustand | Wann |
+|---|---|
+| **Blockiert** | die CI des Default-Branches ist fehlgeschlagen, oder das Repository ist nicht lesbar (GitHub antwortet mit 404 oder verweigert den Zugriff; 404 kann auch „privat ohne Zugriff“ heißen) |
+| **Aufmerksamkeit nötig** | offene Dependabot-Pull-Requests, Commits seit dem letzten Release oder Tag, die Website dokumentiert eine ältere Version als das neueste Release, oder (sobald die Detailansicht sie gelesen hat) Pull Requests mit Konflikt oder roter CI |
+| **Unbekannt** | nichts davon, aber nötige Angaben fehlen, sind unvollständig oder alt: CI läuft noch, keine Checks gefunden, unklares Ergebnis, Abfrage fehlgeschlagen |
+| **In Ordnung** | alles Nötige wurde erfolgreich und kürzlich gelesen, und es gibt nichts zu tun |
+
+Fehlende Release-Angaben allein verhindern „In Ordnung“ nicht; fehlende oder unvollständige Daten führen
+nie dazu. Ein offener Pull Request eines Menschen ist für sich kein Befund, und ein roter Pull Request
+blockiert nicht das ganze Repository. Archivierte Repositories und solche ohne Schreibrecht bleiben
+lesbar, die Pflege ist dort gesperrt.
+
+Die Detailansicht (Klick auf eine Zeile) zeigt Default-Branch und Head-Commit, die CI samt Commit, Release
+und Tag, Commits seit dieser Basis (nur wenn sie ein Vorfahr des Heads ist, sonst „nicht bestimmbar“),
+Tag-Präfix, lokale Kopie, die Produkte mit ihrem dokumentierten Stand und jeden offenen Pull Request mit
+Zielbranch, Autor, CI und Mergebarkeit. In die Pflege kommen nur Pull Requests auf den Default-Branch.
+
+## Repositories pflegen
+
+Die Pflege startet in der Detailansicht (**Dieses Repository prüfen**) oder für die Repositories der
+ausgewählten Produkte (**Ausgewählte pflegen …**, das sie vorher nennt und gesperrte auslässt), über die
 angemeldete `gh`-CLI, in zwei Teilen:
 
-1. **Prüfen** liest den Stand jedes Repositorys auf GitHub; danach bewertet Claude Code jeden offenen
-   Pull Request, nur lesend (im lokalen Klon, wenn es einen gibt), nach den Regeln des Skills
-   `dependabot-pr`: Risikoklasse (grün, gelb, rot; unter 1.0 zählt ein Wechsel der ersten Stelle ungleich
-   null als Major), Release-Notes aus dem Original-Repository, bei Dependabot nur Manifest-, Lock- und
-   Workflow-Dateien, SHA-Pins von Actions, zusammengehörige Abhängigkeiten nur gemeinsam, Majors gegen die
-   tatsächliche Nutzung im Code. Was Claude sich ansieht, steht im Log.
-2. Die Vorschau unter „Ergebnis“ zeigt pro Repository, was passiert, gruppiert: wird gemergt, wird
-   geschlossen, Rebase, bleibt offen, jeweils mit Claudes Risiko und Begründung. **Ausführen** setzt sie
-   um, **Verwerfen** verwirft sie. Jeder Punkt wird unmittelbar davor erneut geprüft; was sich seit der
-   Vorschau geändert hat, bleibt unangetastet.
+1. **Prüfen** liest den Stand bei GitHub (nur lesend, ohne Fetch); danach bewertet Claude Code jeden
+   offenen Pull Request auf den Default-Branch, nur lesend (in der lokalen Kopie, wenn es eine gibt),
+   nach den Regeln des Skills `dependabot-pr`: Risikoklasse (grün, gelb, rot; unter 1.0 zählt ein
+   Wechsel der ersten Stelle ungleich null als Major), Release-Notes aus dem Original-Repository, bei
+   Dependabot nur Manifest-, Lock- und Workflow-Dateien, SHA-Pins von Actions, zusammengehörige
+   Abhängigkeiten nur gemeinsam, Majors gegen die tatsächliche Nutzung im Code. Das kostet
+   Claude-Nutzung, je nach Modell und Zahl der Pull Requests einige Cent bis etwa einen Dollar pro
+   Repository.
+2. Die Vorschau unter **Pflege** zeigt pro Repository, was passiert: mergen, schließen, Rebase, Tag,
+   aufräumen, bleibt offen, jeweils mit Claudes Risiko und Begründung und dem, was die App direkt davor
+   prüft. **Ausführen** setzt genau diese Vorschau um, **Verwerfen** verwirft sie. Eine neue Prüfung,
+   Verwerfen oder ein Projektwechsel verwerfen sie ebenfalls; ändern sich Tag-Präfix oder lokale Kopie in
+   `site.json`, lehnt der Lauf sie ab.
 
-Was der Lauf tut:
+Die App entscheidet, nicht Claude: Ein Pull Request braucht genau eine gültige Bewertung (grün oder gelb
+zum Mergen, eine Begründung zum Schließen); rote, fehlende, doppelte oder ungültige Bewertungen lassen ihn
+offen. Unmittelbar vor jedem Schreiben prüft die App erneut:
 
-- **Mergen:** nur Pull Requests auf den Hauptbranch, die GitHub als mergebar mit lauter grünen Checks
-  meldet und die Claude grün einstuft, oder gelb ohne Relevantes in den Release-Notes. Rot wird nie
-  gemergt, ohne Urteil wird nichts gemergt. Als Merge-Commit, wenn das Repository das erlaubt.
-- **Schließen:** Pull Requests, die Claude für überflüssig hält (von einem neueren überholt, schon im
-  Hauptbranch), mit der Begründung als Kommentar.
-- **Rebase:** Dependabot-Pull-Requests mit Merge-Konflikt bekommen `@dependabot rebase`, auch wenn ein
-  Merge desselben Laufs den Konflikt verursacht hat; ein späterer Lauf kann sie mergen.
-- **Tag:** die nächste Patch-Version des neuesten `x.y.z`-Tags (mit dem `tagPrefix` des Produkts), erst
-  wenn die CI auf dem Hauptbranch nach den Merges grün ist (die App wartet bis zu 30 Minuten; rote CI
-  heißt kein Tag). In Repositories mit Release-Workflow startet der Tag ein Release.
-- **Gemergte Branches löschen** (optional): Branches, deren Commits vollständig im Hauptbranch sind oder
-  deren Pull Request gemergt wurde (auch per Squash), auf GitHub und im lokalen Klon (nach
-  `git fetch --prune`). Hauptbranch, geschützte Branches, Branches offener Pull Requests und der
-  ausgecheckte Branch bleiben.
+- **Mergen:** noch offen und kein Entwurf, gleicher Head-Commit, gleicher Zielbranch und gleiches
+  Repository, laut GitHub mergebar, CI des Head-Commits erfolgreich; GitHub bekommt den erwarteten
+  Head-Commit mit, ein Push dazwischen lässt den Merge scheitern. Als Merge-Commit, wenn das Repository
+  das erlaubt.
+- **Schließen:** noch offen, gleicher Head und gleiches Ziel; ein von Claude genannter Ersatz-Pull-Request
+  muss noch offen oder gemergt sein. Die Begründung kommt als Kommentar; Kommentar und Schließen werden
+  einzeln gemeldet.
+- **Rebase:** noch offen, wirklich von Dependabot, gleicher Head, weiterhin Konflikt oder Rückstand;
+  dann `@dependabot rebase`. Ein Dependabot-Pull-Request, den ein Merge desselben Laufs in einen Konflikt
+  gebracht hat, bekommt das statt des Merges, wie die Vorschau es ankündigt.
+- **Tag:** die nächste Patch-Version des neuesten `x.y.z`-Tags mit dem `tagPrefix` des Produkts, nur wenn
+  alle geplanten Merges des Repositorys gelungen sind, der Default-Branch genau dort steht, wo die Merges
+  dieses Laufs ihn hinterlassen haben, die Release-Linie unverändert ist, es Commits seit dem letzten Tag
+  gibt und die CI genau dieses Commits erfolgreich war (die App wartet bis zu 30 Minuten). Rot, noch
+  laufend, unklar, abgebrochen oder **gar keine Checks** heißt kein Tag. Bestehende Tags werden nie
+  verschoben. In Repositories mit Release-Workflow startet der Tag ihn; das Release selbst ist Sache
+  dieses Workflows. Das erste Release wird von Hand getaggt.
+- **Gemergte Branches löschen** (optional): auf GitHub nur, solange der Branch auf demselben Commit steht,
+  nicht geschützt und nicht der Default-Branch ist, kein offener Pull Request aus ihm kommt oder auf ihn
+  zielt und sein Nachweis noch gilt (alle Commits im Default-Branch oder sein Pull Request gemergt; der
+  Head-Branch eines Merges im selben Lauf nur, wenn dieser Merge gelungen ist). Lokal nur in einer Kopie,
+  die noch zum Repository gehört, nie ein Branch, der in irgendeinem Worktree ausgecheckt ist. Weicht
+  `origin/<default>` der Kopie von GitHub ab, kündigt die Vorschau `git fetch --prune origin` an, und der
+  Lauf führt es vor dem Löschen aus; gelöscht werden nur die in der Vorschau genannten Branches.
 
-Die Prüfung kostet Claude-Nutzung, je nach Modell und Zahl der Pull Requests einige Cent bis etwa einen
-Dollar pro Repository.
+Jede Aktion endet als erledigt, übersprungen, fehlgeschlagen oder abgebrochen, mit Begründung.
+Erledigtes bleibt nach einem Fehler oder Abbruch erledigt; nichts wird zurückgerollt, und kein Schreiben
+wird wiederholt (nach einer unklaren Antwort liest die App erst den Zustand). Danach liest die App die
+betroffenen Repositories neu. Wo die GitHub-API keine Vorbedingung kennt (Schließen, Branch löschen),
+bleibt zwischen der letzten Prüfung und dem Schreiben ein kurzes Zeitfenster.
+
+**Geändert gegenüber früheren Versionen:** Ein Tag braucht jetzt eine CI, die für genau den getaggten
+Commit erfolgreich war. Bisher hat die App nach drei Minuten ohne Checks trotzdem getaggt; Repositories
+ohne CI bekommen jetzt keinen automatischen Tag mehr.
 
 ## Repositories wählen
 

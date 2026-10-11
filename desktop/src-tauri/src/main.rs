@@ -8,7 +8,7 @@ use steps::{Job, NewProductInput};
 use openreleasepilot_core::claude::{Outcome, Outdated};
 use openreleasepilot_core::config::{self, AuthKind, Config};
 use openreleasepilot_core::update::{self, ReleaseInfo};
-use openreleasepilot_core::{github, localrepo, manifest, repocare};
+use openreleasepilot_core::{github, localrepo, manifest, repocare, repos};
 use openreleasepilot_core::paths::{self, abbreviate_home, expand_home};
 use openreleasepilot_core::secrets;
 use openreleasepilot_core::sftp::{self, ConnectError};
@@ -16,8 +16,8 @@ use openreleasepilot_core::shell::Runner;
 use openreleasepilot_core::site::{self, Site};
 use openreleasepilot_core::verify::Report;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
@@ -30,7 +30,7 @@ pub enum Step {
     Update,
     Upload,
     Verify,
-    /// "Repos pflegen" in the products' repositories; not part of the four-step flow.
+    /// Care of the products' repositories (area "Repositories"); not part of the four-step flow.
     Repos,
 }
 
@@ -76,13 +76,53 @@ pub struct Check {
     pub detail: String,
 }
 
-/// What "Repos pflegen" did in one repository, one row per item.
+/// What became of one planned care action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ItemOutcome {
+    Done,
+    Skipped,
+    Failed,
+    /// Not tried: the run was cancelled before.
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoItem {
+    pub label: String,
+    pub outcome: ItemOutcome,
+    pub detail: String,
+}
+
+/// What the care run did in one repository, one row per planned action.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepoReport {
     pub name: String,
     pub repo: String,
-    pub items: Vec<Check>,
+    pub items: Vec<RepoItem>,
+}
+
+/// What the Repositories area knows about one repository; read only, kept in memory.
+#[derive(Default)]
+pub struct RepoStatus {
+    pub facts: Option<repos::Facts>,
+    pub loading: bool,
+    /// The last refresh failed entirely; `facts`, if any, are from before.
+    pub error: Option<String>,
+    /// Answers to an older request are dropped.
+    pub token: u64,
+    pub details: Option<repos::Details>,
+    pub details_loading: bool,
+    pub details_token: u64,
+}
+
+static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
+
+/// A number never handed out before: request tokens, preview ids.
+pub fn next_token() -> u64 {
+    NEXT_TOKEN.fetch_add(1, Ordering::SeqCst)
 }
 
 pub struct Model {
@@ -100,8 +140,10 @@ pub struct Model {
     pub claude_runs: Vec<ClaudeRun>,
     pub upload: Option<UploadResult>,
     pub verify: Option<Report>,
-    /// Preview of "Repos pflegen", waiting for the user to run or discard it.
-    pub repo_plans: Option<Vec<repocare::Plan>>,
+    /// Repository key → what the Repositories area read about it.
+    pub repo_status: BTreeMap<String, RepoStatus>,
+    /// Care preview, waiting for the user to run or discard it.
+    pub repo_plan: Option<repocare::PlanSet>,
     pub repo_reports: Vec<RepoReport>,
     /// Fingerprint the user has to confirm before the first SFTP connection.
     pub pending_host_key: Option<String>,
@@ -147,7 +189,8 @@ impl Model {
             claude_runs: Vec::new(),
             upload: None,
             verify: None,
-            repo_plans: None,
+            repo_status: BTreeMap::new(),
+            repo_plan: None,
             repo_reports: Vec::new(),
             pending_host_key: None,
             available_update: None,
@@ -164,6 +207,17 @@ pub fn load_site(config: &Config) -> Result<Site, String> {
         return Err("Kein Projektordner eingerichtet".into());
     }
     site::load(&expand_home(&config.project_dir)).map_err(|e| format!("{e:#}"))
+}
+
+/// The repositories of the site's products, each once; empty without a readable site.json.
+pub fn repo_targets(site: &Result<Site, String>, config: &Config) -> Vec<repos::RepoTarget> {
+    let Ok(site) = site else { return Vec::new() };
+    if config.project_dir.trim().is_empty() {
+        return Vec::new();
+    }
+    let project = expand_home(&config.project_dir);
+    let website = localrepo::origin_repo(&project);
+    repos::targets(site, &project, &config.skipped_products, website.as_deref())
 }
 
 struct Shared(Mutex<Model>);
@@ -220,8 +274,15 @@ struct View {
     claude_runs: Vec<ClaudeRun>,
     upload: Option<UploadResult>,
     verify: Option<Report>,
-    repo_plans: Option<Vec<repocare::Plan>>,
+    repositories: Vec<RepoView>,
+    repo_plan: Option<repocare::PlanSet>,
+    /// Repositories whose default branch moved since the preview, as a later status read shows.
+    repo_plan_moved: Vec<String>,
     repo_reports: Vec<RepoReport>,
+    /// Facts older than this many seconds are shown as old.
+    fresh_secs: u64,
+    /// Unix seconds when the view was made.
+    now: u64,
     last_upload: Option<LastUpload>,
     pending_host_key: Option<String>,
     available_update: Option<ReleaseInfo>,
@@ -231,9 +292,29 @@ struct View {
     error: Option<String>,
 }
 
+/// One repository in the Repositories area.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RepoView {
+    #[serde(flatten)]
+    target: repos::RepoTarget,
+    selected: bool,
+    facts: Option<repos::Facts>,
+    health: repos::Health,
+    capabilities: repos::Capabilities,
+    loading: bool,
+    error: Option<String>,
+    details: Option<repos::Details>,
+    details_loading: bool,
+}
+
 #[tauri::command]
 fn get_view(app: AppHandle) -> View {
     let version = app.package_info().version.to_string();
+    // Reads .git/config of the clones: outside the lock.
+    let (site, config) = with_model(&app, |m| (m.site.clone(), m.config.clone()));
+    let targets = repo_targets(&site, &config);
+    let now = steps::now();
     with_model(&app, |m| View {
         version,
         dev_build: cfg!(debug_assertions),
@@ -254,8 +335,39 @@ fn get_view(app: AppHandle) -> View {
         claude_runs: m.claude_runs.clone(),
         upload: m.upload.clone(),
         verify: m.verify.clone(),
-        repo_plans: m.repo_plans.clone(),
+        repositories: targets
+            .into_iter()
+            .map(|target| {
+                let status = m.repo_status.get(&target.key);
+                let facts = status.and_then(|s| s.facts.clone());
+                let details = status.and_then(|s| s.details.clone());
+                RepoView {
+                    selected: target.selected(),
+                    health: repos::health(&target, facts.as_ref(), details.as_ref(), now),
+                    capabilities: repos::capabilities(&target, facts.as_ref(), github::signed_in()),
+                    loading: status.is_some_and(|s| s.loading),
+                    error: status.and_then(|s| s.error.clone()),
+                    details_loading: status.is_some_and(|s| s.details_loading),
+                    facts,
+                    details,
+                    target,
+                }
+            })
+            .collect(),
+        repo_plan_moved: m
+            .repo_plan
+            .iter()
+            .flat_map(|set| set.plans.iter().map(move |plan| (set.created_at, plan)))
+            .filter(|(created, plan)| {
+                let facts = m.repo_status.get(&plan.key).and_then(|s| s.facts.as_ref());
+                facts.is_some_and(|f| f.checked_at > *created && f.head.ok().is_some_and(|head| !plan.base_head.is_empty() && *head != plan.base_head))
+            })
+            .map(|(_, plan)| plan.repo.clone())
+            .collect(),
+        repo_plan: m.repo_plan.clone(),
         repo_reports: m.repo_reports.clone(),
+        fresh_secs: repos::FRESH_SECS,
+        now,
         last_upload: manifest::load_last(&m.config.sftp).map(|last| LastUpload {
             commit: last.commit.map(|c| c.chars().take(7).collect()),
             uploaded_at: last.uploaded_at,
@@ -328,6 +440,12 @@ fn apply_settings(app: &AppHandle, input: SettingsInput) -> Result<(), String> {
     config::save(&next).map_err(|e| format!("{e:#}"))?;
     let site = load_site(&next);
     with_model(app, |m| {
+        if m.config.project_dir != next.project_dir {
+            // Another project: its repositories, previews and results are not this one's.
+            m.repo_status.clear();
+            m.repo_plan = None;
+            m.repo_reports.clear();
+        }
         m.config = next;
         m.site = site;
         m.pending_host_key = None;
@@ -547,51 +665,158 @@ fn run_step(app: AppHandle, step: Step, instructions: String) -> Result<(), Stri
         Step::Update => Job::Update(instructions),
         Step::Upload => Job::Upload,
         Step::Verify => Job::Verify,
-        Step::Repos => return Err("Repos pflegen startet über „Repos pflegen …“".into()),
+        Step::Repos => return Err("Die Pflege startet im Bereich Repositories".into()),
     };
     steps::start(&app, vec![job])
 }
 
-/// The selected products with the absolute path of their local clone, if it exists.
-pub fn selected_products(app: &AppHandle) -> Result<Vec<(site::Product, Option<PathBuf>)>, String> {
+// MARK: Repositories
+
+/// Reads the facts of the repositories (all when `keys` is empty), four at a time, each stored as
+/// soon as it arrives. Read only and without Claude; runs beside a step, never under the model lock.
+pub fn refresh_status(app: &AppHandle, keys: &[String]) {
     let (site, config) = with_model(app, |m| (m.site.clone(), m.config.clone()));
-    let project = expand_home(&config.project_dir);
-    Ok(site?
-        .products
-        .into_iter()
-        .filter(|p| config.product_enabled(&p.id))
-        .map(|p| {
-            let clone = p.local_path.as_deref().map(|path| project.join(path)).filter(|dir| dir.is_dir());
-            (p, clone)
-        })
-        .collect())
+    let targets: Vec<repos::RepoTarget> = repo_targets(&site, &config).into_iter().filter(|t| keys.is_empty() || keys.contains(&t.key)).collect();
+    if targets.is_empty() {
+        return;
+    }
+    let jobs: VecDeque<(repos::RepoTarget, u64)> = with_model(app, |m| {
+        targets
+            .into_iter()
+            .map(|target| {
+                let token = next_token();
+                let status = m.repo_status.entry(target.key.clone()).or_default();
+                status.token = token;
+                status.loading = true;
+                (target, token)
+            })
+            .collect()
+    });
+    changed(app);
+    let app = app.clone();
+    std::thread::spawn(move || {
+        github::token(); // asks gh once, so the view knows whether it is signed in
+        let queue = Mutex::new(jobs);
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| loop {
+                    let Some((target, token)) = queue.lock().unwrap_or_else(|e| e.into_inner()).pop_front() else { break };
+                    let current = |m: &Model| m.repo_status.get(&target.key).is_some_and(|s| s.token == token);
+                    if !with_model(&app, |m| current(m)) {
+                        continue;
+                    }
+                    let facts = repos::fetch_facts(&target, steps::now());
+                    with_model(&app, |m| {
+                        let Some(status) = m.repo_status.get_mut(&target.key).filter(|s| s.token == token) else { return };
+                        status.loading = false;
+                        match &facts.access {
+                            // An older reading is worth more than none; it shows its age.
+                            repos::Fetch::Failed(why) if facts.failed_entirely() && status.facts.is_some() => status.error = Some(why.clone()),
+                            _ => {
+                                status.error = None;
+                                status.facts = Some(facts);
+                                status.details = None;
+                            }
+                        }
+                    });
+                    changed(&app);
+                });
+            }
+        });
+    });
 }
 
-/// "Repos pflegen", first part: GitHub's state and Claude's review, as a preview to confirm.
+/// "Status aktualisieren": all repositories, or the given ones.
 #[tauri::command]
-fn check_repos(app: AppHandle, merge: bool, cleanup: bool, model: String) -> Result<(), String> {
-    if !merge && !cleanup {
-        return Err("Mindestens eine Aktion wählen".into());
-    }
-    if github::token().is_none() {
-        return Err("Für „Repos pflegen“ die GitHub-CLI anmelden: gh auth login".into());
-    }
-    steps::start(&app, vec![Job::ReposCheck(steps::RepoOptions { merge, cleanup, model })])
+fn refresh_repos(app: AppHandle, keys: Vec<String>) {
+    refresh_status(&app, &keys);
 }
 
-/// "Repos pflegen", second part: runs the confirmed preview.
+/// Drops the answers of running status reads; what is already shown stays.
 #[tauri::command]
-fn run_repos(app: AppHandle) -> Result<(), String> {
-    let plans = with_model(&app, |m| m.repo_plans.clone()).ok_or("Keine Vorschau vorhanden; erst prüfen")?;
-    steps::start(&app, vec![Job::Repos(plans)])?;
-    with_model(&app, |m| m.repo_plans = None);
+fn cancel_repo_refresh(app: AppHandle) {
+    with_model(&app, |m| {
+        for status in m.repo_status.values_mut() {
+            if status.loading {
+                status.token = next_token();
+                status.loading = false;
+            }
+            if status.details_loading {
+                status.details_token = next_token();
+                status.details_loading = false;
+            }
+        }
+    });
     changed(&app);
+}
+
+/// Mergeability and CI of a repository's open pull requests, for its detail view.
+#[tauri::command]
+fn load_repo_details(app: AppHandle, key: String) -> Result<(), String> {
+    let (repo, prs, token) = with_model(&app, |m| {
+        let status = m.repo_status.get_mut(&key)?;
+        let facts = status.facts.as_ref()?;
+        let repo = facts.access.ok()?.full_name.clone();
+        let prs = facts.prs.ok()?.clone();
+        let token = next_token();
+        status.details_token = token;
+        status.details_loading = true;
+        Some((repo, prs, token))
+    })
+    .ok_or("Erst den Status des Repositorys lesen")?;
+    changed(&app);
+    std::thread::spawn(move || {
+        let details = repos::fetch_details(&repo, &prs, steps::now());
+        with_model(&app, |m| {
+            if let Some(status) = m.repo_status.get_mut(&key).filter(|s| s.details_token == token) {
+                status.details_loading = false;
+                status.details = Some(details);
+            }
+        });
+        changed(&app);
+    });
     Ok(())
 }
 
+/// Care, first part: GitHub's state and Claude's review of exactly these repositories, as a
+/// preview to confirm. One repository from its detail view, or those of the selected products.
 #[tauri::command]
-fn discard_repo_plan(app: AppHandle) {
-    with_model(&app, |m| m.repo_plans = None);
+fn check_repos(app: AppHandle, keys: Vec<String>, merge: bool, cleanup: bool, model: String) -> Result<(), String> {
+    if !merge && !cleanup {
+        return Err("Mindestens eine Aktion wählen".into());
+    }
+    if keys.is_empty() {
+        return Err("Kein Repository gewählt".into());
+    }
+    if github::token().is_none() {
+        return Err("Für die Pflege die GitHub-CLI anmelden: gh auth login".into());
+    }
+    let (site, config) = with_model(&app, |m| (m.site.clone(), m.config.clone()));
+    let all = repo_targets(&site, &config);
+    let mut targets: Vec<repos::RepoTarget> = Vec::new();
+    for key in keys {
+        let target = all.iter().find(|t| t.key == key).ok_or_else(|| format!("{key} gehört zu keinem Produkt mehr"))?;
+        if !targets.contains(target) {
+            targets.push(target.clone());
+        }
+    }
+    steps::start(&app, vec![Job::ReposCheck(steps::RepoOptions { targets, merge, cleanup, model, project: config.project_dir })])
+}
+
+/// Care, second part: runs the preview with this id. Taking it and starting the run happen under
+/// one lock, so a double click cannot run it twice.
+#[tauri::command]
+fn run_repos(app: AppHandle, plan_id: u64) -> Result<(), String> {
+    steps::start_with(&app, |m| Ok(vec![Job::Repos(repocare::take_plan(&mut m.repo_plan, plan_id)?)]))
+}
+
+#[tauri::command]
+fn discard_repo_plan(app: AppHandle, plan_id: u64) {
+    with_model(&app, |m| {
+        if m.repo_plan.as_ref().is_some_and(|set| set.id == plan_id) {
+            m.repo_plan = None;
+        }
+    });
     changed(&app);
 }
 
@@ -749,6 +974,9 @@ fn main() {
             run_step,
             run_all,
             run_add_product,
+            refresh_repos,
+            cancel_repo_refresh,
+            load_repo_details,
             check_repos,
             run_repos,
             discard_repo_plan,

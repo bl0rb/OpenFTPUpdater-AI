@@ -9,10 +9,14 @@ use std::time::Duration;
 /// Token of the GitHub CLI (`gh auth token`), if it is installed and signed in. Raises the API
 /// limit from 60 to 5000 requests per hour; also handed to the app's own build as `GITHUB_TOKEN`, never to Claude.
 pub fn token() -> Option<&'static str> {
-    static TOKEN: OnceLock<Option<String>> = OnceLock::new();
-    TOKEN
-        .get_or_init(|| output("gh", &["auth", "token"], Path::new("/")).ok().filter(|t| !t.is_empty()))
-        .as_deref()
+    TOKEN.get_or_init(|| output("gh", &["auth", "token"], Path::new("/")).ok().filter(|t| !t.is_empty())).as_deref()
+}
+
+static TOKEN: OnceLock<Option<String>> = OnceLock::new();
+
+/// Whether gh is signed in, if `token` already looked; never starts gh itself.
+pub fn signed_in() -> Option<bool> {
+    TOKEN.get().map(Option::is_some)
 }
 
 fn request(method: &str, path: &str) -> ureq::Request {
@@ -27,19 +31,50 @@ fn request(method: &str, path: &str) -> ureq::Request {
     request
 }
 
+/// GitHub refused access with HTTP 403 for another reason than its rate limit (e.g. SSO
+/// enforcement, a missing scope). Unlike a network error this is an answer about the repository.
+#[derive(Debug)]
+pub struct Forbidden(pub String);
+
+impl std::fmt::Display for Forbidden {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Zugriff verweigert (HTTP 403): {}", self.0)
+    }
+}
+
+impl std::error::Error for Forbidden {}
+
 /// GET on the GitHub API; `Ok(None)` for 404.
 pub(crate) fn get(path: &str) -> Result<Option<serde_json::Value>> {
+    #[cfg(test)]
+    if let Some(answer) = mock::get(path) {
+        return answer;
+    }
     let response = match request("GET", path).call() {
         Ok(response) => response,
         Err(ureq::Error::Status(404, _)) => return Ok(None),
-        Err(ureq::Error::Status(403, _)) => bail!("GitHub-Limit erreicht (mit `gh auth login` gilt ein höheres Limit)"),
+        Err(ureq::Error::Status(code @ (403 | 429), response)) => {
+            // A 403 is a rate limit only when GitHub says so; otherwise access is denied.
+            let limited = code == 429 || response.header("x-ratelimit-remaining") == Some("0");
+            let reason = serde_json::from_str(&response.into_string().unwrap_or_default()).map(|json| message(&json)).unwrap_or_default();
+            if limited || reason.to_lowercase().contains("rate limit") {
+                bail!("GitHub-Limit erreicht{}", if token().is_none() { " (mit `gh auth login` gilt ein höheres Limit)" } else { "" });
+            }
+            return Err(Forbidden(reason).into());
+        }
         Err(e) => return Err(e).context("GitHub nicht erreichbar"),
     };
     Ok(Some(serde_json::from_reader(response.into_reader()).context("Antwort von GitHub unlesbar")?))
 }
 
+/// A list endpoint read page by page; `complete` is false when `max_pages` cut it off.
+pub(crate) struct Listing {
+    pub items: Vec<serde_json::Value>,
+    pub complete: bool,
+}
+
 /// All pages of a list endpoint (`per_page=100` is added), at most `max_pages`.
-pub(crate) fn get_pages(path: &str, max_pages: u32) -> Result<Vec<serde_json::Value>> {
+pub(crate) fn get_list(path: &str, max_pages: u32) -> Result<Listing> {
     let separator = if path.contains('?') { '&' } else { '?' };
     let mut items = Vec::new();
     for page in 1..=max_pages {
@@ -48,15 +83,19 @@ pub(crate) fn get_pages(path: &str, max_pages: u32) -> Result<Vec<serde_json::Va
         let full = batch.len() == 100;
         items.extend(batch);
         if !full {
-            break;
+            return Ok(Listing { items, complete: true });
         }
     }
-    Ok(items)
+    Ok(Listing { items, complete: false })
 }
 
 /// A write on the GitHub API with the gh token: HTTP status and JSON body (`Null` when empty).
 /// Error statuses are returned, not raised, so the caller can say what GitHub refused.
 pub(crate) fn send(method: &str, path: &str, body: Option<&serde_json::Value>) -> Result<(u16, serde_json::Value)> {
+    #[cfg(test)]
+    if let Some(answer) = mock::send(method, path, body) {
+        return answer;
+    }
     if token().is_none() {
         bail!("GitHub-CLI nicht angemeldet (gh auth login)");
     }
@@ -186,6 +225,69 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
             .collect()
     };
     parse(candidate) > parse(current)
+}
+
+/// GitHub as the tests see it: canned answers per path, every write recorded. Installed per test
+/// thread; an unlisted read fails, so a test notices any call it did not expect.
+#[cfg(test)]
+pub(crate) mod mock {
+    use anyhow::{anyhow, Result};
+    use serde_json::{json, Value};
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    #[derive(Default)]
+    pub struct Mock {
+        /// GET path → body; `None` answers 404.
+        pub gets: HashMap<String, Option<Value>>,
+        /// `METHOD path` → status and body; unlisted writes succeed.
+        pub replies: HashMap<String, (u16, Value)>,
+        /// `METHOD path` of every write, with its body.
+        pub writes: Vec<(String, Option<Value>)>,
+    }
+
+    thread_local! {
+        static MOCK: RefCell<Option<Mock>> = const { RefCell::new(None) };
+    }
+
+    pub fn install(gets: impl IntoIterator<Item = (String, Option<Value>)>) {
+        MOCK.with(|m| *m.borrow_mut() = Some(Mock { gets: gets.into_iter().collect(), ..Mock::default() }));
+    }
+
+    pub fn answer(path: &str, body: Option<Value>) {
+        MOCK.with(|m| m.borrow_mut().as_mut().expect("mock installed").gets.insert(path.to_owned(), body));
+    }
+
+    pub fn reply(write: &str, status: u16, body: Value) {
+        MOCK.with(|m| m.borrow_mut().as_mut().expect("mock installed").replies.insert(write.to_owned(), (status, body)));
+    }
+
+    pub fn writes() -> Vec<String> {
+        MOCK.with(|m| m.borrow().as_ref().map(|m| m.writes.iter().map(|(w, _)| w.clone()).collect()).unwrap_or_default())
+    }
+
+    pub(super) fn get(path: &str) -> Option<Result<Option<Value>>> {
+        MOCK.with(|m| {
+            let m = m.borrow();
+            let mock = m.as_ref()?;
+            Some(mock.gets.get(path).cloned().ok_or_else(|| anyhow!("unerwartete Abfrage {path}")))
+        })
+    }
+
+    pub(super) fn send(method: &str, path: &str, body: Option<&Value>) -> Option<Result<(u16, Value)>> {
+        MOCK.with(|m| {
+            let mut m = m.borrow_mut();
+            let mock = m.as_mut()?;
+            let key = format!("{method} {path}");
+            mock.writes.push((key.clone(), body.cloned()));
+            let default = match method {
+                "POST" => (201, json!({})),
+                "DELETE" => (204, Value::Null),
+                _ => (200, json!({})),
+            };
+            Some(Ok(mock.replies.get(&key).cloned().unwrap_or(default)))
+        })
+    }
 }
 
 #[cfg(test)]

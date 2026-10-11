@@ -6,9 +6,13 @@
 
 Desktop app that keeps a static website in step with the releases of the products it
 describes, and publishes it: Claude Code updates the content, the app builds, commits,
-pushes and uploads the result via SFTP, then checks the live site byte for byte.
+pushes and uploads the result via SFTP, then checks the live site byte for byte. A second
+area, **Repositories**, shows the state of the products' repositories and takes care of them:
+merge reviewed pull requests, tag the next patch version, delete merged branches.
 
-Four buttons, run one by one or all in a row:
+The app has two main areas, switched in the toolbar: **Übersicht** (the website) and
+**Repositories**; Settings stay under **Einrichtung**. The overview has four buttons, run one by one
+or all in a row:
 
 | Step | What happens | Changes anything? |
 |---|---|---|
@@ -31,42 +35,90 @@ The main window lists the products from `site.json` with a checkbox each. Preche
 handle selected products: Precheck does not look up the others, and Update names them to Claude as "not
 selected, leave unchanged". Every row shows the documented version, after a Precheck also whether a newer
 release exists, and "kein Klon" if `localPath` is missing. The selection is stored in the app's settings,
-not in the website repository.
+not in the website repository. It does not hide anything in **Repositories**: turned-off products stay
+listed there.
+
+## Repositories
+
+The **Repositories** area lists the repository of every product in `site.json`, each once even when
+several products share it (`owner/name`, case-insensitive), including products turned off in the
+overview. Each row shows a state in words with its main reason, open pull requests (with how many
+come from Dependabot), the CI of the default branch, the latest published release (or, without one, the
+highest matching tag, marked as tag), the local clone and when it was last read. The website's own
+repository is named in the header.
+
+**Status aktualisieren** reads GitHub only: no Claude, no cost, no write, no `git fetch`. It runs when
+the area is first opened and on request, never in the background; a failed read keeps the older state
+but marks it as old, and data older than five minutes is shown as old. Without a `gh` login public
+repositories can still be read (GitHub then allows 60 requests per hour; a repository needs about eight).
+
+| State | When |
+|---|---|
+| **Blockiert** | the default branch's CI failed, or the repository cannot be read (GitHub answers 404 or refuses access; a 404 can also mean private without access) |
+| **Aufmerksamkeit nötig** | open Dependabot pull requests, commits since the last release or tag, the website documents an older version than the latest release, or (after the detail view read them) pull requests with conflicts or failed CI |
+| **Unbekannt** | nothing of the above, but required facts are missing, incomplete or old: CI still running, no checks found, unclear result, query failed |
+| **In Ordnung** | everything required was read successfully and recently, and nothing needs doing |
+
+Missing release data alone does not prevent "In Ordnung"; missing or incomplete data never produces it.
+An open pull request from a person is no finding by itself, and a red pull request does not block the
+repository. Archived repositories and those without write access stay readable, but care is locked.
+
+The detail view (click a row) shows default branch and head commit, CI with its commit, release and tag,
+commits since that base (only where it is an ancestor of the head, otherwise "nicht bestimmbar"),
+tag prefix, local clone, the products with their documented version, and every open pull request with
+target branch, author, CI and mergeability. Only pull requests into the default branch go into care.
 
 ## Repository care
 
-**Repos pflegen …** in the toolbar works on the selected products' repositories, through the signed-in
-`gh` CLI, in two parts:
+Care starts from the detail view (**Dieses Repository prüfen**) or for the repositories of the selected
+products (**Ausgewählte pflegen …**, which names them first and leaves out locked ones), through the
+signed-in `gh` CLI, in two parts:
 
-1. **Prüfen** reads the state of every repository on GitHub, then Claude Code judges each open pull
-   request, read-only (in the local clone if there is one), by the rules of the `dependabot-pr` skill:
-   risk class (green, yellow, red; below 1.0 a change of the first non-zero digit counts as major),
-   release notes from the upstream repository, only manifest/lock/workflow files in Dependabot pull
-   requests, SHA pins of Actions, related dependencies only together, majors checked against the actual
-   use in the code. The log shows what Claude looks at.
-2. The preview under "Ergebnis" lists per repository what will happen, grouped: merged, closed, rebased,
-   left open, each with Claude's risk and reason. **Ausführen** carries it out, **Verwerfen** drops it.
-   Every item is checked again right before, so nothing that changed since the preview is touched.
+1. **Prüfen** reads the state on GitHub (read only, no fetch), then Claude Code judges each open pull
+   request into the default branch, read-only (in the local clone if there is one), by the rules of the
+   `dependabot-pr` skill: risk class (green, yellow, red; below 1.0 a change of the first non-zero digit
+   counts as major), release notes from the upstream repository, only manifest/lock/workflow files in
+   Dependabot pull requests, SHA pins of Actions, related dependencies only together, majors checked
+   against the actual use in the code. This costs Claude usage, roughly a few cents up to about a dollar
+   per repository depending on the model and the number of pull requests.
+2. The preview under **Pflege** lists per repository what will happen: merge, close, rebase, tag, clean
+   up, left open, each with Claude's risk and reason and what the app checks right before. **Ausführen**
+   carries out exactly this preview, **Verwerfen** drops it. A new check, discarding it or switching the
+   project drops it too; a change of tag prefix or local clone in `site.json` makes the run refuse it.
 
-What the run does:
+The app decides, not Claude: a pull request needs exactly one valid verdict (green or yellow for a merge,
+a reason for a close); red, missing, duplicate or invalid verdicts leave it open. Right before each write
+the app checks again:
 
-- **Merge:** only pull requests into the default branch that GitHub reports mergeable with checks, all
-  green, and that Claude rates green, or yellow with nothing relevant in the release notes. Red is never
-  merged, and without a verdict nothing is merged. Merge commit where the repository allows it.
-- **Close:** pull requests Claude finds superfluous (superseded by a newer one, already in the default
-  branch), with the reason as a comment.
-- **Rebase:** Dependabot pull requests with a merge conflict get `@dependabot rebase`, also when an
-  earlier merge of the same run caused the conflict; a later run can merge them.
-- **Tag:** the next patch version of the newest `x.y.z` tag (with the product's `tagPrefix`), only once
-  the default branch's CI has passed after the merges (the app waits up to 30 minutes; a red CI means
-  no tag). In repositories with a release workflow the tag starts a release.
-- **Delete merged branches** (optional): branches whose commits are all in the default branch or whose
-  pull request was merged (squash merges included), on GitHub and in the local clone (after
-  `git fetch --prune`). The default branch, protected branches, branches of open pull requests and the
-  checked-out branch stay.
+- **Merge:** still open and no draft, same head commit, same target branch and repository, mergeable
+  according to GitHub, CI of the head commit passed; GitHub gets the expected head commit, so a push in
+  between makes it refuse. Merge commit where the repository allows it.
+- **Close:** still open, same head and target; a replacing pull request Claude named must still be open
+  or merged. The reason is posted as a comment; comment and close are reported separately.
+- **Rebase:** still open, really from Dependabot, same head, still in conflict or behind; then
+  `@dependabot rebase`. A Dependabot pull request that a merge of the same run put into conflict gets
+  this instead of the merge, as the preview says.
+- **Tag:** the next patch version of the newest `x.y.z` tag with the product's `tagPrefix`, only if every
+  planned merge of the repository succeeded, the default branch is exactly where this run's merges left
+  it, the release line is unchanged, there are commits since the last tag, and the CI of exactly that
+  commit passed (the app waits up to 30 minutes). Red, still running, unclear, cancelled or **no checks
+  at all** mean no tag. Existing tags are never moved. In repositories with a release workflow the tag
+  starts it; the release itself is that workflow's business. The first release is tagged by hand.
+- **Delete merged branches** (optional): on GitHub only while the branch is on the same commit, not
+  protected, not the default branch, no open pull request comes from or targets it, and its proof still
+  holds (all commits in the default branch, or its pull request merged; a head branch of a merge in the
+  same run only if that merge succeeded). Locally only in a clone that still belongs to the repository,
+  never a branch checked out in any worktree. If the clone's `origin/<default>` differs from GitHub, the
+  preview announces `git fetch --prune origin` and the run does it before deleting; only branches named
+  in the preview are deleted.
 
-The review costs Claude usage, roughly a few cents up to about a dollar per repository depending on the
-model and the number of pull requests.
+Every action ends as done, skipped, failed or cancelled, with the reason. Done stays done after an error
+or a cancel; nothing is rolled back, and the run never tries a write twice (after an unclear answer it
+reads the state first). Afterwards the app reads the touched repositories again. Where the GitHub API has
+no precondition (closing, deleting a branch), a short window between the last check and the write remains.
+
+**Changed from earlier versions:** a tag now needs CI that positively passed for exactly the tagged commit. Before,
+the app tagged after three minutes without any checks; repositories without CI now get no automatic tag.
 
 ## Choosing repositories
 

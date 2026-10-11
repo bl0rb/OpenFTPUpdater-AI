@@ -33,6 +33,23 @@ selected, leave unchanged". Every row shows the documented version, after a Prec
 release exists, and "kein Klon" if `localPath` is missing. The selection is stored in the app's settings,
 not in the website repository.
 
+## Repository care
+
+**Repos pflegen …** in the toolbar works on the selected products' repositories, through the signed-in
+`gh` CLI. It first shows a preview per repository and only acts after **Ausführen**; every item is
+checked again right before, so nothing is merged or deleted that changed since the preview.
+
+- **Merge open PRs and set a patch tag:** open pull requests into the default branch that GitHub reports
+  mergeable with all checks green (a pull request without any check stays open), as a merge commit if
+  the repository allows it. Then the next patch version of the newest `x.y.z` tag (with the product's
+  `tagPrefix`) is set on the default branch, if it changed since that tag. In repositories with a release
+  workflow the tag starts a release.
+- **Delete merged branches:** branches whose commits are all in the default branch or whose pull request
+  was merged (squash merges included), on GitHub and in the local clone (after `git fetch --prune`).
+  The default branch, protected branches, branches of open pull requests and the checked-out branch stay.
+
+The log and the result show under "Repos pflegen" in the panel below the steps.
+
 ## Choosing repositories
 
 The app lists your GitHub repositories through the signed-in `gh` CLI, private ones included, and marks

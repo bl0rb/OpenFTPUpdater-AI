@@ -238,6 +238,15 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px;
 .status-dot.error { background: var(--red); }
 .status-dot.idle, .status-dot.running { background: var(--muted); }
 
+/* Repos pflegen: one block per repository, in the preview and in the result. */
+.plan { display: flex; flex-direction: column; gap: 12px; }
+.repo-block { display: flex; flex-direction: column; gap: 6px; }
+.repo-block + .repo-block { padding-top: 10px; border-top: 1px solid var(--border); }
+.repo-block-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.repo-block .checks .label { white-space: normal; overflow-wrap: anywhere; }
+.check-line.top { align-items: flex-start; }
+.check-line.top input { margin-top: 2px; }
+
 .result-text {
   white-space: pre-wrap;
   padding: 10px 12px;

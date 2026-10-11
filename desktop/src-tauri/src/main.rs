@@ -8,7 +8,7 @@ use steps::{Job, NewProductInput};
 use openreleasepilot_core::claude::{Outcome, Outdated};
 use openreleasepilot_core::config::{self, AuthKind, Config};
 use openreleasepilot_core::update::{self, ReleaseInfo};
-use openreleasepilot_core::{github, localrepo, manifest};
+use openreleasepilot_core::{github, localrepo, manifest, repocare};
 use openreleasepilot_core::paths::{self, abbreviate_home, expand_home};
 use openreleasepilot_core::secrets;
 use openreleasepilot_core::sftp::{self, ConnectError};
@@ -17,6 +17,7 @@ use openreleasepilot_core::site::{self, Site};
 use openreleasepilot_core::verify::Report;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
@@ -29,10 +30,12 @@ pub enum Step {
     Update,
     Upload,
     Verify,
+    /// "Repos pflegen" in the products' repositories; not part of the four-step flow.
+    Repos,
 }
 
 impl Step {
-    pub const ALL: [Step; 4] = [Step::Precheck, Step::Update, Step::Upload, Step::Verify];
+    pub const ALL: [Step; 5] = [Step::Precheck, Step::Update, Step::Upload, Step::Verify, Step::Repos];
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Default)]
@@ -73,6 +76,15 @@ pub struct Check {
     pub detail: String,
 }
 
+/// What "Repos pflegen" did in one repository, one row per item.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoReport {
+    pub name: String,
+    pub repo: String,
+    pub items: Vec<Check>,
+}
+
 pub struct Model {
     pub config: Config,
     pub site: Result<Site, String>,
@@ -88,6 +100,7 @@ pub struct Model {
     pub claude_runs: Vec<ClaudeRun>,
     pub upload: Option<UploadResult>,
     pub verify: Option<Report>,
+    pub repo_reports: Vec<RepoReport>,
     /// Fingerprint the user has to confirm before the first SFTP connection.
     pub pending_host_key: Option<String>,
     /// Newer version of the app itself, found by the update check.
@@ -132,6 +145,7 @@ impl Model {
             claude_runs: Vec::new(),
             upload: None,
             verify: None,
+            repo_reports: Vec::new(),
             pending_host_key: None,
             available_update: None,
             checking_update: false,
@@ -203,6 +217,7 @@ struct View {
     claude_runs: Vec<ClaudeRun>,
     upload: Option<UploadResult>,
     verify: Option<Report>,
+    repo_reports: Vec<RepoReport>,
     last_upload: Option<LastUpload>,
     pending_host_key: Option<String>,
     available_update: Option<ReleaseInfo>,
@@ -235,6 +250,7 @@ fn get_view(app: AppHandle) -> View {
         claude_runs: m.claude_runs.clone(),
         upload: m.upload.clone(),
         verify: m.verify.clone(),
+        repo_reports: m.repo_reports.clone(),
         last_upload: manifest::load_last(&m.config.sftp).map(|last| LastUpload {
             commit: last.commit.map(|c| c.chars().take(7).collect()),
             uploaded_at: last.uploaded_at,
@@ -526,8 +542,72 @@ fn run_step(app: AppHandle, step: Step, instructions: String) -> Result<(), Stri
         Step::Update => Job::Update(instructions),
         Step::Upload => Job::Upload,
         Step::Verify => Job::Verify,
+        Step::Repos => return Err("Repos pflegen startet über „Repos pflegen …“".into()),
     };
     steps::start(&app, vec![job])
+}
+
+/// The selected products with the absolute path of their local clone, if it exists.
+fn selected_products(app: &AppHandle) -> Result<Vec<(site::Product, Option<PathBuf>)>, String> {
+    let (site, config) = with_model(app, |m| (m.site.clone(), m.config.clone()));
+    let project = expand_home(&config.project_dir);
+    Ok(site?
+        .products
+        .into_iter()
+        .filter(|p| config.product_enabled(&p.id))
+        .map(|p| {
+            let clone = p.local_path.as_deref().map(|path| project.join(path)).filter(|dir| dir.is_dir());
+            (p, clone)
+        })
+        .collect())
+}
+
+/// Preview for "Repos pflegen": looks at the selected products' repositories, changes nothing
+/// there (except `git fetch --prune` in the local clones).
+#[tauri::command]
+async fn plan_repos(app: AppHandle, merge: bool, cleanup: bool) -> Result<Vec<repocare::Plan>, String> {
+    if !merge && !cleanup {
+        return Err("Mindestens eine Aktion wählen".into());
+    }
+    if github::token().is_none() {
+        return Err("Für „Repos pflegen“ die GitHub-CLI anmelden: gh auth login".into());
+    }
+    let products = selected_products(&app)?;
+    if products.is_empty() {
+        return Err("Keine Produkte ausgewählt".into());
+    }
+    // One thread per repository: each needs a dozen or more API calls.
+    Ok(blocking(move || {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = products
+                .iter()
+                .map(|(p, clone)| scope.spawn(move || repocare::plan(&p.name, &p.repo, &p.tag_prefix, clone.as_deref(), merge, cleanup)))
+                .collect();
+            handles.into_iter().map(|h| h.join().expect("plan thread panicked")).collect()
+        })
+    })
+    .await)
+}
+
+/// Runs a confirmed preview. Only repositories of selected products; the clone path and tag prefix
+/// come from site.json again, not from the window.
+#[tauri::command]
+fn run_repos(app: AppHandle, plans: Vec<repocare::Plan>) -> Result<(), String> {
+    let products = selected_products(&app)?;
+    let mut checked = Vec::new();
+    for mut plan in plans {
+        let (product, clone) = products
+            .iter()
+            .find(|(p, _)| p.repo.eq_ignore_ascii_case(&plan.repo))
+            .ok_or_else(|| format!("{} ist kein ausgewähltes Produkt", plan.repo))?;
+        plan.tag_prefix = product.tag_prefix.clone();
+        plan.clone = clone.as_ref().map(|dir| dir.display().to_string());
+        if plan.clone.is_none() {
+            plan.local_branches.clear();
+        }
+        checked.push(plan);
+    }
+    steps::start(&app, vec![Job::Repos(checked)])
 }
 
 /// Precheck, then Update (only if something is outdated or there are instructions), Upload, Verify.
@@ -684,6 +764,8 @@ fn main() {
             run_step,
             run_all,
             run_add_product,
+            plan_repos,
+            run_repos,
             set_task,
             set_products,
             check_for_updates,

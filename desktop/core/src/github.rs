@@ -15,23 +15,78 @@ pub fn token() -> Option<&'static str> {
         .as_deref()
 }
 
-/// GET on the GitHub API; `Ok(None)` for 404.
-pub(crate) fn get(path: &str) -> Result<Option<serde_json::Value>> {
+fn request(method: &str, path: &str) -> ureq::Request {
     let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).build();
     let mut request = agent
-        .get(&format!("https://api.github.com/{path}"))
+        .request(method, &format!("https://api.github.com/{path}"))
         .set("Accept", "application/vnd.github+json")
         .set("User-Agent", "OpenReleasePilot");
     if let Some(token) = token() {
         request = request.set("Authorization", &format!("Bearer {token}"));
     }
-    let response = match request.call() {
+    request
+}
+
+/// GET on the GitHub API; `Ok(None)` for 404.
+pub(crate) fn get(path: &str) -> Result<Option<serde_json::Value>> {
+    let response = match request("GET", path).call() {
         Ok(response) => response,
         Err(ureq::Error::Status(404, _)) => return Ok(None),
         Err(ureq::Error::Status(403, _)) => bail!("GitHub-Limit erreicht (mit `gh auth login` gilt ein höheres Limit)"),
         Err(e) => return Err(e).context("GitHub nicht erreichbar"),
     };
     Ok(Some(serde_json::from_reader(response.into_reader()).context("Antwort von GitHub unlesbar")?))
+}
+
+/// All pages of a list endpoint (`per_page=100` is added), at most `max_pages`.
+pub(crate) fn get_pages(path: &str, max_pages: u32) -> Result<Vec<serde_json::Value>> {
+    let separator = if path.contains('?') { '&' } else { '?' };
+    let mut items = Vec::new();
+    for page in 1..=max_pages {
+        let batch = get(&format!("{path}{separator}per_page=100&page={page}"))?.unwrap_or_default();
+        let batch = batch.as_array().cloned().unwrap_or_default();
+        let full = batch.len() == 100;
+        items.extend(batch);
+        if !full {
+            break;
+        }
+    }
+    Ok(items)
+}
+
+/// A write on the GitHub API with the gh token: HTTP status and JSON body (`Null` when empty).
+/// Error statuses are returned, not raised, so the caller can say what GitHub refused.
+pub(crate) fn send(method: &str, path: &str, body: Option<&serde_json::Value>) -> Result<(u16, serde_json::Value)> {
+    if token().is_none() {
+        bail!("GitHub-CLI nicht angemeldet (gh auth login)");
+    }
+    let request = request(method, path);
+    let result = match body {
+        Some(body) => request.set("Content-Type", "application/json").send_string(&body.to_string()),
+        None => request.call(),
+    };
+    let response = match result {
+        Ok(response) | Err(ureq::Error::Status(_, response)) => response,
+        Err(e) => return Err(e).context("GitHub nicht erreichbar"),
+    };
+    let status = response.status();
+    let text = response.into_string().unwrap_or_default();
+    Ok((status, serde_json::from_str(&text).unwrap_or(serde_json::Value::Null)))
+}
+
+/// GitHub's reason in an error response, e.g. `Pull Request is not mergeable`.
+pub(crate) fn message(json: &serde_json::Value) -> String {
+    json["message"].as_str().unwrap_or("ohne Begründung").to_owned()
+}
+
+/// A branch or tag name in an API path: `/` stays, anything but `A-Z a-z 0-9 - . _ ~` is percent-encoded.
+pub(crate) fn encode_ref(name: &str) -> String {
+    name.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 /// Tag of the newest published release (no pre-releases, no drafts); `None` if there is none.

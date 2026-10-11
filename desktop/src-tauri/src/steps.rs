@@ -1,7 +1,7 @@
 //! The four steps. Each runs on its own thread, writes log lines as it goes and ends with a
 //! status and a one-line summary.
 
-use crate::{changed, load_site, with_model, Check, ClaudeRun, LogLine, Status, Step, UploadResult};
+use crate::{changed, load_site, with_model, Check, ClaudeRun, LogLine, RepoReport, Status, Step, UploadResult};
 use anyhow::{anyhow, bail, Context, Result};
 use openreleasepilot_core::claude::{self, Event, Outdated};
 use openreleasepilot_core::config::{AuthKind, Config};
@@ -9,6 +9,7 @@ use openreleasepilot_core::paths::expand_home;
 use openreleasepilot_core::sftp::{self, ConnectError, Connection};
 use openreleasepilot_core::shell::{self, Runner};
 use openreleasepilot_core::site::{Site, Task};
+use openreleasepilot_core::repocare::{self, Done};
 use openreleasepilot_core::{git, github, localrepo, manifest, secrets, verify};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -116,6 +117,8 @@ pub enum Job {
     Upload,
     Verify,
     AddProduct(NewProductInput),
+    /// A confirmed "Repos pflegen" preview.
+    Repos(Vec<repocare::Plan>),
 }
 
 impl Job {
@@ -125,6 +128,7 @@ impl Job {
             Job::Update(_) | Job::AddProduct(_) => Step::Update,
             Job::Upload => Step::Upload,
             Job::Verify => Step::Verify,
+            Job::Repos(_) => Step::Repos,
         }
     }
 }
@@ -266,6 +270,7 @@ pub fn start(app: &AppHandle, jobs: Vec<Job>) -> Result<(), String> {
                     Step::Update => m.claude_runs.clear(),
                     Step::Upload => m.upload = None,
                     Step::Verify => m.verify = None,
+                    Step::Repos => m.repo_reports.clear(),
                 }
             });
             changed(&app);
@@ -275,6 +280,7 @@ pub fn start(app: &AppHandle, jobs: Vec<Job>) -> Result<(), String> {
                 Job::Upload => upload(&ctx),
                 Job::Verify => verify(&ctx),
                 Job::AddProduct(input) => add_product(&ctx, input),
+                Job::Repos(plans) => repos(&ctx, plans),
             };
             let (status, summary) = match result {
                 Ok(done) => done,
@@ -808,4 +814,78 @@ fn verify(ctx: &Ctx) -> Result<(Status, String)> {
     } else {
         Ok((Status::Error, format!("{} von {} Dateien weichen ab", report.problems.len(), report.checked)))
     }
+}
+
+// MARK: Repos pflegen
+
+/// Carries out a confirmed preview, repository by repository: merges, tag, branches on GitHub,
+/// branches in the local clone. Each item is checked again first (see `repocare`).
+fn repos(ctx: &Ctx, plans: &[repocare::Plan]) -> Result<(Status, String)> {
+    if github::token().is_none() {
+        bail!("Für „Repos pflegen“ die GitHub-CLI anmelden: gh auth login");
+    }
+    let (mut merged, mut tags, mut deleted, mut problems) = (0, 0, 0, 0);
+    let mut reports = Vec::new();
+    for plan in plans {
+        ctx.runner.check()?;
+        ctx.cmd(format!("{} · {}", plan.name, plan.repo));
+        let mut items = Vec::new();
+        let mut count = |done: bool, counter: &mut usize| if done { *counter += 1 } else { problems += 1 };
+        if let Some(error) = &plan.error {
+            record(ctx, &mut items, "Repository".into(), "", Err(anyhow!("{error}")));
+            count(false, &mut 0);
+        }
+        let mut merged_here = std::collections::HashSet::new();
+        for pr in &plan.merge {
+            ctx.runner.check()?;
+            let done = record(ctx, &mut items, format!("PR #{}", pr.number), &pr.title, repocare::merge(plan, pr));
+            if done {
+                merged_here.insert(pr.number);
+            }
+            count(done, &mut merged);
+        }
+        if let Some(tag) = &plan.tag {
+            ctx.runner.check()?;
+            count(record(ctx, &mut items, format!("Tag {tag}"), "", repocare::tag(plan)), &mut tags);
+        }
+        for branch in &plan.branches {
+            ctx.runner.check()?;
+            let result = match branch.after_merge {
+                Some(number) if !merged_here.contains(&number) => Ok(Done::Skipped(format!("PR #{number} wurde nicht gemergt"))),
+                _ => repocare::delete_branch(plan, branch),
+            };
+            count(record(ctx, &mut items, format!("Branch {}", branch.name), "", result), &mut deleted);
+        }
+        for branch in &plan.local_branches {
+            ctx.runner.check()?;
+            count(record(ctx, &mut items, format!("Lokal {}", branch.name), "", repocare::delete_local_branch(plan, branch)), &mut deleted);
+        }
+        reports.push(RepoReport { name: plan.name.clone(), repo: plan.repo.clone(), items });
+        with_model(&ctx.app, |m| m.repo_reports = reports.clone());
+        changed(&ctx.app);
+    }
+    let mut parts = Vec::new();
+    for (n, one, many) in [(merged, "PR gemergt", "PRs gemergt"), (tags, "Tag gesetzt", "Tags gesetzt"), (deleted, "Branch gelöscht", "Branches gelöscht")] {
+        if n > 0 {
+            parts.push(format!("{n} {}", if n == 1 { one } else { many }));
+        }
+    }
+    if problems > 0 {
+        parts.push(format!("{problems} übersprungen oder fehlgeschlagen"));
+    }
+    let summary = if parts.is_empty() { "Nichts zu tun".to_owned() } else { parts.join(", ") };
+    Ok((if problems > 0 { Status::Warning } else { Status::Ok }, summary))
+}
+
+/// Logs one item and adds it to the result; `true` if it was done.
+fn record(ctx: &Ctx, items: &mut Vec<Check>, label: String, context: &str, result: Result<Done>) -> bool {
+    let (status, text, done) = match result {
+        Ok(Done::Ok(text)) => (Status::Ok, text, true),
+        Ok(Done::Skipped(text)) => (Status::Warning, text, false),
+        Err(e) => (Status::Error, format!("{e:#}"), false),
+    };
+    let detail = if context.is_empty() { text } else { format!("{context} – {text}") };
+    ctx.log(match status { Status::Ok => "ok", Status::Warning => "warn", _ => "error" }, format!("  {label}: {detail}"));
+    items.push(Check { label, status, detail });
+    done
 }

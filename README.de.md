@@ -33,6 +33,24 @@ Update als „nicht ausgewählt, daran nichts ändern“ genannt. Jede Zeile zei
 nach einem Precheck auch, ob ein neueres Release vorliegt, und „kein Klon“, wenn `localPath` fehlt. Die
 Auswahl merkt sich die App in ihren Einstellungen, nicht im Website-Repository.
 
+## Repos pflegen
+
+**Repos pflegen …** in der Kopfleiste arbeitet in den Repositories der ausgewählten Produkte, über die
+angemeldete `gh`-CLI. Zuerst zeigt es pro Repository eine Vorschau und handelt erst nach
+**Ausführen**; jeder Punkt wird unmittelbar davor erneut geprüft, sodass nichts gemergt oder gelöscht
+wird, was sich seit der Vorschau geändert hat.
+
+- **Offene PRs mergen und Patch-Tag setzen:** offene Pull Requests auf den Hauptbranch, die GitHub als
+  mergebar mit lauter grünen Checks meldet (ein PR ganz ohne Checks bleibt offen), als Merge-Commit, wenn
+  das Repository das erlaubt. Danach setzt die App die nächste Patch-Version des neuesten `x.y.z`-Tags
+  (mit dem `tagPrefix` des Produkts) auf den Hauptbranch, sofern er sich seit diesem Tag geändert hat. In
+  Repositories mit Release-Workflow startet der Tag ein Release.
+- **Gemergte Branches löschen:** Branches, deren Commits vollständig im Hauptbranch sind oder deren Pull
+  Request gemergt wurde (auch per Squash), auf GitHub und im lokalen Klon (nach `git fetch --prune`).
+  Hauptbranch, geschützte Branches, Branches offener Pull Requests und der ausgecheckte Branch bleiben.
+
+Log und Ergebnis erscheinen unter „Repos pflegen“ im Bereich unter den Schritten.
+
 ## Repositories wählen
 
 Die App listet deine GitHub-Repositories über die angemeldete `gh`-CLI, auch private, und markiert

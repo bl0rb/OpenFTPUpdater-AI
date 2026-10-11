@@ -36,19 +36,37 @@ not in the website repository.
 ## Repository care
 
 **Repos pflegen …** in the toolbar works on the selected products' repositories, through the signed-in
-`gh` CLI. It first shows a preview per repository and only acts after **Ausführen**; every item is
-checked again right before, so nothing is merged or deleted that changed since the preview.
+`gh` CLI, in two parts:
 
-- **Merge open PRs and set a patch tag:** open pull requests into the default branch that GitHub reports
-  mergeable with all checks green (a pull request without any check stays open), as a merge commit if
-  the repository allows it. Then the next patch version of the newest `x.y.z` tag (with the product's
-  `tagPrefix`) is set on the default branch, if it changed since that tag. In repositories with a release
-  workflow the tag starts a release.
-- **Delete merged branches:** branches whose commits are all in the default branch or whose pull request
-  was merged (squash merges included), on GitHub and in the local clone (after `git fetch --prune`).
-  The default branch, protected branches, branches of open pull requests and the checked-out branch stay.
+1. **Prüfen** reads the state of every repository on GitHub, then Claude Code judges each open pull
+   request, read-only (in the local clone if there is one), by the rules of the `dependabot-pr` skill:
+   risk class (green, yellow, red; below 1.0 a change of the first non-zero digit counts as major),
+   release notes from the upstream repository, only manifest/lock/workflow files in Dependabot pull
+   requests, SHA pins of Actions, related dependencies only together, majors checked against the actual
+   use in the code. The log shows what Claude looks at.
+2. The preview under "Ergebnis" lists per repository what will happen, grouped: merged, closed, rebased,
+   left open, each with Claude's risk and reason. **Ausführen** carries it out, **Verwerfen** drops it.
+   Every item is checked again right before, so nothing that changed since the preview is touched.
 
-The log and the result show under "Repos pflegen" in the panel below the steps.
+What the run does:
+
+- **Merge:** only pull requests into the default branch that GitHub reports mergeable with checks, all
+  green, and that Claude rates green, or yellow with nothing relevant in the release notes. Red is never
+  merged, and without a verdict nothing is merged. Merge commit where the repository allows it.
+- **Close:** pull requests Claude finds superfluous (superseded by a newer one, already in the default
+  branch), with the reason as a comment.
+- **Rebase:** Dependabot pull requests with a merge conflict get `@dependabot rebase`, also when an
+  earlier merge of the same run caused the conflict; a later run can merge them.
+- **Tag:** the next patch version of the newest `x.y.z` tag (with the product's `tagPrefix`), only once
+  the default branch's CI has passed after the merges (the app waits up to 30 minutes; a red CI means
+  no tag). In repositories with a release workflow the tag starts a release.
+- **Delete merged branches** (optional): branches whose commits are all in the default branch or whose
+  pull request was merged (squash merges included), on GitHub and in the local clone (after
+  `git fetch --prune`). The default branch, protected branches, branches of open pull requests and the
+  checked-out branch stay.
+
+The review costs Claude usage, roughly a few cents up to about a dollar per repository depending on the
+model and the number of pull requests.
 
 ## Choosing repositories
 

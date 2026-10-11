@@ -328,7 +328,7 @@ const HAS_RESULT = {
   update: () => view.claudeRuns.length > 0,
   upload: () => !!view.upload,
   verify: () => !!view.verify,
-  repos: () => view.repoReports.length > 0,
+  repos: () => !!view.repoPlans || view.repoReports.length > 0,
 };
 const hasResult = (step) => HAS_RESULT[step]();
 
@@ -491,17 +491,104 @@ function verifyResult() {
   ];
 }
 
-/** One block per repository: a row per item, as in the precheck. */
-function repoBlock(name, repo, rows, extra) {
-  return h('div', { class: 'repo-block' },
-    h('div', { class: 'repo-block-head' }, h('strong', null, name), h('span', { class: 'muted small mono' }, repo), extra),
-    rows.length ? h('div', { class: 'checks' }, rows.map(([status, label, detail]) => [
-      h('span', { class: `status-dot ${status}` }), h('span', { class: 'label' }, label), h('span', { class: 'detail-text selectable' }, detail)]))
-      : h('div', { class: 'note' }, 'Nichts zu tun.'));
+// Which repository blocks the user opened or closed; survives re-rendering.
+const repoOpen = new Map();
+
+/** A collapsible block per repository, as the Claude runs of an update. */
+function repoDetails(key, open, summary, body) {
+  return h('details', { class: 'run repo', open: repoOpen.get(key) ?? open, ontoggle: (e) => repoOpen.set(key, e.target.open) },
+    h('summary', null, summary), h('div', { class: 'run-body' }, body));
+}
+
+const badge = (cls, text, title) => h('span', { class: `badge ${cls}`, title }, text);
+// In this order: what the run does to each pull request.
+const ACTIONS = { merge: 'Wird gemergt', close: 'Wird geschlossen', rebase: 'Dependabot-Rebase anstoßen', keep: 'Bleibt offen' };
+const RISKS = { green: ['green', 'Risiko grün'], yellow: ['orange', 'Risiko gelb'], red: ['red', 'Risiko rot'] };
+
+function prRow(pr) {
+  const risk = pr.risk && RISKS[pr.risk];
+  return h('div', { class: 'item' },
+    h('div', { class: 'item-line' },
+      h('span', { class: 'mono muted' }, `#${pr.number}`),
+      h('span', { class: 'item-title', title: pr.title }, pr.bump ? `${pr.title.replace(/ from .* to .*$/, '')} ${pr.bump}` : pr.title),
+      !pr.dependabot && h('span', { class: 'muted small' }, pr.author),
+      h('span', { class: 'spacer' }),
+      risk && badge(risk[0], risk[1], 'Claudes Einschätzung')),
+    pr.reason && h('div', { class: 'item-reason selectable' }, pr.reason));
+}
+
+function branchChips(title, branches) {
+  return branches.length > 0 && h('div', { class: 'item' },
+    h('div', { class: 'item-line' }, h('strong', { class: 'small' }, title), badge('', String(branches.length))),
+    h('div', { class: 'chips' }, branches.map((b) => h('span', { class: 'chip-ref mono', title: b.reason }, b.name))));
+}
+
+/** Badges for the closed block: what happens in the repository. */
+function planBadges(p) {
+  const count = (action) => p.prs.filter((pr) => pr.action === action).length;
+  const branches = p.branches.length + p.localBranches.length;
+  return [
+    p.error && badge('red', 'Fehler'),
+    count('merge') && badge('green', `${count('merge')} mergen`),
+    count('close') && badge('red', `${count('close')} schließen`),
+    count('rebase') && badge('accent', `${count('rebase')} Rebase`),
+    count('keep') && badge('', `${count('keep')} offen`),
+    p.tag && badge('green', `Tag ${p.tag}`),
+    branches && badge('', `${branches} Branches`),
+  ].filter(Boolean);
+}
+
+function planView(plans) {
+  const total = (pick) => plans.reduce((sum, p) => sum + pick(p), 0);
+  const count = (action) => total((p) => p.prs.filter((pr) => pr.action === action).length);
+  const parts = [[count('merge'), 'PR mergen', 'PRs mergen'], [count('close'), 'PR schließen', 'PRs schließen'],
+    [count('rebase'), 'Rebase', 'Rebases'], [total((p) => (p.tag ? 1 : 0)), 'Tag', 'Tags'],
+    [total((p) => p.branches.length + p.localBranches.length), 'Branch löschen', 'Branches löschen']]
+    .filter(([n]) => n > 0).map(([n, one, many]) => `${n} ${n === 1 ? one : many}`);
+  const cost = total((p) => p.reviewCost ?? 0);
+  const busy = !!view.running;
+  return [
+    h('div', { class: 'plan-bar' },
+      h('div', null, h('strong', null, 'Vorschau'), h('div', { class: 'muted small' },
+        `${parts.join(' · ') || 'Nichts zu tun'}${cost ? ` · Claude-Prüfung ${usd(cost)}` : ''}. Vor jeder Aktion prüft die App erneut.`)),
+      h('span', { class: 'spacer' }),
+      button('Verwerfen', () => call('discard_repo_plan'), { disabled: busy }),
+      button('Ausführen', () => call('run_repos'), { cls: 'primary', iconName: 'play', disabled: busy || !parts.length })),
+    h('div', { class: 'runs' }, plans.map((p) => repoDetails(p.repo, plans.length === 1,
+      [h('strong', null, p.name), h('span', { class: 'muted small mono' }, p.repo), h('span', { class: 'spacer' }), ...planBadges(p)],
+      [
+        p.error && h('div', { class: 'note error-text' }, p.error),
+        p.reviewNote && h('div', { class: 'note orange' }, p.reviewNote),
+        p.prs.length > 0 && h('div', { class: 'items' }, Object.entries(ACTIONS).map(([action, title]) => {
+          const prs = p.prs.filter((pr) => pr.action === action);
+          return prs.length > 0 && [h('div', { class: 'item-group' }, `${title} (${prs.length})`), ...prs.map(prRow)];
+        })),
+        (p.tag || p.tagNote) && h('div', { class: 'item' }, h('div', { class: 'item-line' }, h('strong', { class: 'small' }, 'Tag'),
+          h('span', { class: p.tag ? '' : 'muted' }, p.tag ? `${p.tag} nach ${p.lastTag}, sobald die CI auf ${p.defaultBranch} nach den Merges grün ist` : p.tagNote))),
+        branchChips('Branches auf GitHub löschen', p.branches),
+        p.cloneNote && h('div', { class: 'note orange' }, `Lokale Branches übersprungen: ${p.cloneNote}`),
+        branchChips('Lokale Branches löschen', p.localBranches),
+        !p.error && !p.prs.length && !p.tag && !p.tagNote && !p.branches.length && !p.localBranches.length && h('div', { class: 'note' }, 'Nichts zu tun.'),
+      ]))),
+  ];
+}
+
+function reportView(reports) {
+  return h('div', { class: 'runs' }, reports.map((r) => {
+    const problems = r.items.filter((c) => c.status !== 'ok').length;
+    return repoDetails(r.repo, problems > 0 || reports.length === 1,
+      [h('strong', null, r.name), h('span', { class: 'muted small mono' }, r.repo), h('span', { class: 'spacer' }),
+        badge(problems ? 'orange' : 'green', problems ? `${problems} offen` : `${r.items.length} erledigt`)],
+      r.items.length ? h('div', { class: 'items' }, r.items.map((c) => h('div', { class: 'item' },
+        h('div', { class: 'item-line' }, h('span', { class: `status-dot ${c.status}` }), h('strong', { class: 'small' }, c.label)),
+        h('div', { class: 'item-reason selectable' }, c.detail))))
+        : h('div', { class: 'note' }, 'Nichts zu tun.'));
+  }));
 }
 
 function reposResult() {
-  return view.repoReports.map((r) => repoBlock(r.name, r.repo, r.items.map((c) => [c.status, c.label, c.detail])));
+  if (view.repoPlans) return planView(view.repoPlans);
+  return view.repoReports.length ? [reportView(view.repoReports)] : [];
 }
 
 // MARK: Log
@@ -775,61 +862,33 @@ function addProductDialog() {
 
 // MARK: Repos pflegen
 
-const planActions = (p) => p.merge.length + (p.tag ? 1 : 0) + p.branches.length + p.localBranches.length;
-
-/** What the run would do in one repository: green = happens, grey = stays as it is. */
-function planBlock(p) {
-  const rows = p.error ? [['error', 'Repository', p.error]] : [
-    ...p.merge.map((pr) => ['ok', `PR #${pr.number}`, `${pr.title} (${pr.author}) – wird gemergt`]),
-    ...p.skip.map((pr) => ['idle', `PR #${pr.number}`, `${pr.title} – bleibt offen: ${pr.reason}`]),
-    ...(p.tag ? [['ok', `Tag ${p.tag}`, `nach ${p.lastTag}, auf dem Stand von ${p.defaultBranch} nach den Merges`]]
-      : p.tagNote ? [['idle', 'Tag', p.tagNote]] : []),
-    ...p.branches.map((b) => ['ok', `Branch ${b.name}`, `wird gelöscht – ${b.reason}`]),
-    ...(p.cloneNote ? [['warning', 'Lokaler Klon', p.cloneNote]] : []),
-    ...p.localBranches.map((b) => ['ok', `Lokal ${b.name}`, `wird gelöscht – ${b.reason}`]),
-  ];
-  return repoBlock(p.name, p.repo, rows, p.defaultBranch && h('span', { class: 'badge' }, p.defaultBranch));
-}
-
 function reposDialog() {
   const products = view.products.filter((p) => p.enabled);
-  const s = { merge: true, cleanup: true, loading: false, plans: null, error: '' };
-  const preview = async (render) => {
-    Object.assign(s, { loading: true, plans: null, error: '' });
-    render();
-    try { s.plans = await invoke('plan_repos', { merge: s.merge, cleanup: s.cleanup }); } catch (error) { s.error = String(error); }
-    s.loading = false;
-    render();
-  };
+  const s = { merge: true, cleanup: true, model: '', error: '' };
   openDialog('Repos pflegen', (close, render) => {
     const option = (key, title, note) => h('label', { class: 'check-line top' },
-      h('input', { type: 'checkbox', checked: s[key], disabled: s.loading, onchange: (e) => { s[key] = e.target.checked; s.plans = null; render(); } }),
+      h('input', { type: 'checkbox', checked: s[key], onchange: (e) => { s[key] = e.target.checked; render(); } }),
       h('span', null, h('strong', null, title), h('div', { class: 'note' }, note)));
-    const total = (pick) => (s.plans ?? []).reduce((sum, p) => sum + pick(p), 0);
-    const counts = [[total((p) => p.merge.length), 'PR', 'PRs'], [total((p) => (p.tag ? 1 : 0)), 'Tag', 'Tags'],
-      [total((p) => p.branches.length + p.localBranches.length), 'Branch', 'Branches']]
-      .filter(([n]) => n > 0).map(([n, one, many]) => `${n} ${n === 1 ? one : many}`);
     return {
       body: [
         h('h2', null, 'Repos pflegen'),
         h('div', { class: 'note' }, products.length ? `Gilt für die ausgewählten Produkte: ${products.map((p) => p.name).join(', ')}.`
           : 'Keine Produkte ausgewählt; in der Produktliste mindestens eins anhaken.'),
-        option('merge', 'Offene PRs mergen und Patch-Tag setzen',
-          'PRs auf den Hauptbranch, die GitHub als mergebar mit grünen Checks meldet. Danach x.y.z → x.y.(z+1), wenn sich seit dem letzten Tag etwas geändert hat. Ein Tag startet in Repos mit Release-Workflow ein Release.'),
+        option('merge', 'Offene PRs prüfen, mergen und Patch-Tag setzen',
+          'Claude bewertet jeden offenen PR wie der dependabot-pr-Skill: Risikoklasse, Release-Notes, SHA-Pins, zusammengehörige Abhängigkeiten, Nutzung im Code. Gemergt wird nur, was GitHub mit grünen Checks meldet und Claude als sicher einstuft; überflüssige PRs werden mit Begründung geschlossen, Dependabot-PRs mit Konflikt neu aufgebaut. Der Tag x.y.(z+1) kommt erst, wenn die CI auf main grün ist.'),
+        s.merge && h('div', { class: 'field-row' }, h('label', { for: 'repos-model' }, 'Modell für die Prüfung'),
+          modelSelect(s.model, view.site?.claude?.model, (model) => { s.model = model; }, 'repos-model')),
         option('cleanup', 'Gemergte Branches löschen',
           'Branches, deren Commits vollständig im Hauptbranch sind oder deren PR gemergt wurde, auf GitHub und im lokalen Klon. Geschützte, ausgecheckte und Branches offener PRs bleiben.'),
-        s.loading && h('div', { class: 'note line' }, h('span', { class: 'spinner' }), 'GitHub wird abgefragt …'),
+        h('div', { class: 'note' }, 'Zuerst entsteht nur eine Vorschau; ausgeführt wird erst, wenn du sie unter „Ergebnis“ bestätigst.'),
         s.error && h('div', { class: 'note error-text' }, s.error),
-        s.plans && h('div', { class: 'plan' }, s.plans.map(planBlock)),
       ],
       actions: [
-        view.repoReports.length > 0 && button('Letztes Ergebnis', () => { close(); selectStep('repos'); }, { cls: 'left' }),
+        (view.repoPlans || view.repoReports.length > 0) && button(view.repoPlans ? 'Offene Vorschau' : 'Letztes Ergebnis', () => { close(); selectStep('repos'); }, { cls: 'left' }),
         button('Abbrechen', close),
-        s.plans
-          ? button(counts.length ? `Ausführen: ${counts.join(', ')}` : 'Nichts zu tun', async () => {
-            try { await invoke('run_repos', { plans: s.plans }); close(); } catch (error) { s.error = String(error); render(); }
-          }, { cls: 'primary', disabled: !counts.length || !!view.running })
-          : button('Vorschau', () => preview(render), { cls: 'primary', disabled: s.loading || (!s.merge && !s.cleanup) || !products.length }),
+        button('Prüfen', async () => {
+          try { await invoke('check_repos', { merge: s.merge, cleanup: s.cleanup, model: s.model }); close(); } catch (error) { s.error = String(error); render(); }
+        }, { cls: 'primary', disabled: (!s.merge && !s.cleanup) || !products.length || !!view.running }),
       ],
     };
   });

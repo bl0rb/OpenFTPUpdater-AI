@@ -117,7 +117,9 @@ pub enum Job {
     Upload,
     Verify,
     AddProduct(NewProductInput),
-    /// A confirmed "Repos pflegen" preview.
+    /// "Repos pflegen": the preview, with Claude's review.
+    ReposCheck(RepoOptions),
+    /// "Repos pflegen": a confirmed preview.
     Repos(Vec<repocare::Plan>),
 }
 
@@ -128,7 +130,7 @@ impl Job {
             Job::Update(_) | Job::AddProduct(_) => Step::Update,
             Job::Upload => Step::Upload,
             Job::Verify => Step::Verify,
-            Job::Repos(_) => Step::Repos,
+            Job::ReposCheck(_) | Job::Repos(_) => Step::Repos,
         }
     }
 }
@@ -270,7 +272,12 @@ pub fn start(app: &AppHandle, jobs: Vec<Job>) -> Result<(), String> {
                     Step::Update => m.claude_runs.clear(),
                     Step::Upload => m.upload = None,
                     Step::Verify => m.verify = None,
-                    Step::Repos => m.repo_reports.clear(),
+                    Step::Repos => {
+                        m.repo_reports.clear();
+                        if matches!(job, Job::ReposCheck(_)) {
+                            m.repo_plans = None;
+                        }
+                    }
                 }
             });
             changed(&app);
@@ -280,7 +287,8 @@ pub fn start(app: &AppHandle, jobs: Vec<Job>) -> Result<(), String> {
                 Job::Upload => upload(&ctx),
                 Job::Verify => verify(&ctx),
                 Job::AddProduct(input) => add_product(&ctx, input),
-                Job::Repos(plans) => repos(&ctx, plans),
+                Job::ReposCheck(options) => repos_check(&ctx, options),
+                Job::Repos(plans) => repos_run(&ctx, plans),
             };
             let (status, summary) = match result {
                 Ok(done) => done,
@@ -441,7 +449,12 @@ fn precheck(ctx: &Ctx) -> Result<(Status, String)> {
         push(&mut checks, "Arbeitsverzeichnis", Status::Ok, format!("sauber (Branch {branch})"));
     } else {
         let names: Vec<String> = changes.iter().map(|l| l.get(3..).unwrap_or(l).to_owned()).collect();
-        push(&mut checks, "Arbeitsverzeichnis", Status::Warning, format!("{} offene Änderungen{}", changes.len(), preview(&names)));
+        push(
+            &mut checks,
+            "Arbeitsverzeichnis",
+            Status::Warning,
+            format!("{} offene Änderungen{}; vor Update und Upload committen oder mit git stash -u beiseitelegen", changes.len(), preview(&names)),
+        );
     }
     if git::has_upstream(&project) {
         match git::fetch(&project).and_then(|_| git::ahead_behind(&project)) {
@@ -515,11 +528,54 @@ fn precheck(ctx: &Ctx) -> Result<(Status, String)> {
 
 // MARK: Update
 
+/// Update and Upload need a clean working tree. Lists what is dirty in the log with the commands to
+/// look at it, keep it or put it aside; the error names the files and the recommendation.
+fn dirty_tree(ctx: &Ctx, project: &std::path::Path, changes: &[String], step: &str, why: &str) -> anyhow::Error {
+    // `git status --porcelain`: two status letters, a space, the path.
+    let entries: Vec<(&str, &str)> = changes.iter().map(|line| (line.get(..2).unwrap_or(""), line.get(3..).unwrap_or(line))).collect();
+    let untracked_only = entries.iter().all(|(code, _)| *code == "??");
+    ctx.warn(format!("{} nicht committete Änderung(en) in {}:", entries.len(), openreleasepilot_core::paths::abbreviate_home(project)));
+    for (code, path) in entries.iter().take(30) {
+        ctx.log("out", format!("  {}: {path}", change_kind(code)));
+    }
+    if entries.len() > 30 {
+        ctx.log("out", format!("  … und {} weitere", entries.len() - 30));
+    }
+    ctx.info("Empfehlung:");
+    ctx.info(if untracked_only {
+        "  Das sind neue Dateien, die git noch nicht kennt. Gehören sie zur Website, committen; sonst löschen oder in .gitignore aufnehmen."
+    } else {
+        "  Häufigste Ursache: ein Update, das nach Claudes Änderungen beim Build oder an site.json abgebrochen ist. Erst ansehen, dann übernehmen oder beiseitelegen."
+    });
+    if entries.iter().any(|(_, path)| path.ends_with("site.json")) {
+        ctx.info("  site.json ist geändert: vor dem Commit prüfen, ob build, output und claude.allowedTools noch stimmen.");
+    }
+    let dir = project.display();
+    ctx.cmd(format!("  ansehen:        git -C \"{dir}\" diff"));
+    ctx.cmd(format!("  übernehmen:     git -C \"{dir}\" add -A && git -C \"{dir}\" commit -m \"…\""));
+    ctx.cmd(format!("  beiseitelegen:  git -C \"{dir}\" stash -u   (zurückholen mit git -C \"{dir}\" stash pop)"));
+    ctx.info(format!("  Danach {step} erneut starten."));
+    let names: Vec<String> = entries.iter().map(|(_, path)| path.to_string()).collect();
+    let advice = if untracked_only { "committen, wenn sie dazugehören, sonst löschen" } else { "ansehen, dann committen oder mit git stash -u beiseitelegen" };
+    anyhow!("{} nicht committete Änderung(en) im Projekt{}. {why} Empfehlung: {advice}; die Befehle stehen im Log.", entries.len(), preview(&names))
+}
+
+fn change_kind(code: &str) -> &'static str {
+    match code {
+        "??" => "neu, nicht versioniert",
+        c if c.contains('U') => "Konflikt",
+        c if c.contains('D') => "gelöscht",
+        c if c.contains('R') => "umbenannt",
+        c if c.contains('A') => "neu",
+        _ => "geändert",
+    }
+}
+
 /// Content changes start from a clean tree on the latest remote state.
 fn prepare_tree(ctx: &Ctx, project: &std::path::Path) -> Result<()> {
     let changes = git::changes(project)?;
     if !changes.is_empty() {
-        bail!("Das Arbeitsverzeichnis enthält nicht committete Änderungen ({}). Bitte erst committen oder verwerfen.", changes.len());
+        return Err(dirty_tree(ctx, project, &changes, "Update", "Update startet nur auf einem sauberen Stand."));
     }
     if git::has_upstream(project) {
         ctx.cmd("$ git pull --ff-only");
@@ -710,7 +766,7 @@ fn upload(ctx: &Ctx) -> Result<(Status, String)> {
     }
     let changes = git::changes(&project)?;
     if !changes.is_empty() {
-        bail!("Das Arbeitsverzeichnis enthält nicht committete Änderungen ({}). Hochgeladen wird nur ein committeter Stand.", changes.len());
+        return Err(dirty_tree(ctx, &project, &changes, "Upload", "Hochgeladen wird nur ein committeter Stand."));
     }
     let upstream = git::has_upstream(&project);
     let mut ahead = 0;
@@ -818,54 +874,230 @@ fn verify(ctx: &Ctx) -> Result<(Status, String)> {
 
 // MARK: Repos pflegen
 
-/// Carries out a confirmed preview, repository by repository: merges, tag, branches on GitHub,
-/// branches in the local clone. Each item is checked again first (see `repocare`).
-fn repos(ctx: &Ctx, plans: &[repocare::Plan]) -> Result<(Status, String)> {
+/// What "Repos pflegen" looks at.
+#[derive(Debug, Clone)]
+pub struct RepoOptions {
+    pub merge: bool,
+    pub cleanup: bool,
+    /// Model alias for the review; empty = the site's default.
+    pub model: String,
+}
+
+/// The preview: GitHub's state of every selected product's repository, then Claude judges the open
+/// pull requests. Ends with a plan the user confirms under "Ergebnis".
+fn repos_check(ctx: &Ctx, options: &RepoOptions) -> Result<(Status, String)> {
     if github::token().is_none() {
         bail!("Für „Repos pflegen“ die GitHub-CLI anmelden: gh auth login");
     }
-    let (mut merged, mut tags, mut deleted, mut problems) = (0, 0, 0, 0);
-    let mut reports = Vec::new();
-    for plan in plans {
+    let products = crate::selected_products(&ctx.app).map_err(|e| anyhow!(e))?;
+    if products.is_empty() {
+        bail!("Keine Produkte ausgewählt");
+    }
+    let site = ctx.site()?;
+    ctx.info(format!("Lese den Stand von {} Repositories auf GitHub …", products.len()));
+    let (merge, cleanup) = (options.merge, options.cleanup);
+    // One thread per repository: each needs a dozen or more API calls.
+    let mut plans: Vec<repocare::Plan> = std::thread::scope(|scope| {
+        let handles: Vec<_> = products
+            .iter()
+            .map(|(p, clone)| scope.spawn(move || repocare::scan(&p.name, &p.repo, &p.tag_prefix, clone.as_deref(), merge, cleanup)))
+            .collect();
+        handles.into_iter().map(|h| h.join().expect("scan thread panicked")).collect()
+    });
+    for plan in &mut plans {
         ctx.runner.check()?;
         ctx.cmd(format!("{} · {}", plan.name, plan.repo));
-        let mut items = Vec::new();
-        let mut count = |done: bool, counter: &mut usize| if done { *counter += 1 } else { problems += 1 };
         if let Some(error) = &plan.error {
-            record(ctx, &mut items, "Repository".into(), "", Err(anyhow!("{error}")));
-            count(false, &mut 0);
+            ctx.warn(format!("  {error}"));
+            continue;
         }
-        let mut merged_here = std::collections::HashSet::new();
-        for pr in &plan.merge {
-            ctx.runner.check()?;
-            let done = record(ctx, &mut items, format!("PR #{}", pr.number), &pr.title, repocare::merge(plan, pr));
-            if done {
-                merged_here.insert(pr.number);
+        if merge && !plan.prs.is_empty() {
+            match review(ctx, plan, options, &site) {
+                Ok(()) => {}
+                Err(e) if ctx.runner.is_cancelled() => return Err(e),
+                Err(e) => {
+                    ctx.warn(format!("  Claude-Prüfung fehlgeschlagen: {e:#}"));
+                    plan.review_note = Some(format!("Claude-Prüfung fehlgeschlagen ({e:#}); alle PRs bleiben offen."));
+                    repocare::apply_review(plan, &[]);
+                }
             }
-            count(done, &mut merged);
+            for pr in &plan.prs {
+                let (kind, what) = match pr.action {
+                    repocare::Action::Merge => ("ok", "mergen"),
+                    repocare::Action::Close => ("warn", "schließen"),
+                    repocare::Action::Rebase => ("info", "Rebase anstoßen"),
+                    repocare::Action::Keep => ("info", "bleibt offen"),
+                };
+                ctx.log(kind, format!("  PR #{} {}: {what} – {}", pr.number, pr.title, pr.reason));
+            }
         }
-        if let Some(tag) = &plan.tag {
-            ctx.runner.check()?;
-            count(record(ctx, &mut items, format!("Tag {tag}"), "", repocare::tag(plan)), &mut tags);
+        repocare::finish(plan, merge, cleanup);
+    }
+    let summary = plan_summary(&plans);
+    let errors = plans.iter().filter(|p| p.error.is_some() || p.review_note.is_some()).count();
+    with_model(&ctx.app, |m| m.repo_plans = Some(plans));
+    Ok((if errors > 0 { Status::Warning } else { Status::Ok }, format!("Vorschau: {summary}. Unter „Ergebnis“ ausführen oder verwerfen.")))
+}
+
+/// `3 PRs mergen, 1 Tag, 5 Branches löschen`, or `nichts zu tun`.
+fn plan_summary(plans: &[repocare::Plan]) -> String {
+    use repocare::Action;
+    let sum = |f: &dyn Fn(&repocare::Plan) -> usize| plans.iter().map(f).sum::<usize>();
+    let parts: Vec<String> = [
+        (sum(&|p| p.count(Action::Merge)), "PR mergen", "PRs mergen"),
+        (sum(&|p| p.count(Action::Close)), "PR schließen", "PRs schließen"),
+        (sum(&|p| p.count(Action::Rebase)), "Rebase", "Rebases"),
+        (sum(&|p| p.tag.is_some() as usize), "Tag", "Tags"),
+        (sum(&|p| p.branches.len() + p.local_branches.len()), "Branch löschen", "Branches löschen"),
+    ]
+    .into_iter()
+    .filter(|(n, ..)| *n > 0)
+    .map(|(n, one, many)| format!("{n} {}", if n == 1 { one } else { many }))
+    .collect();
+    if parts.is_empty() {
+        "nichts zu tun".into()
+    } else {
+        parts.join(", ")
+    }
+}
+
+/// Claude judges the open pull requests of one repository, read-only, in its local clone if there is one.
+fn review(ctx: &Ctx, plan: &mut repocare::Plan, options: &RepoOptions, site: &Site) -> Result<()> {
+    let dir = match &plan.clone {
+        Some(dir) => PathBuf::from(dir),
+        None => {
+            let dir = std::env::temp_dir().join("OpenReleasePilot-Review");
+            std::fs::create_dir_all(&dir).context("Arbeitsordner für die Prüfung anlegen")?;
+            dir
+        }
+    };
+    let model = Some(options.model.trim()).filter(|m| !m.is_empty()).or(site.claude.model.as_deref());
+    let prompt = claude::review_prompt(plan);
+    let args = claude::review_args(&prompt, model, site.claude.effort.as_deref(), site.claude.max_budget_usd);
+    ctx.cmd(format!("  $ claude -p … --model {} (prüft {} PRs, nur lesend)", model.unwrap_or("Standard"), plan.prs.len()));
+    let mut outcome = None;
+    // No GITHUB_TOKEN: gh reads with its own login; the allowlist keeps Claude to reading.
+    let code = shell::stream("claude", &args, &dir, &HashMap::new(), &ctx.runner, |line| match claude::parse(line) {
+        Event::Line(text) => ctx.log("claude", format!("  {text}")),
+        Event::Done(done) => outcome = Some(done),
+        Event::Ignore => {}
+    })?;
+    let outcome = outcome.ok_or_else(|| anyhow!("Claude Code hat ohne Ergebnis beendet (Exit-Code {code})"))?;
+    plan.review_cost = outcome.cost_usd;
+    if !outcome.success {
+        bail!("{}", outcome.text);
+    }
+    let review: repocare::Review = serde_json::from_value(outcome.structured.context("Claude hat keine strukturierte Antwort geliefert")?)
+        .context("Claudes Antwort passt nicht zum Schema")?;
+    repocare::apply_review(plan, &review.prs);
+    Ok(())
+}
+
+/// Carries out a confirmed preview in three rounds over all repositories, so their CI runs while
+/// the app works on the next one: pull requests (close, merge, rebase), then the tags once the CI
+/// is green, then the branches. Each item is checked again first (see `repocare`).
+fn repos_run(ctx: &Ctx, plans: &[repocare::Plan]) -> Result<(Status, String)> {
+    use repocare::Action;
+    if github::token().is_none() {
+        bail!("Für „Repos pflegen“ die GitHub-CLI anmelden: gh auth login");
+    }
+    let mut reports: Vec<RepoReport> = plans.iter().map(|p| RepoReport { name: p.name.clone(), repo: p.repo.clone(), items: Vec::new() }).collect();
+    let mut merged: Vec<std::collections::HashSet<u64>> = vec![Default::default(); plans.len()];
+    let (mut done, mut problems) = (HashMap::<&str, usize>::new(), 0);
+    let publish = |reports: &Vec<RepoReport>| {
+        with_model(&ctx.app, |m| m.repo_reports = reports.clone());
+        changed(&ctx.app);
+    };
+
+    ctx.info("Pull Requests …");
+    for (i, plan) in plans.iter().enumerate() {
+        ctx.runner.check()?;
+        ctx.cmd(format!("{} · {}", plan.name, plan.repo));
+        let items = &mut reports[i].items;
+        if let Some(error) = &plan.error {
+            record(ctx, items, "Repository".into(), "", Err(anyhow!("{error}")));
+            problems += 1;
+            continue;
+        }
+        for (action, key) in [(Action::Close, "geschlossen"), (Action::Merge, "gemergt"), (Action::Rebase, "Rebase")] {
+            for pr in plan.prs.iter().filter(|pr| pr.action == action) {
+                ctx.runner.check()?;
+                let result = match action {
+                    Action::Close => repocare::close(plan, pr),
+                    Action::Merge => repocare::merge(plan, pr),
+                    _ => repocare::rebase(plan, pr),
+                };
+                if record(ctx, items, format!("PR #{}", pr.number), &pr.title, result) {
+                    *done.entry(key).or_default() += 1;
+                    if action == Action::Merge {
+                        merged[i].insert(pr.number);
+                    }
+                } else {
+                    problems += 1;
+                }
+            }
+        }
+        publish(&reports);
+    }
+
+    if plans.iter().any(|p| p.tag.is_some() && p.error.is_none()) {
+        ctx.info("Tags, sobald die CI grün ist …");
+    }
+    for (i, plan) in plans.iter().enumerate() {
+        let Some(tag) = plan.tag.as_ref().filter(|_| plan.error.is_none()) else { continue };
+        ctx.runner.check()?;
+        let result = repocare::head(plan).and_then(|sha| repocare::tag(plan, &sha, &ctx.runner, &|text| ctx.info(format!("  {}: {text}", plan.name))));
+        if result.is_err() && ctx.runner.is_cancelled() {
+            bail!("Abgebrochen");
+        }
+        if record(ctx, &mut reports[i].items, format!("Tag {tag}"), "", result) {
+            *done.entry("Tag").or_default() += 1;
+        } else {
+            problems += 1;
+        }
+        publish(&reports);
+    }
+
+    if plans.iter().any(|p| !p.branches.is_empty() || !p.local_branches.is_empty()) {
+        ctx.info("Branches …");
+    }
+    for (i, plan) in plans.iter().enumerate() {
+        if plan.error.is_some() {
+            continue;
         }
         for branch in &plan.branches {
             ctx.runner.check()?;
             let result = match branch.after_merge {
-                Some(number) if !merged_here.contains(&number) => Ok(Done::Skipped(format!("PR #{number} wurde nicht gemergt"))),
+                Some(number) if !merged[i].contains(&number) => Ok(Done::Skipped(format!("PR #{number} wurde nicht gemergt"))),
                 _ => repocare::delete_branch(plan, branch),
             };
-            count(record(ctx, &mut items, format!("Branch {}", branch.name), "", result), &mut deleted);
+            let ok = record(ctx, &mut reports[i].items, format!("Branch {}", branch.name), "", result);
+            if ok {
+                *done.entry("Branch").or_default() += 1;
+            } else if branch.after_merge.is_none() {
+                problems += 1;
+            }
         }
         for branch in &plan.local_branches {
             ctx.runner.check()?;
-            count(record(ctx, &mut items, format!("Lokal {}", branch.name), "", repocare::delete_local_branch(plan, branch)), &mut deleted);
+            if record(ctx, &mut reports[i].items, format!("Lokal {}", branch.name), "", repocare::delete_local_branch(plan, branch)) {
+                *done.entry("Branch").or_default() += 1;
+            } else {
+                problems += 1;
+            }
         }
-        reports.push(RepoReport { name: plan.name.clone(), repo: plan.repo.clone(), items });
-        with_model(&ctx.app, |m| m.repo_reports = reports.clone());
-        changed(&ctx.app);
+        publish(&reports);
     }
+
     let mut parts = Vec::new();
-    for (n, one, many) in [(merged, "PR gemergt", "PRs gemergt"), (tags, "Tag gesetzt", "Tags gesetzt"), (deleted, "Branch gelöscht", "Branches gelöscht")] {
+    for (key, one, many) in [
+        ("gemergt", "PR gemergt", "PRs gemergt"),
+        ("geschlossen", "PR geschlossen", "PRs geschlossen"),
+        ("Rebase", "Rebase angestoßen", "Rebases angestoßen"),
+        ("Tag", "Tag gesetzt", "Tags gesetzt"),
+        ("Branch", "Branch gelöscht", "Branches gelöscht"),
+    ] {
+        let n = done.get(key).copied().unwrap_or(0);
         if n > 0 {
             parts.push(format!("{n} {}", if n == 1 { one } else { many }));
         }

@@ -196,7 +196,7 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px;
   background: var(--surface);
 }
 .detail-head { display: flex; align-items: center; gap: 8px; }
-.detail-head h3 { margin: 0; font-size: 14px; }
+.detail-head h3 { margin: 0; font-size: 14px; white-space: nowrap; }
 .detail-summary { min-width: 0; font-size: 12px; overflow-wrap: anywhere; }
 .detail-result { display: flex; flex-direction: column; gap: 10px; }
 
@@ -238,12 +238,20 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px;
 .status-dot.error { background: var(--red); }
 .status-dot.idle, .status-dot.running { background: var(--muted); }
 
-/* Repos pflegen: one block per repository, in the preview and in the result. */
-.plan { display: flex; flex-direction: column; gap: 12px; }
-.repo-block { display: flex; flex-direction: column; gap: 6px; }
-.repo-block + .repo-block { padding-top: 10px; border-top: 1px solid var(--border); }
-.repo-block-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-.repo-block .checks .label { white-space: normal; overflow-wrap: anywhere; }
+/* Repos pflegen: a bar to run the preview, then one collapsible block per repository. */
+.plan-bar { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 8px; border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); background: var(--accent-soft); }
+.run.repo > summary { flex-wrap: wrap; row-gap: 4px; }
+.items { display: flex; flex-direction: column; gap: 8px; }
+.item-group { margin-top: 4px; color: var(--muted); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+.item-group:first-child { margin-top: 0; }
+.item { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.item-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.item-line > * { flex: none; }
+.item-line > .spacer { flex: 1; }
+.item-line > .item-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item-reason { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.chip-ref { max-width: 100%; padding: 1px 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .check-line.top { align-items: flex-start; }
 .check-line.top input { margin-top: 2px; }
 
@@ -311,6 +319,7 @@ legend { font-weight: 600; padding: 0 4px; }
 .badge.green { color: var(--green); border-color: color-mix(in srgb, var(--green) 40%, transparent); }
 .badge.orange { color: var(--orange); border-color: color-mix(in srgb, var(--orange) 40%, transparent); }
 .badge.accent { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.badge.red { color: var(--red); border-color: color-mix(in srgb, var(--red) 40%, transparent); }
 .repo-picker { display: flex; flex-direction: column; gap: 6px; }
 .repo-picker .line { display: flex; gap: 6px; }
 .repo-picker input[type=search] { flex: 1; }

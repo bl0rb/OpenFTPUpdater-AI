@@ -197,6 +197,158 @@ pub fn args(site: &Site, prompt: &str, model: Option<&str>, effort: Option<&str>
     args
 }
 
+// MARK: Pull request review for "Repos pflegen"
+
+/// Read-only: the product's clone, pull requests and releases through gh, the web.
+pub const REVIEW_ALLOWED: &[&str] = &[
+    "Skill",
+    "Read",
+    "Glob",
+    "Grep",
+    "TodoWrite",
+    "WebFetch",
+    "WebSearch",
+    "Bash(gh pr view *)",
+    "Bash(gh pr diff *)",
+    "Bash(gh pr checks *)",
+    "Bash(gh pr list *)",
+    "Bash(gh release view *)",
+    "Bash(gh release list *)",
+    "Bash(gh api repos/*/releases*)",
+    "Bash(gh api repos/*/git/ref/tags/*)",
+    "Bash(gh api repos/*/git/tags/*)",
+    "Bash(gh api repos/*/compare/*)",
+    "Bash(gh api repos/*/contents/*)",
+    "Bash(git log*)",
+    "Bash(git show*)",
+    "Bash(git diff*)",
+    "Bash(grep *)",
+    "Bash(ls *)",
+];
+
+/// Claude only judges; merging, closing and commenting is the app's job.
+pub const REVIEW_DISALLOWED: &[&str] = &[
+    "Edit",
+    "Write",
+    "NotebookEdit",
+    "Bash(gh pr merge*)",
+    "Bash(gh pr close*)",
+    "Bash(gh pr comment*)",
+    "Bash(gh pr review*)",
+    "Bash(gh pr edit*)",
+    "Bash(gh pr checkout*)",
+    "Bash(gh api * -X*)",
+    "Bash(gh api * --method*)",
+    "Bash(gh api * -f*)",
+    "Bash(gh api * -F*)",
+    "Bash(gh api * --field*)",
+    "Bash(gh api * --raw-field*)",
+    "Bash(gh api * --input*)",
+    "Bash(git push*)",
+    "Bash(git commit*)",
+    "Bash(git checkout*)",
+    "Bash(git reset*)",
+    "Bash(rm *)",
+];
+
+/// One entry per pull request; see `repocare::Review`.
+pub const REVIEW_SCHEMA: &str = r#"{"type":"object","properties":{"prs":{"type":"array","items":{"type":"object","properties":{"number":{"type":"integer"},"action":{"type":"string","enum":["merge","keep","close"]},"risk":{"type":"string","enum":["green","yellow","red"]},"bump":{"type":"string"},"reason":{"type":"string"}},"required":["number","action","risk","reason"]}}},"required":["prs"]}"#;
+
+/// The rules of the dependabot-pr skill, so the review does not depend on it being installed.
+const REVIEW_RULES: &str = "\
+So entscheidest du (action):
+- merge: nur wenn GitHub den PR als mergebar mit grünen Checks meldet und das Risiko grün ist, oder gelb und die \
+Release-Notes nichts enthalten, was diesen Code betrifft.
+- keep: alles Rote und alles Unklare. Lieber offen lassen, als die Software zu brechen.
+- close: nur wenn der PR überflüssig ist: von einem anderen offenen PR überholt (gleiche Abhängigkeit, höhere \
+Version), schon im Zielbranch enthalten oder gegenstandslos. Deine Begründung wird als Kommentar gepostet.
+PRs, die GitHub nicht als mergebar meldet, kommen für merge nicht in Frage; prüfe bei ihnen nur, ob sie \
+überflüssig sind, sonst keep. Wäre ein solcher Dependabot-PR nach einem Rebase mergbar, sag merge: die App \
+stößt dann `@dependabot rebase` an.
+
+Risiko (risk):
+- green: Patch-Updates von Laufzeit-Abhängigkeiten; Patch/Minor von Entwicklungs-Abhängigkeiten (Tests, Typen, \
+Linting, Tooling); GitHub Actions Patch/Minor mit geprüftem SHA-Pin; Docker-Basis-Patch.
+- yellow: Minor-Updates von Laufzeit-Abhängigkeiten; Actions-Majors (meist nur Runner- oder Node-Anforderungen); \
+Docker-Basis-Minor; Go-Stable. Release-Notes aus dem offiziellen Repository lesen (gh release view <tag> \
+--repo <owner>/<repo>), nicht dem PR-Text vertrauen.
+- red: Majors von Laufzeit-Abhängigkeiten, eslint-Majors, Docker-Basis-Majors (Node nur auf LTS-Majors) und \
+alles, was eine der Prüfungen unten anschlägt. Unter 1.0 zählt die erste Stelle ungleich null: 0.10 → 0.11 ist \
+ein Major, 0.3.1 → 0.3.2 ein Patch.
+
+Prüfe außerdem:
+- Dependabot-PRs dürfen nur Manifest-, Lock-, Workflow- und Dockerfiles ändern; sonst red.
+- Actions mit SHA-Pin: gehört der neue SHA wirklich zum genannten Tag (gh api \
+repos/<owner>/<action>/git/ref/tags/<tag>, bei type \"tag\" den Commit über git/tags/<sha>)? Sonst red, als \
+Supply-Chain-Signal in der Begründung nennen.
+- Zusammengehörige Abhängigkeiten nur gemeinsam mergen (react und @types/react, tailwindcss und \
+@tailwindcss/vite, eslint und seine Configs, @types/node passend zur Node-Version). Ist einer nicht mergebar, \
+beide keep.
+- Bei Majors die Breaking Changes gegen die tatsächliche Nutzung im Code prüfen (grep) und den Befund mit \
+Datei:Zeile in die Begründung schreiben; trotzdem keep.
+- Sicherheits-Advisories (GHSA) im PR-Text in der Begründung nennen.
+- PRs von Menschen oder anderen Bots (z. B. Copilot): den Diff vollständig lesen (gh pr diff). merge nur, wenn \
+die Änderung abgeschlossen, nachvollziehbar, von der CI abgedeckt und klein genug ist, um sie ganz zu prüfen; \
+risk dann höchstens yellow. Große, unfertige oder unklare Änderungen: keep.
+Wenn ein Skill dependabot-pr verfügbar ist, gelten zusätzlich seine Bewertungsregeln und Repo-Besonderheiten; \
+seine Schritte zum Mergen und Kommentieren führst du nicht aus.
+Befehle einzeln ausführen, ohne cd, && oder Schleifen; zusammengesetzte Befehle werden ohne Rückfrage abgelehnt \
+(Pipes zu jq oder head gehen).
+
+Gib für jeden PR der Liste genau einen Eintrag zurück: reason ist ein Satz auf Deutsch, bump zum Beispiel \
+„18.0.14 → 18.1.0“, wenn erkennbar.";
+
+/// Asks Claude to judge the open pull requests of one repository.
+pub fn review_prompt(plan: &crate::repocare::Plan) -> String {
+    let mut text = format!(
+        "Bewerte die offenen Pull Requests auf {} im Repository {}, bevor die App sie mergt. Du entscheidest nur; \
+         mergen, schließen und kommentieren übernimmt die App. Ändere keine Dateien.\n",
+        plan.default_branch, plan.repo
+    );
+    text.push_str(&match &plan.clone {
+        Some(dir) => format!("Das aktuelle Verzeichnis ist der lokale Klon ({dir}); prüfe dort, wie der Code die Abhängigkeiten nutzt.\n\n"),
+        None => format!("Es gibt keinen lokalen Klon; Code liest du bei Bedarf mit gh api repos/{}/contents/<pfad> oder gh pr diff.\n\n", plan.repo),
+    });
+    text.push_str(REVIEW_RULES);
+    text.push_str("\n\nOffene Pull Requests:\n");
+    for pr in &plan.prs {
+        let gate = if pr.ready { "mergebar, Checks grün".to_owned() } else { pr.gate.clone() };
+        let more = pr.files.len().saturating_sub(15);
+        let files = pr.files.iter().take(15).cloned().collect::<Vec<_>>().join(", ");
+        text.push_str(&format!(
+            "- #{} „{}“ von {}; {}; GitHub: {}; Dateien: {}{}\n",
+            pr.number,
+            pr.title,
+            pr.author,
+            pr.size,
+            gate,
+            files,
+            if more > 0 { format!(" … und {more} weitere") } else { String::new() }
+        ));
+    }
+    text
+}
+
+/// Read-only review run with the answer as JSON (`Outcome::structured`).
+pub fn review_args(prompt: &str, model: Option<&str>, effort: Option<&str>, max_budget_usd: Option<f64>) -> Vec<String> {
+    let mut args: Vec<String> =
+        vec!["-p".into(), prompt.into(), "--output-format".into(), "stream-json".into(), "--verbose".into(), "--json-schema".into(), REVIEW_SCHEMA.into()];
+    if let Some(model) = model.filter(|m| !m.is_empty()) {
+        args.extend(["--model".into(), model.to_owned()]);
+    }
+    if let Some(effort) = effort.filter(|e| !e.is_empty()) {
+        args.extend(["--effort".into(), effort.to_owned()]);
+    }
+    if let Some(budget) = max_budget_usd {
+        args.extend(["--max-budget-usd".into(), budget.to_string()]);
+    }
+    args.push("--allowedTools".into());
+    args.extend(REVIEW_ALLOWED.iter().map(|s| s.to_string()));
+    args.push("--disallowedTools".into());
+    args.extend(REVIEW_DISALLOWED.iter().map(|s| s.to_string()));
+    args
+}
+
 /// What one stream-json line means for the log.
 pub enum Event {
     Line(String),
@@ -214,6 +366,9 @@ pub struct Outcome {
     pub turns: Option<u64>,
     /// Tool calls the allowlist blocked, e.g. `Bash: npm install`.
     pub denials: Vec<String>,
+    /// The answer as JSON when the run had `--json-schema`.
+    #[serde(skip)]
+    pub structured: Option<Value>,
 }
 
 fn shorten(text: &str, max: usize) -> String {
@@ -294,6 +449,7 @@ pub fn parse(line: &str) -> Event {
                 .flatten()
                 .map(|d| describe_tool(d["tool_name"].as_str().unwrap_or("?"), &d["tool_input"]))
                 .collect(),
+            structured: json.get("structured_output").filter(|v| !v.is_null()).cloned(),
         }),
         _ => Event::Ignore,
     }

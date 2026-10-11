@@ -100,6 +100,8 @@ pub struct Model {
     pub claude_runs: Vec<ClaudeRun>,
     pub upload: Option<UploadResult>,
     pub verify: Option<Report>,
+    /// Preview of "Repos pflegen", waiting for the user to run or discard it.
+    pub repo_plans: Option<Vec<repocare::Plan>>,
     pub repo_reports: Vec<RepoReport>,
     /// Fingerprint the user has to confirm before the first SFTP connection.
     pub pending_host_key: Option<String>,
@@ -145,6 +147,7 @@ impl Model {
             claude_runs: Vec::new(),
             upload: None,
             verify: None,
+            repo_plans: None,
             repo_reports: Vec::new(),
             pending_host_key: None,
             available_update: None,
@@ -217,6 +220,7 @@ struct View {
     claude_runs: Vec<ClaudeRun>,
     upload: Option<UploadResult>,
     verify: Option<Report>,
+    repo_plans: Option<Vec<repocare::Plan>>,
     repo_reports: Vec<RepoReport>,
     last_upload: Option<LastUpload>,
     pending_host_key: Option<String>,
@@ -250,6 +254,7 @@ fn get_view(app: AppHandle) -> View {
         claude_runs: m.claude_runs.clone(),
         upload: m.upload.clone(),
         verify: m.verify.clone(),
+        repo_plans: m.repo_plans.clone(),
         repo_reports: m.repo_reports.clone(),
         last_upload: manifest::load_last(&m.config.sftp).map(|last| LastUpload {
             commit: last.commit.map(|c| c.chars().take(7).collect()),
@@ -548,7 +553,7 @@ fn run_step(app: AppHandle, step: Step, instructions: String) -> Result<(), Stri
 }
 
 /// The selected products with the absolute path of their local clone, if it exists.
-fn selected_products(app: &AppHandle) -> Result<Vec<(site::Product, Option<PathBuf>)>, String> {
+pub fn selected_products(app: &AppHandle) -> Result<Vec<(site::Product, Option<PathBuf>)>, String> {
     let (site, config) = with_model(app, |m| (m.site.clone(), m.config.clone()));
     let project = expand_home(&config.project_dir);
     Ok(site?
@@ -562,52 +567,32 @@ fn selected_products(app: &AppHandle) -> Result<Vec<(site::Product, Option<PathB
         .collect())
 }
 
-/// Preview for "Repos pflegen": looks at the selected products' repositories, changes nothing
-/// there (except `git fetch --prune` in the local clones).
+/// "Repos pflegen", first part: GitHub's state and Claude's review, as a preview to confirm.
 #[tauri::command]
-async fn plan_repos(app: AppHandle, merge: bool, cleanup: bool) -> Result<Vec<repocare::Plan>, String> {
+fn check_repos(app: AppHandle, merge: bool, cleanup: bool, model: String) -> Result<(), String> {
     if !merge && !cleanup {
         return Err("Mindestens eine Aktion wählen".into());
     }
     if github::token().is_none() {
         return Err("Für „Repos pflegen“ die GitHub-CLI anmelden: gh auth login".into());
     }
-    let products = selected_products(&app)?;
-    if products.is_empty() {
-        return Err("Keine Produkte ausgewählt".into());
-    }
-    // One thread per repository: each needs a dozen or more API calls.
-    Ok(blocking(move || {
-        std::thread::scope(|scope| {
-            let handles: Vec<_> = products
-                .iter()
-                .map(|(p, clone)| scope.spawn(move || repocare::plan(&p.name, &p.repo, &p.tag_prefix, clone.as_deref(), merge, cleanup)))
-                .collect();
-            handles.into_iter().map(|h| h.join().expect("plan thread panicked")).collect()
-        })
-    })
-    .await)
+    steps::start(&app, vec![Job::ReposCheck(steps::RepoOptions { merge, cleanup, model })])
 }
 
-/// Runs a confirmed preview. Only repositories of selected products; the clone path and tag prefix
-/// come from site.json again, not from the window.
+/// "Repos pflegen", second part: runs the confirmed preview.
 #[tauri::command]
-fn run_repos(app: AppHandle, plans: Vec<repocare::Plan>) -> Result<(), String> {
-    let products = selected_products(&app)?;
-    let mut checked = Vec::new();
-    for mut plan in plans {
-        let (product, clone) = products
-            .iter()
-            .find(|(p, _)| p.repo.eq_ignore_ascii_case(&plan.repo))
-            .ok_or_else(|| format!("{} ist kein ausgewähltes Produkt", plan.repo))?;
-        plan.tag_prefix = product.tag_prefix.clone();
-        plan.clone = clone.as_ref().map(|dir| dir.display().to_string());
-        if plan.clone.is_none() {
-            plan.local_branches.clear();
-        }
-        checked.push(plan);
-    }
-    steps::start(&app, vec![Job::Repos(checked)])
+fn run_repos(app: AppHandle) -> Result<(), String> {
+    let plans = with_model(&app, |m| m.repo_plans.clone()).ok_or("Keine Vorschau vorhanden; erst prüfen")?;
+    steps::start(&app, vec![Job::Repos(plans)])?;
+    with_model(&app, |m| m.repo_plans = None);
+    changed(&app);
+    Ok(())
+}
+
+#[tauri::command]
+fn discard_repo_plan(app: AppHandle) {
+    with_model(&app, |m| m.repo_plans = None);
+    changed(&app);
 }
 
 /// Precheck, then Update (only if something is outdated or there are instructions), Upload, Verify.
@@ -764,8 +749,9 @@ fn main() {
             run_step,
             run_all,
             run_add_product,
-            plan_repos,
+            check_repos,
             run_repos,
+            discard_repo_plan,
             set_task,
             set_products,
             check_for_updates,

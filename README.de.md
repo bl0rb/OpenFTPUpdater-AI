@@ -36,20 +36,38 @@ Auswahl merkt sich die App in ihren Einstellungen, nicht im Website-Repository.
 ## Repos pflegen
 
 **Repos pflegen …** in der Kopfleiste arbeitet in den Repositories der ausgewählten Produkte, über die
-angemeldete `gh`-CLI. Zuerst zeigt es pro Repository eine Vorschau und handelt erst nach
-**Ausführen**; jeder Punkt wird unmittelbar davor erneut geprüft, sodass nichts gemergt oder gelöscht
-wird, was sich seit der Vorschau geändert hat.
+angemeldete `gh`-CLI, in zwei Teilen:
 
-- **Offene PRs mergen und Patch-Tag setzen:** offene Pull Requests auf den Hauptbranch, die GitHub als
-  mergebar mit lauter grünen Checks meldet (ein PR ganz ohne Checks bleibt offen), als Merge-Commit, wenn
-  das Repository das erlaubt. Danach setzt die App die nächste Patch-Version des neuesten `x.y.z`-Tags
-  (mit dem `tagPrefix` des Produkts) auf den Hauptbranch, sofern er sich seit diesem Tag geändert hat. In
-  Repositories mit Release-Workflow startet der Tag ein Release.
-- **Gemergte Branches löschen:** Branches, deren Commits vollständig im Hauptbranch sind oder deren Pull
-  Request gemergt wurde (auch per Squash), auf GitHub und im lokalen Klon (nach `git fetch --prune`).
-  Hauptbranch, geschützte Branches, Branches offener Pull Requests und der ausgecheckte Branch bleiben.
+1. **Prüfen** liest den Stand jedes Repositorys auf GitHub; danach bewertet Claude Code jeden offenen
+   Pull Request, nur lesend (im lokalen Klon, wenn es einen gibt), nach den Regeln des Skills
+   `dependabot-pr`: Risikoklasse (grün, gelb, rot; unter 1.0 zählt ein Wechsel der ersten Stelle ungleich
+   null als Major), Release-Notes aus dem Original-Repository, bei Dependabot nur Manifest-, Lock- und
+   Workflow-Dateien, SHA-Pins von Actions, zusammengehörige Abhängigkeiten nur gemeinsam, Majors gegen die
+   tatsächliche Nutzung im Code. Was Claude sich ansieht, steht im Log.
+2. Die Vorschau unter „Ergebnis“ zeigt pro Repository, was passiert, gruppiert: wird gemergt, wird
+   geschlossen, Rebase, bleibt offen, jeweils mit Claudes Risiko und Begründung. **Ausführen** setzt sie
+   um, **Verwerfen** verwirft sie. Jeder Punkt wird unmittelbar davor erneut geprüft; was sich seit der
+   Vorschau geändert hat, bleibt unangetastet.
 
-Log und Ergebnis erscheinen unter „Repos pflegen“ im Bereich unter den Schritten.
+Was der Lauf tut:
+
+- **Mergen:** nur Pull Requests auf den Hauptbranch, die GitHub als mergebar mit lauter grünen Checks
+  meldet und die Claude grün einstuft, oder gelb ohne Relevantes in den Release-Notes. Rot wird nie
+  gemergt, ohne Urteil wird nichts gemergt. Als Merge-Commit, wenn das Repository das erlaubt.
+- **Schließen:** Pull Requests, die Claude für überflüssig hält (von einem neueren überholt, schon im
+  Hauptbranch), mit der Begründung als Kommentar.
+- **Rebase:** Dependabot-Pull-Requests mit Merge-Konflikt bekommen `@dependabot rebase`, auch wenn ein
+  Merge desselben Laufs den Konflikt verursacht hat; ein späterer Lauf kann sie mergen.
+- **Tag:** die nächste Patch-Version des neuesten `x.y.z`-Tags (mit dem `tagPrefix` des Produkts), erst
+  wenn die CI auf dem Hauptbranch nach den Merges grün ist (die App wartet bis zu 30 Minuten; rote CI
+  heißt kein Tag). In Repositories mit Release-Workflow startet der Tag ein Release.
+- **Gemergte Branches löschen** (optional): Branches, deren Commits vollständig im Hauptbranch sind oder
+  deren Pull Request gemergt wurde (auch per Squash), auf GitHub und im lokalen Klon (nach
+  `git fetch --prune`). Hauptbranch, geschützte Branches, Branches offener Pull Requests und der
+  ausgecheckte Branch bleiben.
+
+Die Prüfung kostet Claude-Nutzung, je nach Modell und Zahl der Pull Requests einige Cent bis etwa einen
+Dollar pro Repository.
 
 ## Repositories wählen
 

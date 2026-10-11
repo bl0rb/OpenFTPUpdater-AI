@@ -70,8 +70,10 @@ The same package can be distributed through Microsoft Intune as a "macOS app (PK
 As in ClaudeKeyZapper: at start, the app quietly looks up the latest release of this repository on
 GitHub once; **Nach Updates suchen** in the footer checks manually. If a newer version exists, a banner
 appears at the top. **Installieren** downloads the `.pkg` from `github.com`, checks it against the SHA-256
-digest GitHub publishes for the release asset (without one, the update is refused) and opens the macOS
-installer; restart the app afterwards. Betas (`X.Y.Z-beta.N`) are only offered through **Beta-Version
+digest GitHub publishes for the release asset and against the release's minisign signature
+(`<package>.minisig`, verified with the public key built into the app,
+[desktop/update-key.pub](desktop/update-key.pub)), and opens the macOS installer; without a digest or a
+valid signature the update is refused; restart the app afterwards. Betas (`X.Y.Z-beta.N`) are only offered through **Beta-Version
 suchen** or when a beta is installed. Development builds do not check.
 
 ## Requirements
@@ -115,7 +117,7 @@ Lives in the website repository and describes how to build and what to watch:
 | Field | Meaning |
 |---|---|
 | `url` | Public URL; the build output root is served there (used by Precheck and Verify) |
-| `build`, `output` | Build command (run with `/bin/sh -c` in the project) and its output folder |
+| `build`, `output` | Build command (run with `/bin/sh -c` in the project) and its output folder (a subfolder of the project: no absolute path, no `..`) |
 | `tasks` | Update tasks, offered as checkboxes in the app; each has `id`, `label`, `skill` (`.claude/skills/<name>/SKILL.md`), optional `description`, `default` (selected unless turned off, default `true`), `model` and `effort` |
 | `skill` | Single update skill for sites without `tasks` |
 | `addProductSkill` | Claude Code skill that adds a repository as a new product |
@@ -126,7 +128,7 @@ Lives in the website repository and describes how to build and what to watch:
 | `products[].localPath` | Local clone, relative to the project; Claude reads it through `git -C`, never edits it |
 | `claude.model`, `claude.effort` | Default model alias (`opus`, `sonnet`, `haiku`, `fable`) and effort (`low` … `max`) for every Claude run |
 | `claude.maxBudgetUsd` | Cost limit per Claude run (`--max-budget-usd`) |
-| `claude.allowedTools` | Added to the app's allowlist (see below) |
+| `claude.allowedTools` | Added to the app's allowlist (see below); CLI flags and an unrestricted `Bash` are rejected |
 
 The skill is the actual know-how: where the product texts live, how screenshots are made,
 which statements must never be made. Claude reads it on every update.
@@ -166,6 +168,10 @@ Always denied: `git push`, `git commit`, `git reset`, `git checkout`, `rm`. Comm
 and uploading are the app's job. Denied tool calls are listed after the run, so the allowlist can
 be extended deliberately.
 
+Claude gets no `GITHUB_TOKEN`. After every run the app reloads `site.json` and stops before build,
+commit and upload if `build`, `output` or `claude.allowedTools`/`disallowedTools` changed, so a run
+cannot widen its own rights; adding products is not affected.
+
 ## Upload
 
 - The password (or key passphrase) is stored in the system keychain, never in a file or repository.
@@ -198,8 +204,10 @@ and the package unsigned.
 - `.github/workflows/ci.yml`: every pull request and every push to `main` runs the core tests and the
   release build (`build.yml`, macOS 15, Apple silicon).
 - `.github/workflows/release.yml`: a tag `X.Y.Z` (or `X.Y.Z-beta.N` for a pre-release) runs the same
-  build with that version and publishes a GitHub release with the `.pkg` and its checksum. Publishing
-  only starts after tests and build are green.
+  build with that version, signs the `.pkg` with minisign and publishes a GitHub release with the
+  `.pkg`, its checksum and its `.minisig`. Publishing only starts after tests and build are green, and
+  needs the repository secret `MINISIGN_SECRET_KEY` (the secret key matching `desktop/update-key.pub`);
+  without it the workflow stops instead of publishing an unsigned installer.
 - All actions are pinned to commit SHAs (version as a comment); Dependabot proposes updates for actions,
   crates and the Tauri CLI every Monday.
 

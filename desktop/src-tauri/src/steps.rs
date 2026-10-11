@@ -13,8 +13,8 @@ use openreleasepilot_core::repocare::{self, Done};
 use openreleasepilot_core::{git, github, localrepo, manifest, secrets, verify};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
 const MAX_LOG_LINES: usize = 5000;
@@ -585,8 +585,34 @@ fn prepare_tree(ctx: &Ctx, project: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// Brings Claude Code up to date before it runs, at most every six hours: aliases like `opus` or
+/// `fable` point to the newest model only in a current CLI, and one that only ever runs headless
+/// (as here) does not update itself. A failed update only warns.
+fn update_claude(ctx: &Ctx, dir: &std::path::Path) -> Result<()> {
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if last.is_some_and(|at| at.elapsed() < Duration::from_secs(6 * 3600)) {
+        return Ok(());
+    }
+    ctx.cmd("$ claude update");
+    let mut output = String::new();
+    let result = shell::stream("claude", &["update".to_owned()], dir, &HashMap::new(), &ctx.runner, |line| {
+        output.push_str(line);
+        output.push('\n');
+    });
+    match result {
+        Err(e) if ctx.runner.is_cancelled() => return Err(e),
+        Err(e) => ctx.warn(format!("  {e:#}; es läuft die installierte Version")),
+        Ok(0) => ctx.info(format!("  {}", claude::update_note(&output))),
+        Ok(_) => ctx.warn(format!("  Nicht aktualisiert: {}; es läuft die installierte Version", claude::update_note(&output))),
+    }
+    *last = Some(Instant::now());
+    Ok(())
+}
+
 /// Runs Claude Code with the prompt and fails unless it finished successfully.
 fn run_claude(ctx: &Ctx, site: &Site, project: &std::path::Path, prompt: &str, label: &str, model: Option<&str>, effort: Option<&str>) -> Result<claude::Outcome> {
+    update_claude(ctx, project)?;
     ctx.cmd(format!(
         "$ claude -p … --model {} --effort {} (Prompt unten)",
         model.unwrap_or("Standard"),
@@ -904,6 +930,9 @@ fn repos_check(ctx: &Ctx, options: &RepoOptions) -> Result<(Status, String)> {
             .collect();
         handles.into_iter().map(|h| h.join().expect("scan thread panicked")).collect()
     });
+    if merge && plans.iter().any(|p| !p.prs.is_empty()) {
+        update_claude(ctx, &std::env::temp_dir())?;
+    }
     for plan in &mut plans {
         ctx.runner.check()?;
         ctx.cmd(format!("{} · {}", plan.name, plan.repo));

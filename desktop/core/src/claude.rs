@@ -455,9 +455,30 @@ pub fn parse(line: &str) -> Event {
     }
 }
 
+/// One line for the log from the output of `claude update`.
+pub fn update_note(output: &str) -> String {
+    let last = output.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or("ohne Ausgabe");
+    if let Some((from, to)) = last.strip_prefix("Successfully updated from ").and_then(|r| r.split_once(" to version ")) {
+        return format!("Claude Code aktualisiert: {from} → {to}");
+    }
+    if let Some(version) = last.strip_prefix("Claude Code is up to date (").and_then(|r| r.strip_suffix(')')) {
+        return format!("Claude Code ist aktuell ({version})");
+    }
+    last.to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summarises_claude_update() {
+        let updated = "Current version: 2.1.206\nChecking for updates to latest version...\nUpdating to 2.1.296...\nSuccessfully updated from 2.1.206 to version 2.1.296\n";
+        assert_eq!(update_note(updated), "Claude Code aktualisiert: 2.1.206 → 2.1.296");
+        let current = "Current version: 2.1.296\nChecking for updates to latest version...\nClaude Code is up to date (2.1.296)\n";
+        assert_eq!(update_note(current), "Claude Code ist aktuell (2.1.296)");
+        assert_eq!(update_note("Error: network\n\n"), "Error: network");
+    }
 
     #[test]
     fn parses_tool_use_and_result() {

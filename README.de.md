@@ -182,7 +182,9 @@ jeden Lauf fokussiert, und Regeln für alle (Quellen, Stil, was nie behauptet we
 die `CLAUDE.md` des Projekts, die Claude Code bei jedem Lauf liest. In der App hat jede Aufgabe ein
 Häkchen und eine Modellwahl; beides bleibt gespeichert.
 
-Das Modell ist ein Claude-Code-Alias, der immer auf das neueste Modell seiner Familie zeigt:
+Das Modell ist ein Claude-Code-Alias, der auf das neueste Modell seiner Familie zeigt, soweit das
+installierte Claude Code es kennt. Deshalb führt die App vor Claude-Läufen `claude update` aus
+(höchstens alle sechs Stunden); das Log zeigt die Version und am Anfang jedes Laufs das genaue Modell:
 
 | Alias | Modell (Okt. 2026) | API-Preis je 1 Mio. Token (Eingabe / Ausgabe) | Einsatz |
 |---|---|---|---|

@@ -181,7 +181,9 @@ that apply to all of them (sources, style, what must never be claimed) belong in
 `CLAUDE.md`, which Claude Code reads on every run. In the app, every task has a checkbox and a model
 choice; both are remembered.
 
-The model is a Claude Code alias that always points to the newest model of its family:
+The model is a Claude Code alias that points to the newest model of its family, as far as the
+installed Claude Code knows it. So the app runs `claude update` before Claude runs (at most every
+six hours); the log shows the version and, at the start of every run, the exact model:
 
 | Alias | Model (Oct 2026) | API price per 1M tokens (input / output) | Use |
 |---|---|---|---|

@@ -45,7 +45,7 @@ pub const DEFAULT_DISALLOWED: &[&str] = &[
     "Bash(git -C * reset*)",
     "Bash(git checkout*)",
     "Bash(git -C * checkout*)",
-    "Bash(rm -rf*)",
+    "Bash(rm *)",
 ];
 
 /// A product whose newest release is newer than the documented one.

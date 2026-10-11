@@ -77,7 +77,7 @@ suchen** or when a beta is installed. Development builds do not check.
 ## Requirements
 
 - macOS (developed on macOS 27; the code is cross-platform Tauri, Windows is untested)
-- On the machine: `git`, Node.js/npm (for the site build), [Claude Code](https://claude.com/claude-code) signed in, recommended the GitHub CLI `gh` signed in (raises the GitHub API limit from 60 to 5000 requests per hour; the token is also handed to the build as `GITHUB_TOKEN`)
+- On the machine: `git`, Node.js/npm (for the site build), [Claude Code](https://claude.com/claude-code) signed in, recommended the GitHub CLI `gh` signed in (raises the GitHub API limit from 60 to 5000 requests per hour; the token is also handed to the build the app runs as `GITHUB_TOKEN`, but never to Claude Code)
 - An SFTP account for the web space
 
 The app starts from the Finder and asks the login shell for the user's `PATH` once, so tools
@@ -162,7 +162,7 @@ runs cannot ask, so everything not on the allowlist is denied:
 - `gh release list|view`, `grep`, `ls`, the project's build command
 - whatever `claude.allowedTools` in site.json adds
 
-Always denied: `git push`, `git commit`, `git reset`, `git checkout`, `rm -rf`. Committing, pushing
+Always denied: `git push`, `git commit`, `git reset`, `git checkout`, `rm`. Committing, pushing
 and uploading are the app's job. Denied tool calls are listed after the run, so the allowlist can
 be extended deliberately.
 

@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 /// Token of the GitHub CLI (`gh auth token`), if it is installed and signed in. Raises the API
-/// limit from 60 to 5000 requests per hour; also handed to the build as `GITHUB_TOKEN`.
+/// limit from 60 to 5000 requests per hour; also handed to the app's own build as `GITHUB_TOKEN`, never to Claude.
 pub fn token() -> Option<&'static str> {
     static TOKEN: OnceLock<Option<String>> = OnceLock::new();
     TOKEN

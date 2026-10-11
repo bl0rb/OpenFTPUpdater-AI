@@ -17,7 +17,7 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 pub const SITE_FILE: &str = ".openftpupdater/site.json";
 
@@ -128,6 +128,34 @@ impl Site {
     pub fn output_dir(&self, project: &Path) -> PathBuf {
         project.join(&self.output)
     }
+
+    /// Whether the fields that decide what runs and what gets uploaded are unchanged. Claude may
+    /// edit site.json (new products), but must not widen its own rights or the upload this way.
+    pub fn same_permissions(&self, other: &Site) -> bool {
+        self.build == other.build
+            && self.output == other.output
+            && self.claude.allowed_tools == other.claude.allowed_tools
+            && self.claude.disallowed_tools == other.claude.disallowed_tools
+    }
+}
+
+/// A plain subfolder of the project: no absolute path, no `..`, not the project root itself.
+fn is_inside_project(output: &str) -> bool {
+    let mut normal = false;
+    for component in Path::new(output.trim()).components() {
+        match component {
+            Component::Normal(_) => normal = true,
+            Component::CurDir => {}
+            _ => return false,
+        }
+    }
+    normal
+}
+
+/// Allowlist entries are tool rules like `Bash(node scripts/*)`, never CLI flags or an unrestricted shell.
+fn is_tool_rule(rule: &str) -> bool {
+    let rule = rule.trim();
+    !rule.is_empty() && !rule.starts_with('-') && !matches!(rule, "Bash" | "Bash(*)" | "Bash(:*)")
 }
 
 pub fn load(project: &Path) -> Result<Site> {
@@ -140,5 +168,36 @@ pub fn load(project: &Path) -> Result<Site> {
     if !site.url.starts_with("https://") && !site.url.starts_with("http://") {
         bail!("{}: \"url\" muss mit http(s):// beginnen", SITE_FILE);
     }
+    if !is_inside_project(&site.output) {
+        bail!("{}: \"output\" muss ein Unterordner des Projekts sein (kein absoluter Pfad, kein ..)", SITE_FILE);
+    }
+    if let Some(rule) = site.claude.allowed_tools.iter().find(|rule| !is_tool_rule(rule)) {
+        bail!("{}: \"claude.allowedTools\" enthält den unzulässigen Eintrag {rule:?}", SITE_FILE);
+    }
     Ok(site)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_must_stay_inside_the_project() {
+        assert!(is_inside_project("dist"));
+        assert!(is_inside_project("./build/public"));
+        assert!(!is_inside_project("."));
+        assert!(!is_inside_project("../.."));
+        assert!(!is_inside_project("dist/../.."));
+        assert!(!is_inside_project("/Users/me"));
+    }
+
+    #[test]
+    fn allowlist_rejects_flags_and_unrestricted_bash() {
+        assert!(is_tool_rule("Bash(node scripts/screenshots/*)"));
+        assert!(is_tool_rule("WebFetch"));
+        assert!(!is_tool_rule("--dangerously-skip-permissions"));
+        assert!(!is_tool_rule("Bash"));
+        assert!(!is_tool_rule(" Bash(*) "));
+        assert!(!is_tool_rule(""));
+    }
 }

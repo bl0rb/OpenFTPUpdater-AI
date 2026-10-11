@@ -5,16 +5,16 @@ mod steps;
 
 use steps::{Job, NewProductInput};
 
-use openftpupdater_core::claude::{Outcome, Outdated};
-use openftpupdater_core::config::{self, AuthKind, Config};
-use openftpupdater_core::update::{self, ReleaseInfo};
-use openftpupdater_core::{github, localrepo, manifest};
-use openftpupdater_core::paths::{abbreviate_home, expand_home};
-use openftpupdater_core::secrets;
-use openftpupdater_core::sftp::{self, ConnectError};
-use openftpupdater_core::shell::Runner;
-use openftpupdater_core::site::{self, Site};
-use openftpupdater_core::verify::Report;
+use openreleasepilot_core::claude::{Outcome, Outdated};
+use openreleasepilot_core::config::{self, AuthKind, Config};
+use openreleasepilot_core::update::{self, ReleaseInfo};
+use openreleasepilot_core::{github, localrepo, manifest};
+use openreleasepilot_core::paths::{self, abbreviate_home, expand_home};
+use openreleasepilot_core::secrets;
+use openreleasepilot_core::sftp::{self, ConnectError};
+use openreleasepilot_core::shell::Runner;
+use openreleasepilot_core::site::{self, Site};
+use openreleasepilot_core::verify::Report;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -190,6 +190,8 @@ struct View {
     /// `owner/name` of the website repository (origin of the project folder).
     site_repo: Option<String>,
     site: Option<Site>,
+    /// Project file in use: `.openreleasepilot/site.json`, or the old path while only that exists.
+    site_file: &'static str,
     site_error: Option<String>,
     sftp_ready: bool,
     steps: BTreeMap<Step, StepState>,
@@ -221,6 +223,7 @@ fn get_view(app: AppHandle) -> View {
         workspace_display: abbreviate_home(&m.config.workspace()),
         site_repo: if m.config.project_dir.is_empty() { None } else { localrepo::origin_repo(&expand_home(&m.config.project_dir)) },
         site: m.site.as_ref().ok().cloned(),
+        site_file: if m.config.project_dir.is_empty() { site::SITE_FILE } else { site::file_name(&expand_home(&m.config.project_dir)) },
         site_error: m.site.as_ref().err().cloned(),
         sftp_ready: m.config.sftp.is_complete(),
         steps: m.steps.clone(),
@@ -447,7 +450,7 @@ fn check_updates(app: &AppHandle, beta: bool, user_initiated: bool) {
             Ok(_) => {
                 m.available_update = None;
                 if user_initiated {
-                    m.notice = Some(format!("OpenFTPUpdater-AI {version} ist aktuell."));
+                    m.notice = Some(format!("OpenReleasePilot {version} ist aktuell."));
                 }
             }
             Err(e) if user_initiated => m.error = Some(format!("Update-Prüfung fehlgeschlagen: {e:#}")),
@@ -485,7 +488,7 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
                 Ok(()) => {
                     m.available_update = None;
                     m.notice = Some(format!(
-                        "Installer für OpenFTPUpdater-AI {} geöffnet. Nach der Installation die App neu starten.",
+                        "Installer für OpenReleasePilot {} geöffnet. Nach der Installation die App neu starten.",
                         release.version
                     ));
                 }
@@ -653,6 +656,7 @@ fn cancel(app: AppHandle) {
 }
 
 fn main() {
+    paths::migrate_legacy_data();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -691,5 +695,5 @@ fn main() {
             cancel
         ])
         .run(tauri::generate_context!())
-        .expect("error while running OpenFTPUpdater-AI");
+        .expect("error while running OpenReleasePilot");
 }

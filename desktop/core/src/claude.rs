@@ -131,11 +131,12 @@ pub struct NewProduct {
     pub private: bool,
 }
 
-pub fn add_product_prompt(site: &Site, product: &NewProduct, instructions: &str) -> String {
+/// `site_file`: the project file as `site::file_name` finds it.
+pub fn add_product_prompt(site: &Site, site_file: &str, product: &NewProduct, instructions: &str) -> String {
     let mut text = match &site.add_product_skill {
         Some(skill) => format!("Nutze den Skill {skill}, um ein neues Produkt auf der Website {} aufzunehmen.\n\n", site.name),
         None => format!(
-            "Nimm ein neues Produkt auf der Website {} auf: Produktseite, alle Produktlisten und einen Eintrag in .openftpupdater/site.json.\n\n",
+            "Nimm ein neues Produkt auf der Website {} auf: Produktseite, alle Produktlisten und einen Eintrag in {site_file}.\n\n",
             site.name
         ),
     };

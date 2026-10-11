@@ -77,7 +77,7 @@ pub struct TaskChoice {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Config {
-    /// Local clone of the website repository (contains `.openftpupdater/site.json`).
+    /// Local clone of the website repository (contains `.openreleasepilot/site.json`).
     pub project_dir: String,
     /// Folder that holds the local clones (website and products); empty = the project's parent.
     pub workspace_dir: String,

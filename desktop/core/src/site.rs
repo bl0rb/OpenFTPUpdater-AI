@@ -1,4 +1,4 @@
-//! The project file `.openftpupdater/site.json`, committed in the website repository.
+//! The project file `.openreleasepilot/site.json`, committed in the website repository.
 //!
 //! ```json
 //! {
@@ -19,7 +19,18 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-pub const SITE_FILE: &str = ".openftpupdater/site.json";
+pub const SITE_FILE: &str = ".openreleasepilot/site.json";
+/// Where the app looked before it was renamed from OpenFTPUpdater-AI; still read when the new file is missing.
+pub const LEGACY_SITE_FILE: &str = ".openftpupdater/site.json";
+
+/// The project file this project uses: the new one, or the old one while only that exists.
+pub fn file_name(project: &Path) -> &'static str {
+    if !project.join(SITE_FILE).is_file() && project.join(LEGACY_SITE_FILE).is_file() {
+        LEGACY_SITE_FILE
+    } else {
+        SITE_FILE
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -159,20 +170,20 @@ fn is_tool_rule(rule: &str) -> bool {
 }
 
 pub fn load(project: &Path) -> Result<Site> {
-    let file = project.join(SITE_FILE);
-    let text = fs::read_to_string(&file).with_context(|| format!("{} nicht gefunden", SITE_FILE))?;
-    let site: Site = serde_json::from_str(&text).with_context(|| format!("{} ist ungültig", SITE_FILE))?;
+    let name = file_name(project);
+    let text = fs::read_to_string(project.join(name)).with_context(|| format!("{name} nicht gefunden"))?;
+    let site: Site = serde_json::from_str(&text).with_context(|| format!("{name} ist ungültig"))?;
     if site.build.trim().is_empty() || site.output.trim().is_empty() {
-        bail!("{}: \"build\" und \"output\" müssen gesetzt sein", SITE_FILE);
+        bail!("{name}: \"build\" und \"output\" müssen gesetzt sein");
     }
     if !site.url.starts_with("https://") && !site.url.starts_with("http://") {
-        bail!("{}: \"url\" muss mit http(s):// beginnen", SITE_FILE);
+        bail!("{name}: \"url\" muss mit http(s):// beginnen");
     }
     if !is_inside_project(&site.output) {
-        bail!("{}: \"output\" muss ein Unterordner des Projekts sein (kein absoluter Pfad, kein ..)", SITE_FILE);
+        bail!("{name}: \"output\" muss ein Unterordner des Projekts sein (kein absoluter Pfad, kein ..)");
     }
     if let Some(rule) = site.claude.allowed_tools.iter().find(|rule| !is_tool_rule(rule)) {
-        bail!("{}: \"claude.allowedTools\" enthält den unzulässigen Eintrag {rule:?}", SITE_FILE);
+        bail!("{name}: \"claude.allowedTools\" enthält den unzulässigen Eintrag {rule:?}");
     }
     Ok(site)
 }
@@ -180,6 +191,20 @@ pub fn load(project: &Path) -> Result<Site> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_the_old_project_file_until_the_new_one_exists() {
+        let project = std::env::temp_dir().join(format!("openreleasepilot-site-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&project);
+        assert_eq!(file_name(&project), SITE_FILE);
+        for name in [LEGACY_SITE_FILE, SITE_FILE] {
+            let file = project.join(name);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(&file, "{}").unwrap();
+            assert_eq!(file_name(&project), name);
+        }
+        fs::remove_dir_all(&project).unwrap();
+    }
 
     #[test]
     fn output_must_stay_inside_the_project() {

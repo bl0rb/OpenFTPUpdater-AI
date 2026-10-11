@@ -37,7 +37,7 @@ pub fn user_path() -> &'static str {
 fn login_shell_path() -> Option<String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
     let mut child = Command::new(shell)
-        .args(["-l", "-i", "-c", "printf '__OFTPU_PATH__%s__END__' \"$PATH\""])
+        .args(["-l", "-i", "-c", "printf '__ORP_PATH__%s__END__' \"$PATH\""])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -56,7 +56,7 @@ fn login_shell_path() -> Option<String> {
     }
     let mut out = String::new();
     child.stdout.take()?.read_to_string(&mut out).ok()?;
-    let start = out.find("__OFTPU_PATH__")? + "__OFTPU_PATH__".len();
+    let start = out.find("__ORP_PATH__")? + "__ORP_PATH__".len();
     let end = out[start..].find("__END__")? + start;
     Some(out[start..end].to_owned())
 }

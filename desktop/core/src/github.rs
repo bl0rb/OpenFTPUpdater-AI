@@ -21,7 +21,7 @@ pub(crate) fn get(path: &str) -> Result<Option<serde_json::Value>> {
     let mut request = agent
         .get(&format!("https://api.github.com/{path}"))
         .set("Accept", "application/vnd.github+json")
-        .set("User-Agent", "OpenFTPUpdater-AI");
+        .set("User-Agent", "OpenReleasePilot");
     if let Some(token) = token() {
         request = request.set("Authorization", &format!("Bearer {token}"));
     }

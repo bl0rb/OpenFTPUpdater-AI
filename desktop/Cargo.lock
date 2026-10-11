@@ -2427,11 +2427,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "openftpupdater-ai"
+name = "openreleasepilot"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "openftpupdater-core",
+ "openreleasepilot-core",
  "serde",
  "serde_json",
  "tauri",
@@ -2442,7 +2442,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "openftpupdater-core"
+name = "openreleasepilot-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",

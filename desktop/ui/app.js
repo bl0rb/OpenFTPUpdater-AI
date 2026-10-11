@@ -1,4 +1,4 @@
-// OpenFTPUpdater-AI UI: renders the view the Rust side sends and calls its commands. No framework, no build step.
+// OpenReleasePilot UI: renders the view the Rust side sends and calls its commands. No framework, no build step.
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
@@ -114,7 +114,7 @@ function renderToolbar() {
     h('div', { class: 'brand' },
       h('img', { src: 'icon.svg', alt: '' }),
       h('div', null,
-        h('h1', null, 'OpenFTPUpdater-AI'),
+        h('h1', null, 'OpenReleasePilot'),
         h('div', { class: 'project' }, view.site ? `${view.site.name} · ${view.projectDisplay}` : view.projectDisplay || 'Kein Projekt eingerichtet'))),
     h('span', { class: 'spacer' }),
     view.site && button(view.site.url.replace(/^https?:\/\//, ''), () => call('open_url', { url: view.site.url }), { iconName: 'external', cls: 'link', title: 'Live-Seite öffnen' }),
@@ -132,7 +132,7 @@ function updateBanner(u) {
   const installing = view.installingUpdate;
   return h('div', { class: 'banner update' },
     h('div', { class: 'text' },
-      h('strong', null, `${u.prerelease ? 'Beta: ' : ''}OpenFTPUpdater-AI ${u.version} ist verfügbar (installiert: ${view.version})`),
+      h('strong', null, `${u.prerelease ? 'Beta: ' : ''}OpenReleasePilot ${u.version} ist verfügbar (installiert: ${view.version})`),
       h('div', { class: 'muted small' }, installing ? 'Paket wird geladen und geprüft …'
         : u.prerelease ? 'Beta-Versionen sind zum Testen gedacht. Die Installation benötigt Administratorrechte.'
           : 'Die Installation benötigt Administratorrechte. Danach die App neu starten.')),
@@ -146,7 +146,7 @@ function renderFooter() {
   const checking = view.checkingUpdate;
   const check = (beta) => () => call('check_for_updates', { beta });
   document.getElementById('footer').replaceChildren(
-    h('span', null, view.devBuild ? 'OpenFTPUpdater-AI Entwicklungsversion' : `OpenFTPUpdater-AI ${view.version}`),
+    h('span', null, view.devBuild ? 'OpenReleasePilot Entwicklungsversion' : `OpenReleasePilot ${view.version}`),
     h('span', { class: 'spacer' }),
     ...(checking ? [h('span', null, 'Suche nach Updates …')] : [
       button('Nach Updates suchen', check(false), { cls: 'link' }),
@@ -172,7 +172,7 @@ function renderMain() {
     main.replaceChildren(h('div', { class: 'empty' },
       h('img', { src: 'icon.svg', alt: '' }),
       h('h2', null, 'Willkommen'),
-      h('p', { class: 'muted' }, 'Wähle den Projektordner deiner Website (mit .openftpupdater/site.json) und den SFTP-Zugang. Danach prüft, aktualisiert und veröffentlicht die App die Seite in vier Schritten.'),
+      h('p', { class: 'muted' }, 'Wähle den Projektordner deiner Website (mit .openreleasepilot/site.json) und den SFTP-Zugang. Danach prüft, aktualisiert und veröffentlicht die App die Seite in vier Schritten.'),
       button('Einrichten', settingsDialog, { cls: 'primary' })));
     return;
   }
@@ -431,7 +431,7 @@ function runItem(run, index, count) {
       c.denials.length > 0 && h('div', { class: 'denials' },
         h('div', null, h('strong', null, 'Nicht freigegeben: '),
           'Claude durfte diese Befehle nicht ausführen und hat ohne sie weitergearbeitet. Dauerhaft erlauben lässt sich ein Befehl über ',
-          h('code', null, 'claude.allowedTools'), ' in ', h('code', null, '.openftpupdater/site.json'), '.'),
+          h('code', null, 'claude.allowedTools'), ' in ', h('code', null, view.siteFile), '.'),
         h('ul', null, c.denials.map((d) => h('li', { class: 'mono selectable', title: d }, h('span', { class: 'clamp' }, d))))),
       c.text ? markdown(c.text) : h('div', { class: 'muted' }, 'Keine Antwort von Claude.')));
 }
@@ -632,9 +632,9 @@ function settingsDialog() {
           row('Projektordner', h('div', { class: 'line' }, text('projectDir', { placeholder: '~/Code/meine-website' }),
             button('Auswählen …', async () => { const p = await call('pick_folder'); if (p) { s.projectDir = p; render(); } })), 's-project'),
           h('div', { class: `note ${view.siteError && sameProject ? 'error-text' : ''}` },
-            view.site && sameProject ? `.openftpupdater/site.json gefunden: ${view.site.name}, Build „${view.site.build}“, Ausgabe ${view.site.output}`
+            view.site && sameProject ? `${view.siteFile} gefunden: ${view.site.name}, Build „${view.site.build}“, Ausgabe ${view.site.output}`
               : view.siteError && sameProject ? view.siteError
-                : 'Der Projektordner braucht eine Datei .openftpupdater/site.json (siehe README); geprüft wird beim Sichern.'),
+                : 'Der Projektordner braucht eine Datei .openreleasepilot/site.json (siehe README); geprüft wird beim Sichern.'),
           row('Repo-Ordner', h('div', { class: 'line' }, text('workspaceDir', { placeholder: `${view.workspaceDisplay} (automatisch)` }),
             button('Auswählen …', async () => { const p = await call('pick_folder'); if (p) { s.workspaceDir = p; repoCache = null; render(); } })), 's-workspace'),
           h('div', { class: 'note' }, 'Hier sucht die App die lokalen Klone von Website und Produkten und legt neue Klone an.')),

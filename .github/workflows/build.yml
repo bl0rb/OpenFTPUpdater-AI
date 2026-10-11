@@ -1,6 +1,6 @@
 name: Build
 
-# Tests the core and builds the installer dist/OpenFTPUpdater-AI-<version>.pkg (Apple silicon).
+# Tests the core and builds the installer dist/OpenReleasePilot-<version>.pkg (Apple silicon).
 # Used by ci.yml (pull requests, main) and release.yml (tags), so every pull request exercises the release build.
 on:
   workflow_call:
@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Test core
-        run: cargo test -p openftpupdater-core
+        run: cargo test -p openreleasepilot-core
 
       - name: Check UI script
         run: cp ui/app.js "$RUNNER_TEMP/app.mjs" && node --check "$RUNNER_TEMP/app.mjs"
@@ -39,6 +39,6 @@ jobs:
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: OpenFTPUpdater-AI-macOS
-          path: desktop/dist/OpenFTPUpdater-AI-*
+          name: OpenReleasePilot-macOS
+          path: desktop/dist/OpenReleasePilot-*
           if-no-files-found: error

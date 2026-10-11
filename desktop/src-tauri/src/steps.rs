@@ -3,13 +3,13 @@
 
 use crate::{changed, load_site, with_model, Check, ClaudeRun, LogLine, Status, Step, UploadResult};
 use anyhow::{anyhow, bail, Context, Result};
-use openftpupdater_core::claude::{self, Event, Outdated};
-use openftpupdater_core::config::{AuthKind, Config};
-use openftpupdater_core::paths::expand_home;
-use openftpupdater_core::sftp::{self, ConnectError, Connection};
-use openftpupdater_core::shell::{self, Runner};
-use openftpupdater_core::site::{Site, Task};
-use openftpupdater_core::{git, github, localrepo, manifest, secrets, verify};
+use openreleasepilot_core::claude::{self, Event, Outdated};
+use openreleasepilot_core::config::{AuthKind, Config};
+use openreleasepilot_core::paths::expand_home;
+use openreleasepilot_core::sftp::{self, ConnectError, Connection};
+use openreleasepilot_core::shell::{self, Runner};
+use openreleasepilot_core::site::{Site, Task};
+use openreleasepilot_core::{git, github, localrepo, manifest, secrets, verify};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -541,11 +541,11 @@ fn run_claude(ctx: &Ctx, site: &Site, project: &std::path::Path, prompt: &str, l
         Event::Done(done) => outcome = Some(done),
         Event::Ignore => {}
     })?;
-    if !openftpupdater_core::site::load(project).is_ok_and(|after| site.same_permissions(&after)) {
+    if !openreleasepilot_core::site::load(project).is_ok_and(|after| site.same_permissions(&after)) {
         bail!(
             "Claude hat build, output oder claude.allowedTools/disallowedTools in {} geändert oder die Datei unbrauchbar gemacht. \
              Bitte die Änderung prüfen; sie wird weder gebaut noch hochgeladen.",
-            openftpupdater_core::site::SITE_FILE
+            openreleasepilot_core::site::file_name(project)
         );
     }
     let outcome = outcome.ok_or_else(|| anyhow!("Claude Code hat ohne Ergebnis beendet (Exit-Code {code})"))?;
@@ -678,7 +678,7 @@ fn add_product(ctx: &Ctx, input: &NewProductInput) -> Result<(Status, String)> {
     };
     let model = Some(input.model.trim().to_owned()).filter(|m| !m.is_empty()).or_else(|| site.claude.model.clone());
     let effort = site.claude.effort.clone().unwrap_or_else(|| "high".into());
-    let prompt = claude::add_product_prompt(&site, &product, &input.instructions);
+    let prompt = claude::add_product_prompt(&site, openreleasepilot_core::site::file_name(&project), &product, &input.instructions);
     let outcome = run_claude(ctx, &site, &project, &prompt, "Neues Produkt", model.as_deref(), Some(&effort))?;
 
     if latest_tag.is_some() {

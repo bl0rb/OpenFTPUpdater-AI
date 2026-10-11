@@ -1,5 +1,5 @@
 //! Updates of the app itself, as in ClaudeKeyZapper: the newest GitHub release of
-//! `bl0rb/OpenFTPUpdater-AI`, its `.pkg` downloaded and verified against the SHA-256 digest GitHub
+//! `bl0rb/OpenReleasePilot`, its `.pkg` downloaded and verified against the SHA-256 digest GitHub
 //! publishes for the asset and against the release's minisign signature (`<package>.minisig`), then
 //! handed to the macOS installer. The signature is made in CI with a key whose public half is built
 //! into the app (`desktop/update-key.pub`): the hash alone only proves the download is what GitHub
@@ -14,7 +14,7 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::time::Duration;
 
-pub const REPOSITORY: &str = "bl0rb/OpenFTPUpdater-AI";
+pub const REPOSITORY: &str = "bl0rb/OpenReleasePilot";
 const PACKAGE_EXTENSION: &str = ".pkg";
 const SIGNATURE_EXTENSION: &str = ".minisig";
 /// minisign public key of the release pipeline (the file `minisign -G` writes).
@@ -142,10 +142,10 @@ pub fn download_package(release: &ReleaseInfo) -> Result<PathBuf> {
     if hex_sha256(&data) != *expected {
         bail!("Prüfsumme des heruntergeladenen Pakets stimmt nicht. Installation abgebrochen.");
     }
-    let name = url.rsplit('/').next().filter(|n| n.ends_with(PACKAGE_EXTENSION)).unwrap_or("OpenFTPUpdater-AI.pkg");
+    let name = url.rsplit('/').next().filter(|n| n.ends_with(PACKAGE_EXTENSION)).unwrap_or("OpenReleasePilot.pkg");
     let signature = download(signature_url, 16 * 1024).context("Signatur konnte nicht geladen werden")?;
     verify_signature(UPDATE_PUBLIC_KEY, &data, &String::from_utf8_lossy(&signature), name)?;
-    let dir = std::env::temp_dir().join("OpenFTPUpdater-AI-Update");
+    let dir = std::env::temp_dir().join("OpenReleasePilot-Update");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).context("Download-Ordner anlegen")?;
     let target = dir.join(name);
@@ -155,7 +155,7 @@ pub fn download_package(release: &ReleaseInfo) -> Result<PathBuf> {
 
 fn download(url: &str, limit: u64) -> Result<Vec<u8>> {
     let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(300)).build();
-    let response = agent.get(url).set("User-Agent", "OpenFTPUpdater-AI").call()?;
+    let response = agent.get(url).set("User-Agent", "OpenReleasePilot").call()?;
     let mut data = Vec::new();
     response.into_reader().take(limit).read_to_end(&mut data)?;
     Ok(data)
@@ -197,16 +197,16 @@ mod tests {
     fn picks_the_github_package_and_its_digest() {
         let release: serde_json::Value = serde_json::from_str(
             r#"{"tag_name":"0.1.2","html_url":"https://github.com/x/y/releases/0.1.2","assets":[
-              {"name":"OpenFTPUpdater-AI-0.1.2.pkg.sha256","browser_download_url":"https://github.com/x/y/a.pkg.sha256","digest":"sha256:000"},
+              {"name":"OpenReleasePilot-0.1.2.pkg.sha256","browser_download_url":"https://github.com/x/y/a.pkg.sha256","digest":"sha256:000"},
               {"name":"Evil.pkg","browser_download_url":"https://evil.example/Evil.pkg","digest":"sha256:111"},
-              {"name":"OpenFTPUpdater-AI-0.1.2.pkg","browser_download_url":"https://github.com/x/y/OpenFTPUpdater-AI-0.1.2.pkg","digest":"sha256:ABC"}]}"#,
+              {"name":"OpenReleasePilot-0.1.2.pkg","browser_download_url":"https://github.com/x/y/OpenReleasePilot-0.1.2.pkg","digest":"sha256:ABC"}]}"#,
         )
         .unwrap();
         let info = release_info(&release).unwrap();
         assert_eq!(info.version, "0.1.2");
         assert!(!info.prerelease);
         assert_eq!(info.package_sha256.as_deref(), Some("abc"));
-        assert_eq!(info.package_url.as_deref(), Some("https://github.com/x/y/OpenFTPUpdater-AI-0.1.2.pkg"));
+        assert_eq!(info.package_url.as_deref(), Some("https://github.com/x/y/OpenReleasePilot-0.1.2.pkg"));
         assert_eq!(info.signature_url, None);
     }
 
@@ -214,13 +214,13 @@ mod tests {
     fn finds_the_signature_of_the_package() {
         let release: serde_json::Value = serde_json::from_str(
             r#"{"tag_name":"0.1.2","html_url":"https://github.com/x/y/releases/0.1.2","assets":[
-              {"name":"OpenFTPUpdater-AI-0.1.2.pkg.minisig","browser_download_url":"https://evil.example/s.minisig"},
-              {"name":"OpenFTPUpdater-AI-0.1.2.pkg","browser_download_url":"https://github.com/x/y/OpenFTPUpdater-AI-0.1.2.pkg","digest":"sha256:ABC"},
-              {"name":"OpenFTPUpdater-AI-0.1.2.pkg.minisig","browser_download_url":"https://github.com/x/y/OpenFTPUpdater-AI-0.1.2.pkg.minisig"}]}"#,
+              {"name":"OpenReleasePilot-0.1.2.pkg.minisig","browser_download_url":"https://evil.example/s.minisig"},
+              {"name":"OpenReleasePilot-0.1.2.pkg","browser_download_url":"https://github.com/x/y/OpenReleasePilot-0.1.2.pkg","digest":"sha256:ABC"},
+              {"name":"OpenReleasePilot-0.1.2.pkg.minisig","browser_download_url":"https://github.com/x/y/OpenReleasePilot-0.1.2.pkg.minisig"}]}"#,
         )
         .unwrap();
         let info = release_info(&release).unwrap();
-        assert_eq!(info.signature_url.as_deref(), Some("https://github.com/x/y/OpenFTPUpdater-AI-0.1.2.pkg.minisig"));
+        assert_eq!(info.signature_url.as_deref(), Some("https://github.com/x/y/OpenReleasePilot-0.1.2.pkg.minisig"));
     }
 
     // Throwaway key pair made with `minisign -G -W` for this test only.
@@ -260,13 +260,13 @@ MkR1W0Q+Mzft01gu2TOgUqMhi1FdrIwvfKSSIT3gQLHb6wGk8nAx5iP5niU3lU5KfSusXk0F19uiczJf
         assert!(info.prerelease);
     }
 
-    /// `cargo test -p openftpupdater-core -- --ignored`: real release, real download, no install.
+    /// `cargo test -p openreleasepilot-core -- --ignored`: real release, real download, no install.
     #[test]
     #[ignore = "network"]
     fn downloads_and_verifies_the_published_package() {
         let release = latest_release(false).unwrap().expect("a published release");
         let path = download_package(&release).unwrap();
-        assert!(path.ends_with(format!("OpenFTPUpdater-AI-{}.pkg", release.version)));
+        assert!(path.ends_with(format!("OpenReleasePilot-{}.pkg", release.version)));
         assert!(path.metadata().unwrap().len() > 1_000_000);
     }
 }

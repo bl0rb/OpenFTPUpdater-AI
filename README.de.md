@@ -1,8 +1,8 @@
 [English](README.md) · **Deutsch**
 
-<img src="desktop/assets/icon.svg" width="96" alt="OpenFTPUpdater-AI-Icon">
+<img src="desktop/assets/icon.svg" width="96" alt="OpenReleasePilot-Icon">
 
-# OpenFTPUpdater-AI
+# OpenReleasePilot
 
 Desktop-App, die eine statische Website auf dem Stand der Releases hält, die sie beschreibt,
 und sie veröffentlicht: Claude Code aktualisiert die Inhalte, die App baut, committet, pusht und
@@ -17,9 +17,9 @@ Vier Schaltflächen, einzeln oder nacheinander:
 | **Upload** | Frischer Build, `git push`, dann nur neue oder geänderte Dateien per SFTP; aus dem Build entfernte Dateien werden auf dem Server gelöscht | Server, Remote-Repository |
 | **Verify** | Lädt jede Datei des letzten Uploads von der Live-Seite und vergleicht SHA-256 mit dem Build | nein |
 
-![Wann passiert was wo: Precheck, Update-Aufgaben in Claude Code mit ihren Skills, Build und Commit, Upload per SFTP, Verify gegen die Live-Seite](docs/diagrams/openftpupdater-flow.de.png)
+![Wann passiert was wo: Precheck, Update-Aufgaben in Claude Code mit ihren Skills, Build und Commit, Upload per SFTP, Verify gegen die Live-Seite](docs/diagrams/openreleasepilot-flow.de.png)
 
-<sub>Quelle der Grafik: [docs/diagrams/openftpupdater-flow.de.html](docs/diagrams/openftpupdater-flow.de.html) (auch als SVG).</sub>
+<sub>Quelle der Grafik: [docs/diagrams/openreleasepilot-flow.de.html](docs/diagrams/openreleasepilot-flow.de.html) (auch als SVG).</sub>
 
 **Neues Produkt** (Knopf in der Kopfleiste): eines deiner GitHub-Repositories wählen, Claude
 Code nimmt es mit dem `addProductSkill` des Projekts auf (Produktseite, Listen, Icon, Ablaufgrafik,
@@ -46,24 +46,27 @@ jedes: lokaler Klon gefunden, schon auf der Seite, Website-Repository. Ohne `gh`
 
 ## Installation
 
-`OpenFTPUpdater-AI-<version>.pkg` aus den
-[Releases](https://github.com/bl0rb/OpenFTPUpdater-AI/releases) laden (Apple Silicon) und mit der
+`OpenReleasePilot-<version>.pkg` aus den
+[Releases](https://github.com/bl0rb/OpenReleasePilot/releases) laden (Apple Silicon) und mit der
 `.sha256`-Datei daneben prüfen:
 
 ```bash
-shasum -a 256 -c OpenFTPUpdater-AI-*.pkg.sha256
+shasum -a 256 -c OpenReleasePilot-*.pkg.sha256
 ```
 
-Das Paket installiert `OpenFTPUpdater-AI.app` nach `/Applications` und ersetzt eine installierte Version.
+Das Paket installiert `OpenReleasePilot.app` nach `/Applications` und ersetzt eine installierte Version.
 Es ist nicht signiert, macOS blockiert es deshalb beim ersten Öffnen; einmal unter **Systemeinstellungen →
 Datenschutz & Sicherheit → Dennoch öffnen** erlauben oder im Terminal installieren:
 
 ```bash
-sudo installer -pkg OpenFTPUpdater-AI-0.1.3.pkg -target /
+sudo installer -pkg OpenReleasePilot-0.1.3.pkg -target /
 ```
 
 Dasselbe Paket lässt sich über Microsoft Intune als „macOS-App (PKG)“ verteilen; dann in der
 Einrichtung „Beim Start nach neuen Versionen suchen“ abschalten.
+
+Bis Version 0.1.3 hieß die App OpenFTPUpdater-AI. OpenReleasePilot ersetzt `OpenFTPUpdater-AI.app`
+nicht; die alte App nach dem Umstieg löschen (Einstellungen und Passwort werden übernommen, siehe unten).
 
 ## Updates der App
 
@@ -85,9 +88,11 @@ gültige Signatur wird abgelehnt; danach die App neu starten. Beta-Versionen (`X
 Die App startet aus dem Finder und fragt einmal die Login-Shell nach dem `PATH`, damit
 Werkzeuge aus nvm, Homebrew oder `~/.local/bin` gefunden werden.
 
-## Projektdatei `.openftpupdater/site.json`
+## Projektdatei `.openreleasepilot/site.json`
 
-Liegt im Website-Repository und beschreibt Build und beobachtete Produkte:
+Liegt im Website-Repository und beschreibt Build und beobachtete Produkte. Projekte, die vor der
+Umbenennung von OpenFTPUpdater-AI eingerichtet wurden, behalten ihre `.openftpupdater/site.json`; sie
+wird gelesen, solange die neue Datei fehlt.
 
 ```json
 {
@@ -186,7 +191,10 @@ betroffen.
   Domains, `.htaccess`, …) bleiben unberührt.
 - Hochgeladen wird nur ein committeter, sauberer Stand, und nur wenn er nicht hinter `origin` liegt.
 
-Die Einstellungen liegen in `~/Library/Application Support/OpenFTPUpdater-AI/config.json` (ohne Geheimnisse).
+Die Einstellungen liegen in `~/Library/Application Support/OpenReleasePilot/config.json` (ohne Geheimnisse).
+Beim ersten Start nach der Umbenennung übernimmt die App den Ordner `OpenFTPUpdater-AI` und das unter
+dem alten Namen gespeicherte SFTP-Passwort; macOS fragt dabei unter Umständen einmal, ob
+OpenReleasePilot diesen Schlüsselbundeintrag verwenden darf.
 
 ## Bauen
 
@@ -196,11 +204,11 @@ npm ci
 npm run build
 ```
 
-Die App liegt danach unter `desktop/target/release/bundle/macos/OpenFTPUpdater-AI.app`
+Die App liegt danach unter `desktop/target/release/bundle/macos/OpenReleasePilot.app`
 (ad-hoc signiert). Während der Entwicklung: `npm run dev`. Tests des Kerns:
-`cargo test -p openftpupdater-core`.
+`cargo test -p openreleasepilot-core`.
 
-`scripts/build-pkg.sh` baut den Installer wie die CI: `dist/OpenFTPUpdater-AI-<version>.pkg` mit
+`scripts/build-pkg.sh` baut den Installer wie die CI: `dist/OpenReleasePilot-<version>.pkg` mit
 `.sha256`-Datei (`VERSION=0.2.0 scripts/build-pkg.sh`). `SIGN_IDENTITY` (Developer ID Application) und
 `INSTALLER_IDENTITY` (Developer ID Installer) signieren App und Paket; ohne sie ist die App ad-hoc
 signiert und das Paket unsigniert.

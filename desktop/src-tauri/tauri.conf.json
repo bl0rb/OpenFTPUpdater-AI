@@ -1,9 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "OpenFTPUpdater-AI",
-  "mainBinaryName": "OpenFTPUpdater-AI",
+  "productName": "OpenReleasePilot",
+  "mainBinaryName": "OpenReleasePilot",
   "version": "0.1.3",
-  "identifier": "io.github.bl0rb.openftpupdater",
+  "identifier": "io.github.bl0rb.openreleasepilot",
   "build": {
     "frontendDist": "../ui"
   },
@@ -12,7 +12,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "OpenFTPUpdater-AI",
+        "title": "OpenReleasePilot",
         "width": 1080,
         "height": 800,
         "minWidth": 820,
@@ -29,7 +29,7 @@
       "app"
     ],
     "category": "DeveloperTool",
-    "copyright": "© 2026 bl0rb · MIT License · github.com/bl0rb/OpenFTPUpdater-AI",
+    "copyright": "© 2026 bl0rb · MIT License · github.com/bl0rb/OpenReleasePilot",
     "shortDescription": "Update a static website with Claude Code and publish it via SFTP",
     "icon": [
       "icons/32x32.png",

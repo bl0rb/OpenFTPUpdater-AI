@@ -1,7 +1,7 @@
-//! OpenFTPUpdater-AI core: everything the four steps need, without UI.
+//! OpenReleasePilot core: everything the four steps need, without UI.
 //!
 //! - `config`: the app's own settings (project folder, SFTP target), stored in the app data folder
-//! - `site`: the project's `.openftpupdater/site.json` (build, output, URL, watched products)
+//! - `site`: the project's `.openreleasepilot/site.json` (build, output, URL, watched products)
 //! - `shell`, `git`, `github`, `claude`: external tools
 //! - `sftp`, `manifest`, `verify`, `secrets`: upload, change tracking, live check, password storage
 //! - `update`: updates of the app itself from its GitHub releases

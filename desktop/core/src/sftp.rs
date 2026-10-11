@@ -139,7 +139,7 @@ impl Connection {
     pub fn upload(&self, local: &Path, relative: &str) -> anyhow::Result<()> {
         self.ensure_dirs(relative)?;
         let target = self.remote(relative);
-        let temp = format!("{target}.oftpu-upload");
+        let temp = format!("{target}.orp-upload");
         let data = fs::read(local)?;
         {
             let mut file = self

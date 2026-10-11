@@ -1,10 +1,21 @@
 use std::path::{Path, PathBuf};
 
-pub const APP_NAME: &str = "OpenFTPUpdater-AI";
+pub const APP_NAME: &str = "OpenReleasePilot";
+/// Name before the rename; its data folder and keychain entries are taken over.
+pub const LEGACY_APP_NAME: &str = "OpenFTPUpdater-AI";
 
-/// `~/Library/Application Support/OpenFTPUpdater-AI` on macOS, `%APPDATA%\OpenFTPUpdater-AI` on Windows.
+/// `~/Library/Application Support/OpenReleasePilot` on macOS, `%APPDATA%\OpenReleasePilot` on Windows.
 pub fn data_dir() -> PathBuf {
     dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join(APP_NAME)
+}
+
+/// Takes over the data folder of the app under its old name (settings, upload manifests), once.
+pub fn migrate_legacy_data() {
+    let Some(base) = dirs::data_dir() else { return };
+    let (old, new) = (base.join(LEGACY_APP_NAME), base.join(APP_NAME));
+    if old.is_dir() && !new.exists() {
+        let _ = std::fs::rename(old, new);
+    }
 }
 
 pub fn config_file() -> PathBuf {

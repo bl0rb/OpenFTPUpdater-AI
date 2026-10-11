@@ -57,7 +57,7 @@ pub fn compare(base: &str, manifest: &Manifest, on_progress: impl Fn(usize, usiz
         .collect();
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(30))
-        .user_agent("OpenFTPUpdater-AI verify")
+        .user_agent("OpenReleasePilot verify")
         .build();
     let next = AtomicUsize::new(0);
     let done = AtomicUsize::new(0);

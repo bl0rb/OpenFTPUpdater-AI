@@ -4,15 +4,209 @@
 
 # OpenReleasePilot
 
-Desktop-App, die eine statische Website auf dem Stand der Releases hält, die sie beschreibt,
-und sie veröffentlicht: Claude Code aktualisiert die Inhalte, die App baut, committet, pusht und
-lädt das Ergebnis per SFTP hoch und prüft danach die Live-Seite Byte für Byte. Ein zweiter
-Bereich, **Repositories**, zeigt den Zustand der Produkt-Repositories und pflegt sie: geprüfte Pull
-Requests mergen, die nächste Patch-Version taggen, gemergte Branches löschen.
+Desktop-App, die sich um die GitHub-Repositories kümmert, die du auswählst: Claude Code erledigt die
+Arbeit, du triffst die Entscheidungen. Sie liest den Zustand, prüft und mergt Pull Requests, räumt
+gemergte Branches auf, taggt Patch-Releases und wartet auf das veröffentlichte Release, hält eine README,
+weitere Dokumentation oder ein GitHub-Wiki aktuell und aktualisiert und veröffentlicht, wenn vorhanden,
+als letzten Schritt eine statische Website. Alles, was auf GitHub, in einem Wiki oder auf einer Website
+etwas ändert, zeigt die App vorher als konkreten Vorschlag und führt es erst nach deiner Freigabe aus.
 
-Die App hat zwei Hauptbereiche, umschaltbar in der Kopfleiste: **Übersicht** (die Website) und
-**Repositories**; die Einstellungen bleiben unter **Einrichtung**. Die Übersicht hat vier Schaltflächen,
-einzeln oder nacheinander:
+Die App hat drei Bereiche, umschaltbar in der Kopfleiste, und ihre Einstellungen unter **Einrichtung**:
+
+| Bereich | Wofür |
+|---|---|
+| **Repositories** (Startansicht) | die verwalteten Repositories mit ihrem Zustand, offene Aufträge und die Entscheidungen, auf die sie warten; Repositories auswählen und einen Pflegeauftrag starten |
+| **Läufe** | jeder Pflegeauftrag: Schritte, Pläne, Vorschläge mit Diff, Ergebnisse und Log; laufende, wartende und bisherige |
+| **Website** (nur mit Website) | die vier Schritte der Website, Precheck, Update, Upload, Verify, wie bisher |
+
+## Erste Schritte
+
+Eine frische Installation beginnt mit **Repositories auswählen**: Repositories aus deiner GitHub-Liste
+wählen (oder `owner/name` eingeben). Mehr ist nicht nötig: keine Website, kein SFTP-Zugang, kein
+Release. Ein lesender Statuscheck geht ohne Claude; ein Pflegeauftrag braucht Claude Code und die
+angemeldete GitHub-CLI, ein README-Auftrag darüber hinaus nur Git-Zugriff auf das Repository.
+
+Eine Installation mit Website (`.openreleasepilot/site.json`) bietet **Aus Website übernehmen** an: die
+Produkt-Repositories aus `site.json`, jedes einmal, mit lokaler Kopie, wo sie eindeutig ist, und auf
+Wunsch mit einer Release-Regel mit dem Tag-Präfix der Produkte. Widersprüchliche Tag-Präfixe oder
+Klon-Pfade zeigt die App an und übernimmt sie nicht; schon verwaltete Repositories bleiben, wie sie sind;
+`site.json` bleibt unverändert. Wiederholen fügt nichts doppelt hinzu.
+
+## Verwaltete Repositories
+
+Die App führt eine eigene Liste von Repositories (Identität: `owner/name` ohne Rücksicht auf Groß- und
+Kleinschreibung, dazu die GitHub-ID). Jedes lässt sich deaktivieren (bleibt lesbar, kein Auftrag nimmt
+es) oder aus der Liste nehmen; dabei wird nichts gelöscht, weder auf GitHub noch die lokale Kopie noch
+eine Website-Konfiguration. Im Abschnitt **Verwaltung** des Repositorys:
+
+- **Lokale Kopie** (optional): nur fürs Aufräumen lokaler Branches und für Claudes Blick in den Code bei
+  der PR-Prüfung. Status und PR-Pflege gehen auch ohne.
+- **Release-Regel**: ob die App die nächste Patch-Version taggen darf, mit welchem Tag-Präfix (`v` für
+  `v1.2.3`, leer für `1.2.3`), und ob ein Workflow des Repositorys zu jedem Tag ein GitHub-Release
+  veröffentlicht. Ohne Regel taggt die App nie; sie errät keine Versionierung.
+
+Welche Website-Produkte ein Repository nennen, zeigt die App an (und wo `site.json` der Release-Regel
+widerspricht, auch das), aber die Produktauswahl der Website entscheidet nicht, was die App verwaltet.
+
+## Zustand der Repositories
+
+**Status aktualisieren** liest nur bei GitHub: kein Claude, keine Kosten, kein Schreiben, kein
+`git fetch`. Gelesen wird beim ersten Öffnen des Bereichs und auf Anforderung, nie im Hintergrund; schlägt
+das Lesen fehl, bleibt der ältere Stand sichtbar, aber als alt markiert, und Daten älter als fünf Minuten
+gelten als veraltet. Ohne `gh`-Anmeldung lassen sich öffentliche Repositories trotzdem lesen (GitHub
+erlaubt dann 60 Anfragen pro Stunde; ein Repository braucht etwa acht).
+
+| Zustand | Wann |
+|---|---|
+| **Blockiert** | die CI des Default-Branches ist fehlgeschlagen, oder das Repository ist nicht lesbar (GitHub antwortet mit 404 oder verweigert den Zugriff; 404 kann auch „privat ohne Zugriff“ heißen) |
+| **Aufmerksamkeit nötig** | offene Dependabot-Pull-Requests, Commits seit dem letzten Release oder Tag, ein Website-Produkt dokumentiert eine ältere Version als das neueste Release, oder (sobald die Detailansicht sie gelesen hat) Pull Requests mit Konflikt oder roter CI |
+| **Unbekannt** | nichts davon, aber nötige Angaben fehlen, sind unvollständig oder alt: CI läuft noch, keine Checks gefunden, unklares Ergebnis, Abfrage fehlgeschlagen |
+| **In Ordnung** | alles Nötige wurde erfolgreich und vor Kurzem gelesen, und es gibt nichts zu tun |
+
+Fehlende Release-Angaben allein verhindern „In Ordnung“ nicht; fehlende oder unvollständige Angaben
+ergeben es nie. Ein offener Pull Request von einem Menschen ist für sich kein Befund, und ein roter Pull
+Request blockiert das Repository nicht. Archivierte Repositories und solche ohne Schreibzugriff bleiben
+lesbar, aber die Pflege ist gesperrt. Zustand eines Repositorys und Fortschritt eines Auftrags stehen
+getrennt: Ein Repository kann Aufmerksamkeit brauchen, während ein Auftrag schon daran arbeitet.
+
+Die Detailansicht zeigt Default-Branch und HEAD-Commit, die CI mit ihrem Commit, Release und Tag, die
+Commits seit dieser Basis (nur wenn sie ein Vorfahr von HEAD ist, sonst „nicht bestimmbar“),
+Release-Regel, lokale Kopie, jeden offenen Pull Request mit Zielbranch, Autor, CI und Mergebarkeit, die
+zugeordneten Inhaltsziele mit ihrem zuletzt erreichten Stand und die Verwaltung.
+
+## Pflegeaufträge
+
+Repositories auf ihren Karten auswählen (oder eines öffnen) und **Pflegen …** wählen. Ein Auftrag
+besteht aus den Tätigkeiten, die du wählst, jede optional:
+
+- **Pull Requests**: Claude bewertet jeden offenen PR auf den Default-Branch, die App mergt, schließt
+  oder bittet Dependabot um einen Rebase (Regeln unten).
+- **Aufräumen**: gemergte Branches auf GitHub und in der lokalen Kopie löschen.
+- **Release**: die nächste Patch-Version taggen, wo eine Release-Regel besteht, sobald die CI genau
+  dieses Commits grün ist, und, wenn die Regel es sagt, auf das veröffentlichte GitHub-Release warten.
+  PR-Pflege bedeutet nicht mehr automatisch einen Tag.
+- **Inhaltsziele**, die die gewählten Repositories speisen: README/Dokumentation oder Wiki, jeweils mit
+  der für diesen Auftrag gewählten Basis (neuestes Release oder aktueller Stand des Default-Branches).
+- **Website** (wenn die gewählten Repositories sie speisen): aktualisieren, veröffentlichen und prüfen
+  als letzter Schritt.
+
+Die App macht daraus Schritte und führt sie so weit aus, wie es ohne dich geht: lesen, Claudes
+Bewertung, Inhalte in ihrem eigenen Arbeitsordner vorbereiten. Bevor sich außerhalb etwas ändert, hält
+sie mit einem konkreten Vorschlag an: dem Pflegeplan (jede Aktion lässt sich ausnehmen, keine
+hinzufügen), einer Inhaltsänderung mit Diff und den Prüfungen der App, dem Website-Commit mit Diff. Die
+Freigabe setzt den Auftrag fort; einzeln starten musst du nichts. Ein Tag ist kein Release: Ein Schritt,
+der das Release braucht, wartet darauf (bis zu 30 Minuten je Blick, danach wartet der Auftrag sichtbar,
+und **Erneut prüfen** schaut wieder nach). Ein fehlgeschlagener Schritt stoppt die Schritte, die von ihm
+abhängen; unabhängige laufen weiter, und ein Teilerfolg wird als solcher angezeigt.
+
+| Zustand des Auftrags | Bedeutung |
+|---|---|
+| **Geplant** | bereit zum Fortsetzen |
+| **In Vorbereitung** / **Läuft** | die App liest, bereitet vor oder führt einen freigegebenen Schritt aus |
+| **Freigabe nötig** | ein Plan oder Vorschlag wartet auf deine Entscheidung |
+| **Wartet** | wartet auf etwas außerhalb der App: CI, einen Release-Workflow |
+| **Blockiert** | geht ohne dich nicht weiter: ein Konflikt, eine geänderte Voraussetzung, ein unterbrochener Lauf |
+| **Erfolgreich**, **Teilweise erfolgreich**, **Fehlgeschlagen**, **Abgebrochen** | beendet, mit Grund |
+
+Aufträge liegen im Datenordner der App (eine Datei je Auftrag, nach jeder Änderung atomar geschrieben),
+mit Plan, Freigaben, festgehaltenen Quellständen, jedem Ergebnis und dem Log. Ein Neustart vergisst
+nichts und startet nichts von selbst: Ein laufender Auftrag gilt danach als unterbrochen, und
+**Fortsetzen** prüft zuerst bei GitHub (oder im Wiki, oder im Klon), ob ein begonnener Schreibschritt
+stattgefunden hat, bevor irgendetwas anderes läuft; so wird nichts doppelt gemergt, kommentiert,
+getaggt, eröffnet oder veröffentlicht. Eine Freigabe gilt nur für den unveränderten Vorschlag: Ein
+geändertes Ziel, eine geänderte Repository-Konfiguration, ein neueres Release einer Release-basierten
+Quelle oder eine veränderte Datei lässt den Schritt erneut fragen. **Abbrechen** hält nach dem laufenden
+Teilschritt an; nichts Erledigtes wird zurückgenommen. Ein Repository, ein Inhaltsziel oder die Website
+gehört höchstens zu einem offenen Auftrag, und es läuft immer nur ein Auftrag (oder Website-Schritt).
+
+## Regeln der Repository-Pflege
+
+Die App entscheidet, nicht Claude: Ein Pull Request braucht genau eine gültige Bewertung (grün oder gelb
+für einen Merge, eine Begründung fürs Schließen); rote, fehlende, doppelte oder ungültige Bewertungen
+lassen ihn offen. Die Bewertung folgt den Regeln des Skills `dependabot-pr`: Risikoklasse (grün, gelb,
+rot; unter 1.0 zählt die erste Stelle ungleich null als Major), Release-Notes aus dem offiziellen
+Repository, in Dependabot-PRs nur Manifest-, Lock-, Workflow- und Dockerfiles, SHA-Pins von Actions,
+zusammengehörige Abhängigkeiten nur gemeinsam, Majors gegen die tatsächliche Nutzung im Code. Das kostet
+Claude-Nutzung, je nach Modell und Zahl der PRs etwa ein paar Cent bis rund einen Dollar pro Repository.
+Direkt vor jedem Schreiben prüft die App erneut:
+
+- **Merge:** noch offen und kein Entwurf, gleicher Head-Commit, gleicher Zielbranch und gleiches
+  Repository, laut GitHub mergebar, CI des Head-Commits grün; GitHub bekommt den erwarteten Commit mit,
+  ein Push dazwischen lässt es ablehnen. Merge-Commit, wo das Repository es erlaubt.
+- **Schließen:** noch offen, gleicher Head und gleiches Ziel; ein von Claude genannter Ersatz-PR muss noch
+  offen oder gemergt sein. Die Begründung geht als Kommentar an den PR; Kommentar und Schließen werden
+  einzeln gemeldet.
+- **Rebase:** noch offen, wirklich von Dependabot, gleicher Head, weiterhin Konflikt oder Rückstand; dann
+  `@dependabot rebase`. Ein Dependabot-PR, den ein Merge desselben Auftrags in einen Konflikt gebracht
+  hat, bekommt das statt des Merges, wie der Plan es sagt.
+- **Tag:** die nächste Patch-Version des höchsten `x.y.z`-Tags mit dem Präfix der Regel, nur wenn jeder
+  geplante Merge des Repositorys gelungen ist, der Default-Branch genau dort steht, wo die Merges dieses
+  Auftrags ihn hinterlassen haben, die Release-Linie unverändert ist, es Commits seit dem letzten Tag gibt
+  und die CI genau dieses Commits erfolgreich war (die App wartet bis zu 30 Minuten, danach wartet der
+  Auftrag und kann erneut nachsehen). Rot, unklar, abgebrochen oder **gar keine Checks** heißt: kein Tag.
+  Direkt vor dem Schreiben, nach dem Warten, prüft die App die Release-Linie erneut: Ein höherer Tag oder
+  eine verschobene Basis macht die geplante Version ungültig. Bestehende Tags werden nie verschoben; das
+  erste Release wird von Hand getaggt.
+- **Gemergte Branches löschen:** auf GitHub nur, solange der Branch auf demselben Commit steht, nicht
+  geschützt und nicht der Default-Branch ist, kein offener PR aus ihm kommt oder auf ihn zielt und sein
+  Nachweis bei GitHub noch gilt (alle Commits im Default-Branch, oder sein PR gemergt; ein Head-Branch
+  eines Merges im selben Auftrag nur, wenn dieser Merge gelungen ist). Lokal nur in einer Kopie, die
+  noch zu dem Repository gehört, nie ein Branch, der in einem Worktree ausgecheckt ist, und nur mit
+  Bestätigung durch GitHub: Ob er enthalten ist, prüft die App gegen GitHubs aktuellen Default-Branch,
+  nicht gegen das womöglich alte `origin/<default>` der Kopie. Hat der Plan für die Kopie
+  `git fetch --prune origin` angekündigt und das ist nicht gelungen, löscht die App lokal nichts.
+
+Jede Aktion endet als erledigt, übersprungen, fehlgeschlagen oder abgebrochen, mit Grund. Wo die
+GitHub-API keine Vorbedingung kennt (Schließen, Branch löschen), bleibt ein kurzes Fenster zwischen
+letzter Prüfung und Schreiben.
+
+## Inhaltsziele: README, Dokumentation, Wiki
+
+Ein Inhaltsziel sagt, welche Inhalte wo auf welcher Grundlage aktualisiert werden: Art, Name, die
+Repositories, die es beschreibt (seine Quellen), das Repository mit den Dateien (oder dessen Wiki),
+Zielbranch, erlaubte Pfade, der Auftrag an Claude und optional Skill, Modell und Prüfbefehl. Ziele legst
+du in der Detailansicht eines Repositorys unter **Zugeordnete Inhalte** an. Jedes Ziel ist nur für
+bestimmte Quellstände aktuell: Eine README auf dem Stand von Release 1.3.0 sagt nichts über das Wiki oder
+die Website, und „vorbereitet“, „PR erstellt“, „gemergt“ und „veröffentlicht“ sind verschiedene
+Ergebnisse.
+
+Eine Änderung vorbereiten, in einem Arbeitsordner der App (nie in deinen Klonen):
+
+1. Die Quellen werden festgehalten: ihr neuestes Release oder der HEAD ihres Default-Branches.
+2. Das Ziel wird geklont (Dokumentation: sein Branch; Wiki: `https://github.com/<owner>/<name>.wiki.git`),
+   jede Quelle daneben auf ihrem festgehaltenen Commit ausgecheckt.
+3. Claude Code bearbeitet das Ziel. Es darf die Quellen lesen und Dateien bearbeiten, sonst nichts: keine
+   Shell, kein Web, nichts in `.git` oder `.github`. Der Prompt nennt, was sich in jeder Quelle seit dem
+   Stand geändert hat, für den das Ziel zuletzt veröffentlicht wurde, und sagt Claude, dass Texte in den
+   Quellen Material sind, keine Anweisungen.
+4. Die App entscheidet, was zählt: nur Dateien unter den erlaubten Pfaden, keine Löschungen, keine Links,
+   Größengrenzen, und Gits eigene Konfiguration unverändert; alles andere verwirft die ganze Änderung.
+   Dann ihre Prüfungen: keine Konfliktmarker, keine leeren Dateien, kein relativer Markdown-Link, den die
+   Änderung kaputt macht, und der Prüfbefehl des Ziels, falls gesetzt (im Arbeitsordner, ohne GitHub-Token).
+5. Der Vorschlag zeigt Quellen, Ausgangs-Commit, Prüfungen, Dateien, Claudes Zusammenfassung und den
+   vollständigen Diff.
+
+Nach der Freigabe, und nur mit genau den freigegebenen Dateien:
+
+- **README/Dokumentation:** Die App prüft, dass niemand diese Dateien seit dem Vorschlag auf dem
+  Zielbranch geändert hat, legt dann über die GitHub-API einen Commit auf dem Ausgangs-Commit des
+  Vorschlags an, einen neuen Branch `openreleasepilot/<auftrag>-<ziel>-<hash>` und einen Pull Request in
+  den Zielbranch; kein Hook und keine Einstellung des Arbeitsordners wirkt dabei mit. Nie ein direktes
+  Schreiben auf den Default-Branch. Den Pull Request erledigt dann die normale PR-Pflege oder du, oder,
+  wenn das Ziel es sagt, die App mergt ihn, sobald die CI genau seines Commits grün ist. Als
+  veröffentlicht gilt er, sobald er gemergt ist.
+- **Wiki:** Ein Wiki hat keine Pull Requests. Die App klont es frisch, prüft, dass es noch auf dem
+  Ausgangs-Commit des Vorschlags steht, committet die freigegebenen Dateien und pusht ohne Force. Hat
+  jemand das Wiki inzwischen geändert, hält sie an und überschreibt nichts.
+
+Inhalte lassen sich auch ohne neues Release aktualisieren: Mit der Basis „aktueller Stand“ hält der
+Auftrag den HEAD des Default-Branches fest und lässt das Ziel nicht mangels neuer Version aus.
+
+## Website (optional)
+
+Eine Website ist ein optionales Ziel, nicht die Wurzel der Konfiguration. Sie wird unter
+**Einrichtung → Website** eingerichtet (Projektordner mit `.openreleasepilot/site.json`, SFTP-Zugang) und
+bekommt einen eigenen Bereich mit den vier Schritten, einzeln oder nacheinander:
 
 | Schritt | Was passiert | Ändert etwas? |
 |---|---|---|
@@ -25,120 +219,51 @@ einzeln oder nacheinander:
 
 <sub>Quelle der Grafik: [docs/diagrams/openreleasepilot-flow.de.html](docs/diagrams/openreleasepilot-flow.de.html) (auch als SVG).</sub>
 
-**Neues Produkt** (Knopf in der Kopfleiste): eines deiner GitHub-Repositories wählen, Claude
-Code nimmt es mit dem `addProductSkill` des Projekts auf (Produktseite, Listen, Icon, Ablaufgrafik,
-Eintrag in `site.json`), danach baut und committet die App. Live geht es mit Upload.
+Schlägt eine Release-Abfrage fehl, ist der Stand unbekannt, nicht „aktuell“: Update hält an und damit
+auch **Alle Schritte** vor dem Upload, statt auf unvollständiger Grundlage zu veröffentlichen.
 
-## Produkte auswählen
+Als letzter Schritt eines Pflegeauftrags läuft dieselbe Aktualisierung für die Produkte der Repositories
+des Auftrags (die Produktauswahl der Website gilt zusätzlich), und mehrere Repositories, die eine Website
+speisen, werden gemeinsam in einem Schritt aktualisiert, nach ihren Releases. Der entstandene lokale
+Commit ist der Vorschlag, mit Diff; nach der Freigabe pusht die App, lädt hoch und prüft. Verwerfen lässt
+den Commit unveröffentlicht im Website-Projekt stehen.
 
-Das Hauptfenster listet die Produkte aus `site.json` mit je einer Checkbox. Precheck und Update kümmern
-sich nur um ausgewählte Produkte: Abgewählte fragt der Precheck nicht ab, und Claude bekommt sie beim
-Update als „nicht ausgewählt, daran nichts ändern“ genannt. Jede Zeile zeigt den dokumentierten Stand,
-nach einem Precheck auch, ob ein neueres Release vorliegt, und „kein Klon“, wenn `localPath` fehlt. Die
-Auswahl merkt sich die App in ihren Einstellungen, nicht im Website-Repository. In **Repositories**
-blendet sie nichts aus: Abgewählte Produkte stehen dort weiterhin.
+**Neues Produkt** (Knopf im Bereich Website): eines deiner GitHub-Repositories wählen, Claude Code nimmt es
+mit dem `addProductSkill` des Projekts auf (Produktseite, Listen, Icon, Ablaufgrafik, Eintrag in
+`site.json`), danach baut und committet die App. Live geht es mit Upload.
 
-## Repositories
+Der Bereich Website listet die Produkte aus `site.json` mit je einer Checkbox. Precheck und Update
+kümmern sich nur um ausgewählte Produkte: Abgewählte fragt der Precheck nicht ab, und Claude bekommt sie
+beim Update als „nicht ausgewählt, daran nichts ändern“ genannt. Die Auswahl merkt sich die App in ihren
+Einstellungen, nicht im Website-Repository; welche Repositories die App verwaltet, ändert sie nicht.
 
-Der Bereich **Repositories** listet das Repository jedes Produkts aus `site.json`, jedes nur einmal, auch
-wenn sich mehrere Produkte eins teilen (`owner/name`, ohne Rücksicht auf Groß- und Kleinschreibung), und
-auch die in der Übersicht abgewählten. Jede Zeile zeigt einen Zustand in Worten mit seinem Hauptgrund,
-offene Pull Requests (davon wie viele von Dependabot), die CI des Default-Branches, das neueste
-veröffentlichte Release (ohne eines den höchsten passenden Tag, als Tag gekennzeichnet), die lokale Kopie
-und wann zuletzt gelesen wurde. Das Repository der Website selbst steht in der Kopfzeile.
+## Geändert gegenüber früheren Versionen
 
-**Status aktualisieren** liest nur bei GitHub: kein Claude, keine Kosten, kein Schreiben, kein
-`git fetch`. Gelesen wird beim ersten Öffnen des Bereichs und auf Anforderung, nie im Hintergrund; schlägt
-das Lesen fehl, bleibt der ältere Stand sichtbar, aber als alt markiert, und Daten älter als fünf Minuten
-gelten als veraltet. Ohne `gh`-Anmeldung lassen sich öffentliche Repositories trotzdem lesen (GitHub
-erlaubt dann 60 Anfragen pro Stunde; ein Repository braucht etwa acht).
-
-| Zustand | Wann |
-|---|---|
-| **Blockiert** | die CI des Default-Branches ist fehlgeschlagen, oder das Repository ist nicht lesbar (GitHub antwortet mit 404 oder verweigert den Zugriff; 404 kann auch „privat ohne Zugriff“ heißen) |
-| **Aufmerksamkeit nötig** | offene Dependabot-Pull-Requests, Commits seit dem letzten Release oder Tag, die Website dokumentiert eine ältere Version als das neueste Release, oder (sobald die Detailansicht sie gelesen hat) Pull Requests mit Konflikt oder roter CI |
-| **Unbekannt** | nichts davon, aber nötige Angaben fehlen, sind unvollständig oder alt: CI läuft noch, keine Checks gefunden, unklares Ergebnis, Abfrage fehlgeschlagen |
-| **In Ordnung** | alles Nötige wurde erfolgreich und kürzlich gelesen, und es gibt nichts zu tun |
-
-Fehlende Release-Angaben allein verhindern „In Ordnung“ nicht; fehlende oder unvollständige Daten führen
-nie dazu. Ein offener Pull Request eines Menschen ist für sich kein Befund, und ein roter Pull Request
-blockiert nicht das ganze Repository. Archivierte Repositories und solche ohne Schreibrecht bleiben
-lesbar, die Pflege ist dort gesperrt.
-
-Die Detailansicht (Klick auf eine Zeile) zeigt Default-Branch und Head-Commit, die CI samt Commit, Release
-und Tag, Commits seit dieser Basis (nur wenn sie ein Vorfahr des Heads ist, sonst „nicht bestimmbar“),
-Tag-Präfix, lokale Kopie, die Produkte mit ihrem dokumentierten Stand und jeden offenen Pull Request mit
-Zielbranch, Autor, CI und Mergebarkeit. In die Pflege kommen nur Pull Requests auf den Default-Branch.
-
-## Repositories pflegen
-
-Die Pflege startet in der Detailansicht (**Dieses Repository prüfen**) oder für die Repositories der
-ausgewählten Produkte (**Ausgewählte pflegen …**, das sie vorher nennt und gesperrte auslässt), über die
-angemeldete `gh`-CLI, in zwei Teilen:
-
-1. **Prüfen** liest den Stand bei GitHub (nur lesend, ohne Fetch); danach bewertet Claude Code jeden
-   offenen Pull Request auf den Default-Branch, nur lesend (in der lokalen Kopie, wenn es eine gibt),
-   nach den Regeln des Skills `dependabot-pr`: Risikoklasse (grün, gelb, rot; unter 1.0 zählt ein
-   Wechsel der ersten Stelle ungleich null als Major), Release-Notes aus dem Original-Repository, bei
-   Dependabot nur Manifest-, Lock- und Workflow-Dateien, SHA-Pins von Actions, zusammengehörige
-   Abhängigkeiten nur gemeinsam, Majors gegen die tatsächliche Nutzung im Code. Das kostet
-   Claude-Nutzung, je nach Modell und Zahl der Pull Requests einige Cent bis etwa einen Dollar pro
-   Repository.
-2. Die Vorschau unter **Pflege** zeigt pro Repository, was passiert: mergen, schließen, Rebase, Tag,
-   aufräumen, bleibt offen, jeweils mit Claudes Risiko und Begründung und dem, was die App direkt davor
-   prüft. **Ausführen** setzt genau diese Vorschau um, **Verwerfen** verwirft sie. Eine neue Prüfung,
-   Verwerfen oder ein Projektwechsel verwerfen sie ebenfalls; ändern sich Tag-Präfix oder lokale Kopie in
-   `site.json`, lehnt der Lauf sie ab.
-
-Die App entscheidet, nicht Claude: Ein Pull Request braucht genau eine gültige Bewertung (grün oder gelb
-zum Mergen, eine Begründung zum Schließen); rote, fehlende, doppelte oder ungültige Bewertungen lassen ihn
-offen. Unmittelbar vor jedem Schreiben prüft die App erneut:
-
-- **Mergen:** noch offen und kein Entwurf, gleicher Head-Commit, gleicher Zielbranch und gleiches
-  Repository, laut GitHub mergebar, CI des Head-Commits erfolgreich; GitHub bekommt den erwarteten
-  Head-Commit mit, ein Push dazwischen lässt den Merge scheitern. Als Merge-Commit, wenn das Repository
-  das erlaubt.
-- **Schließen:** noch offen, gleicher Head und gleiches Ziel; ein von Claude genannter Ersatz-Pull-Request
-  muss noch offen oder gemergt sein. Die Begründung kommt als Kommentar; Kommentar und Schließen werden
-  einzeln gemeldet.
-- **Rebase:** noch offen, wirklich von Dependabot, gleicher Head, weiterhin Konflikt oder Rückstand;
-  dann `@dependabot rebase`. Ein Dependabot-Pull-Request, den ein Merge desselben Laufs in einen Konflikt
-  gebracht hat, bekommt das statt des Merges, wie die Vorschau es ankündigt.
-- **Tag:** die nächste Patch-Version des neuesten `x.y.z`-Tags mit dem `tagPrefix` des Produkts, nur wenn
-  alle geplanten Merges des Repositorys gelungen sind, der Default-Branch genau dort steht, wo die Merges
-  dieses Laufs ihn hinterlassen haben, die Release-Linie unverändert ist, es Commits seit dem letzten Tag
-  gibt und die CI genau dieses Commits erfolgreich war (die App wartet bis zu 30 Minuten). Rot, noch
-  laufend, unklar, abgebrochen oder **gar keine Checks** heißt kein Tag. Bestehende Tags werden nie
-  verschoben. In Repositories mit Release-Workflow startet der Tag ihn; das Release selbst ist Sache
-  dieses Workflows. Das erste Release wird von Hand getaggt.
-- **Gemergte Branches löschen** (optional): auf GitHub nur, solange der Branch auf demselben Commit steht,
-  nicht geschützt und nicht der Default-Branch ist, kein offener Pull Request aus ihm kommt oder auf ihn
-  zielt und sein Nachweis noch gilt (alle Commits im Default-Branch oder sein Pull Request gemergt; der
-  Head-Branch eines Merges im selben Lauf nur, wenn dieser Merge gelungen ist). Lokal nur in einer Kopie,
-  die noch zum Repository gehört, nie ein Branch, der in irgendeinem Worktree ausgecheckt ist. Weicht
-  `origin/<default>` der Kopie von GitHub ab, kündigt die Vorschau `git fetch --prune origin` an, und der
-  Lauf führt es vor dem Löschen aus; gelöscht werden nur die in der Vorschau genannten Branches.
-
-Jede Aktion endet als erledigt, übersprungen, fehlgeschlagen oder abgebrochen, mit Begründung.
-Erledigtes bleibt nach einem Fehler oder Abbruch erledigt; nichts wird zurückgerollt, und kein Schreiben
-wird wiederholt (nach einer unklaren Antwort liest die App erst den Zustand). Danach liest die App die
-betroffenen Repositories neu. Wo die GitHub-API keine Vorbedingung kennt (Schließen, Branch löschen),
-bleibt zwischen der letzten Prüfung und dem Schreiben ein kurzes Zeitfenster.
-
-**Geändert gegenüber früheren Versionen:** Ein Tag braucht jetzt eine CI, die für genau den getaggten
-Commit erfolgreich war. Bisher hat die App nach drei Minuten ohne Checks trotzdem getaggt; Repositories
-ohne CI bekommen jetzt keinen automatischen Tag mehr.
+- Die verwalteten Repositories sind eine eigene Liste der App. Produkt-Repositories aus `site.json`
+  erscheinen nicht mehr von selbst; **Aus Website übernehmen** nimmt sie einmalig auf. Startansicht ist
+  **Repositories**.
+- PR-Pflege, Aufräumen und Release sind getrennt wählbar; Mergen bedeutet keinen Patch-Tag mehr, und ein
+  Tag braucht eine in der App eingerichtete Release-Regel (das `tagPrefix` aus `site.json` allein genügt
+  nicht).
+- Die Pflege läuft als gespeicherter Auftrag in **Läufe**: Der Plan wird dort freigegeben und übersteht
+  einen Neustart.
+- Lokale Branches löscht die App nur mit Bestätigung durch GitHub und nicht nach einem fehlgeschlagenen
+  Abgleich der Kopie.
+- Eine fehlgeschlagene Release-Abfrage hält das Update der Website (und **Alle Schritte**) an, statt als
+  „nichts Neues“ zu gelten.
+- Seit 0.3.0: Ein Tag braucht eine CI, die für genau den getaggten Commit erfolgreich war; Repositories
+  ohne CI bekommen keinen automatischen Tag.
 
 ## Repositories wählen
 
 Die App listet deine GitHub-Repositories über die angemeldete `gh`-CLI, auch private, und markiert
-jedes: lokaler Klon gefunden, schon auf der Seite, Website-Repository. Ohne `gh`-Anmeldung zeigt sie die
-öffentlichen Repositories der Besitzer, die schon auf der Seite stehen.
+jedes: schon verwaltet, lokaler Klon gefunden, Produkt der Website, Website-Repository. Ohne
+`gh`-Anmeldung zeigt sie die öffentlichen Repositories der Besitzer, die sie schon kennt.
 
-- **Website-Repo** (Einrichtung): aus der Liste wählen; der Projektordner ergibt sich aus dem lokalen
-  Klon. Gibt es keinen, klont die App das Repo in den Repo-Ordner.
 - **Repo-Ordner** (Einrichtung): hier werden lokale Klone gesucht und angelegt; standardmäßig der
-  Elternordner des Projektordners. Dort gefundene Produkt-Klone bekommt Claude als `localPath`.
+  Elternordner des Website-Projekts oder `~/Documents/Code`.
+- **Website-Repo** (Einrichtung, optional): aus der Liste wählen; der Projektordner ergibt sich aus dem
+  lokalen Klon. Gibt es keinen, klont die App das Repo in den Repo-Ordner.
 
 ## Installation
 
@@ -178,13 +303,16 @@ gültige Signatur wird abgelehnt; danach die App neu starten. Beta-Versionen (`X
 ## Voraussetzungen
 
 - macOS (entwickelt unter macOS 27; der Code ist plattformübergreifendes Tauri, Windows ist ungetestet)
-- Auf dem Rechner: `git`, Node.js/npm (für den Build der Seite), angemeldetes [Claude Code](https://claude.com/claude-code), empfohlen die angemeldete GitHub-CLI `gh` (hebt das GitHub-API-Limit von 60 auf 5000 Anfragen pro Stunde; das Token geht auch als `GITHUB_TOKEN` an den Build, den die App ausführt, aber nie an Claude Code)
-- Ein SFTP-Zugang zum Webspace
+- Auf dem Rechner: `git` mit Zugriff auf deine Repositories, angemeldetes
+  [Claude Code](https://claude.com/claude-code), für Pflegeaufträge die angemeldete GitHub-CLI `gh` (sie
+  hebt auch das GitHub-API-Limit von 60 auf 5000 Anfragen pro Stunde; das Token nutzt die App selbst und
+  gibt es als `GITHUB_TOKEN` an den Build der Website, aber nie an Claude Code)
+- Nur für eine Website: Node.js/npm (oder was ihr Build braucht) und ein SFTP-Zugang zum Webspace
 
 Die App startet aus dem Finder und fragt einmal die Login-Shell nach dem `PATH`, damit
 Werkzeuge aus nvm, Homebrew oder `~/.local/bin` gefunden werden.
 
-## Projektdatei `.openreleasepilot/site.json`
+## Projektdatei der Website `.openreleasepilot/site.json`
 
 Liegt im Website-Repository und beschreibt Build und beobachtete Produkte. Projekte, die vor der
 Umbenennung von OpenFTPUpdater-AI eingerichtet wurden, behalten ihre `.openftpupdater/site.json`; sie
@@ -250,17 +378,31 @@ installierte Claude Code es kennt. Deshalb führt die App vor Claude-Läufen `cl
 |---|---|---|---|
 | `opus` | Claude Opus 5.5 | 4 $ / 20 $ | Standard: öffentliche Produktaussagen in zwei Sprachen brauchen Genauigkeit |
 | `sonnet` | Claude Sonnet 5.5 | 2 $ / 10 $ | Einen Versuch wert bei mechanischen Aufgaben wie Screenshots und Grafiken |
-| `haiku` | Claude Haiku 4.5 | 1 $ / 5 $ | Kleine, klar per Skript vorgegebene Aufgaben |
+| `haiku` | Claude Haiku 5.5 | siehe Preisliste von Anthropic | Kleine, klar per Skript vorgegebene Aufgaben |
 | `fable` | Claude Fable 5.1 | 10 $ / 50 $ | Nur wenn Opus nicht reicht, etwa bei einer neuen Produktseite |
 
 Effort ist der erste Hebel: `high` für Texte und Konsistenzprüfung, `medium` für Screenshots und
 Grafiken. Bei Anmeldung mit einem Claude-Abo sind die angezeigten Kosten ein rechnerischer API-Preis;
 die Läufe zählen stattdessen gegen die Nutzungsgrenzen des Abos.
 
+Pflegeaufträge nutzen das im Auftrag gewählte Modell (ein Inhaltsziel kann ein eigenes setzen), sonst
+die Vorgabe unter **Einrichtung → Ausführungsregeln**, sonst `claude.model` der Website, sonst den
+Standard von Claude Code; die Kostengrenze je Lauf ebenso.
+
 ## Was Claude darf
 
-Claude Code läuft als `claude -p … --permission-mode acceptEdits` im Projektordner. Ein
-Headless-Lauf kann nicht nachfragen, alles außerhalb der Freigabeliste wird abgelehnt:
+Jeder Lauf von Claude Code ist headless (`claude -p`) und kann nicht nachfragen; was nicht erlaubt ist,
+wird abgelehnt, und abgelehnte Aufrufe stehen nach dem Lauf im Log. Jede Art von Lauf hat eigene Rechte:
+
+- **PR-Prüfung:** nur lesend: der Klon, `gh pr view|diff|checks|list`, `gh release`, lesende
+  `gh api`-Aufrufe, das Web für Release-Notes. Keine Änderungen, kein `gh pr merge|close|comment`, keine
+  schreibenden Aufrufe. Mergen, schließen und kommentieren macht die App.
+- **Inhalte (README, Dokumentation, Wiki):** Dateien im Arbeitsordner der App (dem Klon des Ziels) lesen
+  und bearbeiten, die festgehaltenen Quellen daneben lesen; Skills. Keine Shell, kein Web, nichts in
+  `.git` oder `.github`. Was zählt, entscheidet danach die App (siehe Inhaltsziele).
+- **Website-Update:** wie folgt.
+
+Für die Website läuft Claude Code als `claude -p … --permission-mode acceptEdits` im Projektordner:
 
 - Dateien im Projekt lesen, durchsuchen, bearbeiten und schreiben; Skills nutzen
 - git nur lesend, im Projekt und in anderen Repositories über `git -C <Pfad> log|show|diff|tag|describe|ls-tree|fetch --tags`
@@ -289,10 +431,13 @@ betroffen.
   Domains, `.htaccess`, …) bleiben unberührt.
 - Hochgeladen wird nur ein committeter, sauberer Stand, und nur wenn er nicht hinter `origin` liegt.
 
-Die Einstellungen liegen in `~/Library/Application Support/OpenReleasePilot/config.json` (ohne Geheimnisse).
-Beim ersten Start nach der Umbenennung übernimmt die App den Ordner `OpenFTPUpdater-AI` und das unter
-dem alten Namen gespeicherte SFTP-Passwort; macOS fragt dabei unter Umständen einmal, ob
-OpenReleasePilot diesen Schlüsselbundeintrag verwenden darf.
+Die Einstellungen liegen in `~/Library/Application Support/OpenReleasePilot/config.json` (verwaltete
+Repositories, Inhaltsziele, Website- und SFTP-Einstellungen; ohne Geheimnisse). Daneben: `jobs/` (je
+Pflegeauftrag eine Datei und ein Log; die 50 neuesten abgeschlossenen bleiben), `content.json` (welchen
+Stand jedes Inhaltsziel zuletzt erreicht hat) und `work/` (die Arbeitsordner offener Aufträge, entfernt,
+sobald ein Auftrag beendet ist). Beim ersten Start nach der Umbenennung übernimmt die App den Ordner
+`OpenFTPUpdater-AI` und das unter dem alten Namen gespeicherte SFTP-Passwort; macOS fragt dabei unter
+Umständen einmal, ob OpenReleasePilot diesen Schlüsselbundeintrag verwenden darf.
 
 ## Bauen
 
@@ -303,8 +448,9 @@ npm run build
 ```
 
 Die App liegt danach unter `desktop/target/release/bundle/macos/OpenReleasePilot.app`
-(ad-hoc signiert). Während der Entwicklung: `npm run dev`. Tests des Kerns:
-`cargo test -p openreleasepilot-core`.
+(ad-hoc signiert). Während der Entwicklung: `npm run dev`. Tests: `cargo test --workspace`; Tests, die
+GitHub lesen oder Claude ausführen (ein paar Cent), sind als `ignored` markiert und laufen mit
+`cargo test -p openreleasepilot-core -- --ignored`; keiner davon schreibt in ein echtes Repository.
 
 `scripts/build-pkg.sh` baut den Installer wie die CI: `dist/OpenReleasePilot-<version>.pkg` mit
 `.sha256`-Datei (`VERSION=0.2.0 scripts/build-pkg.sh`). `SIGN_IDENTITY` (Developer ID Application) und
@@ -316,8 +462,9 @@ signiert und das Paket unsigniert.
 Proc-Macro-Bibliotheken, die sich nicht laden ließen („mis-aligned LINKEDIT string pool“).
 
 ```
-desktop/core       Rust-Bibliothek: Einstellungen, site.json, Shell/PATH, git, GitHub, Claude, SFTP, Manifest, Verify
-desktop/src-tauri  Tauri-App: Zustand, Befehle, die vier Schritte
+desktop/core       Rust-Bibliothek: Einstellungen, Repositories und ihr Zustand, Pflegeregeln, Inhaltsziele,
+                   Aufträge, site.json, Shell/PATH, git, GitHub, Claude, SFTP, Manifest, Verify
+desktop/src-tauri  Tauri-App: Zustand, Befehle, Durchläufe der Aufträge, die vier Website-Schritte
 desktop/ui         Web-Oberfläche (HTML, JS, CSS), ohne Build-Schritt
 ```
 

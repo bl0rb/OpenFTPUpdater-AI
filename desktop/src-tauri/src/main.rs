@@ -1,14 +1,17 @@
 // No console window next to the app on Windows (release builds).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod jobrun;
 mod steps;
 
-use steps::{Job, NewProductInput};
+use steps::{NewProductInput, Work};
 
 use openreleasepilot_core::claude::{Outcome, Outdated, ReleaseCheck};
-use openreleasepilot_core::config::{self, AuthKind, Config};
+use openreleasepilot_core::config::{self, AuthKind, Config, ManagedRepo, ReleaseRule};
+use openreleasepilot_core::content::{self, ContentTarget, TargetState};
+use openreleasepilot_core::jobs::{self, Job, JobOptions};
 use openreleasepilot_core::update::{self, ReleaseInfo};
-use openreleasepilot_core::{github, localrepo, manifest, repocare, repos};
+use openreleasepilot_core::{github, localrepo, manifest, repos};
 use openreleasepilot_core::paths::{self, abbreviate_home, expand_home};
 use openreleasepilot_core::secrets;
 use openreleasepilot_core::sftp::{self, ConnectError};
@@ -30,12 +33,12 @@ pub enum Step {
     Update,
     Upload,
     Verify,
-    /// Care of the products' repositories (area "Repositories"); not part of the four-step flow.
-    Repos,
+    /// A pass of a care job; its lines go to the job's own log.
+    Jobs,
 }
 
 impl Step {
-    pub const ALL: [Step; 5] = [Step::Precheck, Step::Update, Step::Upload, Step::Verify, Step::Repos];
+    pub const ALL: [Step; 5] = [Step::Precheck, Step::Update, Step::Upload, Step::Verify, Step::Jobs];
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Default)]
@@ -76,34 +79,6 @@ pub struct Check {
     pub detail: String,
 }
 
-/// What became of one planned care action.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum ItemOutcome {
-    Done,
-    Skipped,
-    Failed,
-    /// Not tried: the run was cancelled before.
-    Cancelled,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RepoItem {
-    pub label: String,
-    pub outcome: ItemOutcome,
-    pub detail: String,
-}
-
-/// What the care run did in one repository, one row per planned action.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RepoReport {
-    pub name: String,
-    pub repo: String,
-    pub items: Vec<RepoItem>,
-}
-
 /// What the Repositories area knows about one repository; read only, kept in memory.
 #[derive(Default)]
 pub struct RepoStatus {
@@ -142,9 +117,14 @@ pub struct Model {
     pub verify: Option<Report>,
     /// Repository key → what the Repositories area read about it.
     pub repo_status: BTreeMap<String, RepoStatus>,
-    /// Care preview, waiting for the user to run or discard it.
-    pub repo_plan: Option<repocare::PlanSet>,
-    pub repo_reports: Vec<RepoReport>,
+    /// Care jobs, newest first; each also stored as a file.
+    pub jobs: Vec<Job>,
+    /// The job whose pass is running.
+    pub job_running: Option<String>,
+    /// Job files that could not be read at start.
+    pub jobs_unreadable: Vec<String>,
+    /// Content target id → what it was last brought to.
+    pub content_states: BTreeMap<String, TargetState>,
     /// Fingerprint the user has to confirm before the first SFTP connection.
     pub pending_host_key: Option<String>,
     /// Newer version of the app itself, found by the update check.
@@ -177,6 +157,14 @@ impl Model {
     fn load() -> Self {
         let config = config::load();
         let site = load_site(&config);
+        // A job that was running when the app stopped is marked, never continued by itself.
+        let (mut jobs, jobs_unreadable) = jobs::load_all();
+        for job in &mut jobs {
+            if job.mark_interrupted() {
+                let _ = jobs::save(job);
+            }
+        }
+        jobs::prune(&mut jobs);
         Self {
             config,
             site,
@@ -190,8 +178,10 @@ impl Model {
             upload: None,
             verify: None,
             repo_status: BTreeMap::new(),
-            repo_plan: None,
-            repo_reports: Vec::new(),
+            jobs,
+            job_running: None,
+            jobs_unreadable,
+            content_states: content::load_states(),
             pending_host_key: None,
             available_update: None,
             checking_update: false,
@@ -204,20 +194,33 @@ impl Model {
 
 pub fn load_site(config: &Config) -> Result<Site, String> {
     if config.project_dir.trim().is_empty() {
-        return Err("Kein Projektordner eingerichtet".into());
+        return Err("Keine Website eingerichtet".into());
     }
     site::load(&expand_home(&config.project_dir)).map_err(|e| format!("{e:#}"))
 }
 
-/// The repositories of the site's products, each once; empty without a readable site.json.
-pub fn repo_targets(site: &Result<Site, String>, config: &Config) -> Vec<repos::RepoTarget> {
-    let Ok(site) = site else { return Vec::new() };
-    if config.project_dir.trim().is_empty() {
-        return Vec::new();
-    }
-    let project = expand_home(&config.project_dir);
-    let website = localrepo::origin_repo(&project);
-    repos::targets(site, &project, &config.skipped_products, website.as_deref())
+/// The managed repositories, with the website's product links where a website is set up.
+pub fn repo_targets(config: &Config, site: &Result<Site, String>) -> Vec<repos::RepoTarget> {
+    let website = if config.project_dir.trim().is_empty() { None } else { localrepo::origin_repo(&expand_home(&config.project_dir)) };
+    repos::targets(config, site.as_ref().ok(), website.as_deref())
+}
+
+/// Keys of the managed repositories that feed the website: those of its selected products.
+pub fn website_sources(config: &Config, site: &Result<Site, String>) -> Option<Vec<String>> {
+    let site = site.as_ref().ok()?;
+    let mut keys: Vec<String> = site.products.iter().filter(|p| config.product_enabled(&p.id)).map(|p| p.repo.trim().to_lowercase()).collect();
+    keys.retain(|k| config.repository(k).is_some());
+    keys.dedup();
+    Some(keys)
+}
+
+fn save_config(app: &AppHandle, change: impl FnOnce(&mut Config) -> Result<(), String>) -> Result<(), String> {
+    let mut next = with_model(app, |m| m.config.clone());
+    change(&mut next)?;
+    config::save(&next).map_err(|e| format!("{e:#}"))?;
+    with_model(app, |m| m.config = next);
+    changed(app);
+    Ok(())
 }
 
 struct Shared(Mutex<Model>);
@@ -277,10 +280,16 @@ struct View {
     upload: Option<UploadResult>,
     verify: Option<Report>,
     repositories: Vec<RepoView>,
-    repo_plan: Option<repocare::PlanSet>,
-    /// Repositories whose default branch moved since the preview, as a later status read shows.
-    repo_plan_moved: Vec<String>,
-    repo_reports: Vec<RepoReport>,
+    targets: Vec<TargetView>,
+    jobs: Vec<JobSummary>,
+    job_running: Option<String>,
+    jobs_unreadable: Vec<String>,
+    /// Product repositories of the website that are not managed yet.
+    importable: Vec<String>,
+    /// Keys of the managed repositories that feed the website; `None` without a website.
+    website_sources: Option<Vec<String>>,
+    /// Whether gh is signed in, once known.
+    signed_in: Option<bool>,
     /// Facts older than this many seconds are shown as old.
     fresh_secs: u64,
     /// Unix seconds when the view was made.
@@ -300,7 +309,6 @@ struct View {
 struct RepoView {
     #[serde(flatten)]
     target: repos::RepoTarget,
-    selected: bool,
     facts: Option<repos::Facts>,
     health: repos::Health,
     capabilities: repos::Capabilities,
@@ -308,6 +316,81 @@ struct RepoView {
     error: Option<String>,
     details: Option<repos::Details>,
     details_loading: bool,
+    /// The open job that holds it, if any.
+    job: Option<JobRef>,
+    /// Ids of the content targets it feeds.
+    targets: Vec<String>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct JobRef {
+    id: String,
+    status: jobs::Status,
+}
+
+/// A content target with what it was last brought to and how that compares with now.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TargetView {
+    #[serde(flatten)]
+    target: ContentTarget,
+    state: TargetState,
+    /// Why it cannot be used as configured.
+    problem: Option<String>,
+    /// Per source: whether the published state is behind what GitHub reports now.
+    freshness: Vec<String>,
+    job: Option<JobRef>,
+}
+
+/// A job without its proposals, for lists; `get_job` has all of it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JobSummary {
+    id: String,
+    created_at: u64,
+    updated_at: u64,
+    repos: Vec<String>,
+    options: JobOptions,
+    status: jobs::Status,
+    running: bool,
+    steps: Vec<StepSummary>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StepSummary {
+    id: String,
+    kind: jobs::StepKind,
+    label: String,
+    state: jobs::StepState,
+    detail: String,
+    links: Vec<jobs::Link>,
+}
+
+fn summary(job: &Job, running: bool) -> JobSummary {
+    JobSummary {
+        id: job.id.clone(),
+        created_at: job.created_at,
+        updated_at: job.updated_at,
+        repos: job.repos.clone(),
+        options: job.options.clone(),
+        status: job.status(running),
+        running,
+        steps: job
+            .steps
+            .iter()
+            .map(|s| StepSummary { id: s.id.clone(), kind: s.kind, label: s.label.clone(), state: s.state, detail: s.detail.clone(), links: s.links.clone() })
+            .collect(),
+    }
+}
+
+/// What a target is behind, judged by the last status read of its sources.
+fn freshness(state: &TargetState, status: &BTreeMap<String, RepoStatus>) -> Vec<String> {
+    content::behind(state, &|key| {
+        let facts = status.get(key)?.facts.as_ref()?;
+        Some(content::Latest { release: facts.release.ok().cloned().flatten(), head: facts.head.ok().cloned() })
+    })
 }
 
 #[tauri::command]
@@ -315,73 +398,94 @@ fn get_view(app: AppHandle) -> View {
     let version = app.package_info().version.to_string();
     // Reads .git/config of the clones: outside the lock.
     let (site, config) = with_model(&app, |m| (m.site.clone(), m.config.clone()));
-    let targets = repo_targets(&site, &config);
+    let targets = repo_targets(&config, &site);
+    let importable: Vec<String> = match (&site, config.project_dir.trim().is_empty()) {
+        (Ok(site), false) => repos::import_candidates(site, &expand_home(&config.project_dir), &config).into_iter().filter(|c| !c.managed).map(|c| c.repo).collect(),
+        _ => Vec::new(),
+    };
     let now = steps::now();
-    with_model(&app, |m| View {
-        version,
-        dev_build: cfg!(debug_assertions),
-        config: m.config.clone(),
-        project_display: if m.config.project_dir.is_empty() { String::new() } else { abbreviate_home(&expand_home(&m.config.project_dir)) },
-        workspace_display: abbreviate_home(&m.config.workspace()),
-        site_repo: if m.config.project_dir.is_empty() { None } else { localrepo::origin_repo(&expand_home(&m.config.project_dir)) },
-        site: m.site.as_ref().ok().cloned(),
-        site_file: if m.config.project_dir.is_empty() { site::SITE_FILE } else { site::file_name(&expand_home(&m.config.project_dir)) },
-        site_error: m.site.as_ref().err().cloned(),
-        sftp_ready: m.config.sftp.is_complete(),
-        steps: m.steps.clone(),
-        running: m.running,
-        checks: m.checks.clone(),
-        outdated: m.outdated.as_ref().map(|c| c.outdated.clone()),
-        release_unknown: m.outdated.as_ref().map(|c| c.unknown.clone()).unwrap_or_default(),
-        products: m.site.as_ref().map(|site| steps::resolve_products(site, &m.config, &m.latest_tags)).unwrap_or_default(),
-        tasks: m.site.as_ref().map(|site| steps::resolve_tasks(site, &m.config)).unwrap_or_default(),
-        claude_runs: m.claude_runs.clone(),
-        upload: m.upload.clone(),
-        verify: m.verify.clone(),
-        repositories: targets
-            .into_iter()
-            .map(|target| {
-                let status = m.repo_status.get(&target.key);
-                let facts = status.and_then(|s| s.facts.clone());
-                let details = status.and_then(|s| s.details.clone());
-                RepoView {
-                    selected: target.selected(),
-                    health: repos::health(&target, facts.as_ref(), details.as_ref(), now),
-                    capabilities: repos::capabilities(&target, facts.as_ref(), github::signed_in()),
-                    loading: status.is_some_and(|s| s.loading),
-                    error: status.and_then(|s| s.error.clone()),
-                    details_loading: status.is_some_and(|s| s.details_loading),
-                    facts,
-                    details,
-                    target,
-                }
-            })
-            .collect(),
-        repo_plan_moved: m
-            .repo_plan
-            .iter()
-            .flat_map(|set| set.plans.iter().map(move |plan| (set.created_at, plan)))
-            .filter(|(created, plan)| {
-                let facts = m.repo_status.get(&plan.key).and_then(|s| s.facts.as_ref());
-                facts.is_some_and(|f| f.checked_at > *created && f.head.ok().is_some_and(|head| !plan.base_head.is_empty() && *head != plan.base_head))
-            })
-            .map(|(_, plan)| plan.repo.clone())
-            .collect(),
-        repo_plan: m.repo_plan.clone(),
-        repo_reports: m.repo_reports.clone(),
-        fresh_secs: repos::FRESH_SECS,
-        now,
-        last_upload: manifest::load_last(&m.config.sftp).map(|last| LastUpload {
-            commit: last.commit.map(|c| c.chars().take(7).collect()),
-            uploaded_at: last.uploaded_at,
-            files: last.files.len(),
-        }),
-        pending_host_key: m.pending_host_key.clone(),
-        available_update: m.available_update.clone(),
-        checking_update: m.checking_update,
-        installing_update: m.installing_update,
-        notice: m.notice.clone(),
-        error: m.error.clone(),
+    with_model(&app, |m| {
+        let open_job = |pred: &dyn Fn(&Job) -> bool| {
+            m.jobs.iter().find(|j| j.open() && pred(j)).map(|j| JobRef { id: j.id.clone(), status: j.status(m.job_running.as_deref() == Some(j.id.as_str())) })
+        };
+        let managed: Vec<String> = m.config.repositories.iter().map(|r| r.key()).collect();
+        View {
+            version,
+            dev_build: cfg!(debug_assertions),
+            config: m.config.clone(),
+            project_display: if m.config.project_dir.is_empty() { String::new() } else { abbreviate_home(&expand_home(&m.config.project_dir)) },
+            workspace_display: abbreviate_home(&m.config.workspace()),
+            site_repo: if m.config.project_dir.is_empty() { None } else { localrepo::origin_repo(&expand_home(&m.config.project_dir)) },
+            site: m.site.as_ref().ok().cloned(),
+            site_file: if m.config.project_dir.is_empty() { site::SITE_FILE } else { site::file_name(&expand_home(&m.config.project_dir)) },
+            site_error: if m.config.project_dir.is_empty() { None } else { m.site.as_ref().err().cloned() },
+            sftp_ready: m.config.sftp.is_complete(),
+            steps: m.steps.clone(),
+            running: m.running,
+            checks: m.checks.clone(),
+            outdated: m.outdated.as_ref().map(|c| c.outdated.clone()),
+            release_unknown: m.outdated.as_ref().map(|c| c.unknown.clone()).unwrap_or_default(),
+            products: m.site.as_ref().map(|site| steps::resolve_products(site, &m.config, &m.latest_tags)).unwrap_or_default(),
+            tasks: m.site.as_ref().map(|site| steps::resolve_tasks(site, &m.config)).unwrap_or_default(),
+            claude_runs: m.claude_runs.clone(),
+            upload: m.upload.clone(),
+            verify: m.verify.clone(),
+            repositories: targets
+                .into_iter()
+                .map(|target| {
+                    let status = m.repo_status.get(&target.key);
+                    let facts = status.and_then(|s| s.facts.clone());
+                    let details = status.and_then(|s| s.details.clone());
+                    let key = target.key.clone();
+                    RepoView {
+                        health: repos::health(&target, facts.as_ref(), details.as_ref(), now),
+                        capabilities: repos::capabilities(&target, facts.as_ref(), github::signed_in()),
+                        loading: status.is_some_and(|s| s.loading),
+                        error: status.and_then(|s| s.error.clone()),
+                        details_loading: status.is_some_and(|s| s.details_loading),
+                        job: open_job(&|j| j.repos.contains(&key)),
+                        targets: m.config.content_targets.iter().filter(|t| t.sources.contains(&key)).map(|t| t.id.clone()).collect(),
+                        facts,
+                        details,
+                        target,
+                    }
+                })
+                .collect(),
+            targets: m
+                .config
+                .content_targets
+                .iter()
+                .map(|target| {
+                    let state = m.content_states.get(&target.id).cloned().unwrap_or_default();
+                    TargetView {
+                        problem: content::validate(target, &managed).err(),
+                        freshness: freshness(&state, &m.repo_status),
+                        job: open_job(&|j| j.options.targets.iter().any(|t| t.id == target.id)),
+                        target: target.clone(),
+                        state,
+                    }
+                })
+                .collect(),
+            jobs: m.jobs.iter().map(|j| summary(j, m.job_running.as_deref() == Some(j.id.as_str()))).collect(),
+            job_running: m.job_running.clone(),
+            jobs_unreadable: m.jobs_unreadable.clone(),
+            importable,
+            website_sources: website_sources(&m.config, &m.site),
+            signed_in: github::signed_in(),
+            fresh_secs: repos::FRESH_SECS,
+            now,
+            last_upload: manifest::load_last(&m.config.sftp).map(|last| LastUpload {
+                commit: last.commit.map(|c| c.chars().take(7).collect()),
+                uploaded_at: last.uploaded_at,
+                files: last.files.len(),
+            }),
+            pending_host_key: m.pending_host_key.clone(),
+            available_update: m.available_update.clone(),
+            checking_update: m.checking_update,
+            installing_update: m.installing_update,
+            notice: m.notice.clone(),
+            error: m.error.clone(),
+        }
     })
 }
 
@@ -409,6 +513,12 @@ struct SettingsInput {
     /// Look for a new app version at start.
     #[serde(default = "yes")]
     update_check: bool,
+    /// Claude model for care jobs without a choice; empty = the website's, else Claude Code's default.
+    #[serde(default)]
+    claude_model: String,
+    /// Cost limit per Claude run of a care job; empty = none (or the website's).
+    #[serde(default)]
+    max_budget_usd: Option<f64>,
 }
 
 fn yes() -> bool {
@@ -428,6 +538,8 @@ fn apply_settings(app: &AppHandle, input: SettingsInput) -> Result<(), String> {
     next.sftp.auth = input.auth;
     next.sftp.key_path = input.key_path.trim().to_owned();
     next.no_update_check = !input.update_check;
+    next.claude_model = input.claude_model.trim().to_owned();
+    next.max_budget_usd = input.max_budget_usd.filter(|b| *b > 0.0);
     if target_changed {
         // Another server needs its own confirmed host key.
         next.sftp.host_key.clear();
@@ -443,12 +555,6 @@ fn apply_settings(app: &AppHandle, input: SettingsInput) -> Result<(), String> {
     config::save(&next).map_err(|e| format!("{e:#}"))?;
     let site = load_site(&next);
     with_model(app, |m| {
-        if m.config.project_dir != next.project_dir {
-            // Another project: its repositories, previews and results are not this one's.
-            m.repo_status.clear();
-            m.repo_plan = None;
-            m.repo_reports.clear();
-        }
         m.config = next;
         m.site = site;
         m.pending_host_key = None;
@@ -664,11 +770,11 @@ fn dismiss(app: AppHandle) {
 #[tauri::command]
 fn run_step(app: AppHandle, step: Step, instructions: String) -> Result<(), String> {
     let job = match step {
-        Step::Precheck => Job::Precheck,
-        Step::Update => Job::Update(instructions),
-        Step::Upload => Job::Upload,
-        Step::Verify => Job::Verify,
-        Step::Repos => return Err("Die Pflege startet im Bereich Repositories".into()),
+        Step::Precheck => Work::Precheck,
+        Step::Update => Work::Update(instructions),
+        Step::Upload => Work::Upload,
+        Step::Verify => Work::Verify,
+        Step::Jobs => return Err("Aufträge starten im Bereich Repositories".into()),
     };
     steps::start(&app, vec![job])
 }
@@ -677,9 +783,10 @@ fn run_step(app: AppHandle, step: Step, instructions: String) -> Result<(), Stri
 
 /// Reads the facts of the repositories (all when `keys` is empty), four at a time, each stored as
 /// soon as it arrives. Read only and without Claude; runs beside a step, never under the model lock.
+/// Also looks whether pull requests delivered by content targets were merged meanwhile.
 pub fn refresh_status(app: &AppHandle, keys: &[String]) {
     let (site, config) = with_model(app, |m| (m.site.clone(), m.config.clone()));
-    let targets: Vec<repos::RepoTarget> = repo_targets(&site, &config).into_iter().filter(|t| keys.is_empty() || keys.contains(&t.key)).collect();
+    let targets: Vec<repos::RepoTarget> = repo_targets(&config, &site).into_iter().filter(|t| keys.is_empty() || keys.contains(&t.key)).collect();
     if targets.is_empty() {
         return;
     }
@@ -726,7 +833,38 @@ pub fn refresh_status(app: &AppHandle, keys: &[String]) {
                 });
             }
         });
+        refresh_deliveries(&app);
     });
+}
+
+/// A docs pull request the app delivered counts as published once it is merged; read only.
+fn refresh_deliveries(app: &AppHandle) {
+    let (config, states) = with_model(app, |m| (m.config.clone(), m.content_states.clone()));
+    let mut changed_any = false;
+    let mut next = states.clone();
+    for (id, state) in &states {
+        let (Some(target), Some(delivered)) = (config.content_target(id), &state.delivered) else { continue };
+        let Some(number) = delivered.pr else { continue };
+        match content::pull_request_state(&target.repo, number) {
+            Ok(content::PrState::Merged) => {
+                let entry = next.get_mut(id).expect("same keys");
+                entry.published = Some(content::Delivery { pr: None, what: format!("{} (gemergt)", delivered.what), ..delivered.clone() });
+                entry.delivered = Some(content::Delivery { pr: None, ..delivered.clone() });
+                changed_any = true;
+            }
+            Ok(content::PrState::Closed) => {
+                let entry = next.get_mut(id).expect("same keys");
+                entry.delivered = Some(content::Delivery { pr: None, what: format!("{} (ohne Merge geschlossen)", delivered.what), ..delivered.clone() });
+                changed_any = true;
+            }
+            _ => {}
+        }
+    }
+    if changed_any {
+        let _ = content::save_states(&next);
+        with_model(app, |m| m.content_states = next);
+        changed(app);
+    }
 }
 
 /// "Status aktualisieren": all repositories, or the given ones.
@@ -781,52 +919,343 @@ fn load_repo_details(app: AppHandle, key: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Care, first part: GitHub's state and Claude's review of exactly these repositories, as a
-/// preview to confirm. One repository from its detail view, or those of the selected products.
+// MARK: Managing repositories
+
+/// Whether an open job holds the repository; changing it under the job would invalidate its plan.
+fn held_by_job(m: &Model, key: &str) -> Option<String> {
+    m.jobs.iter().find(|j| j.open() && j.repos.iter().any(|r| r == key)).map(|j| j.id.clone())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddRepo {
+    repo: String,
+    #[serde(default)]
+    local_path: String,
+}
+
+/// Adds repositories to the managed list, each checked on GitHub first (name and id as GitHub
+/// reports them); one already managed is left as it is. Returns the ones added.
 #[tauri::command]
-fn check_repos(app: AppHandle, keys: Vec<String>, merge: bool, cleanup: bool, model: String) -> Result<(), String> {
-    if !merge && !cleanup {
-        return Err("Mindestens eine Aktion wählen".into());
+async fn add_repositories(app: AppHandle, repos: Vec<AddRepo>) -> Result<Vec<String>, String> {
+    blocking(move || {
+        let mut found = Vec::new();
+        for entry in &repos {
+            let info = github::repo_info(entry.repo.trim()).map_err(|e| format!("{e:#}"))?;
+            found.push((info, entry.local_path.trim().to_owned()));
+        }
+        let mut added = Vec::new();
+        save_config(&app, |config| {
+            for (info, local_path) in found {
+                let repo = ManagedRepo { github_id: Some(info.id), local_path, ..ManagedRepo::new(&info.full_name) };
+                if config.add_repository(repo) {
+                    added.push(info.full_name.clone());
+                }
+            }
+            Ok(())
+        })?;
+        let keys: Vec<String> = added.iter().map(|r| r.to_lowercase()).collect();
+        if !keys.is_empty() {
+            refresh_status(&app, &keys);
+        }
+        Ok(added)
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RepoSettings {
+    enabled: bool,
+    local_path: String,
+    release: Option<ReleaseRule>,
+}
+
+/// Changes how a repository is managed: on/off, local clone, release rule. Not while an open job holds it.
+#[tauri::command]
+fn update_repository(app: AppHandle, key: String, settings: RepoSettings) -> Result<(), String> {
+    if let Some(job) = with_model(&app, |m| held_by_job(m, &key)) {
+        return Err(format!("Gehört zum offenen Auftrag {job}; erst abschließen oder beenden"));
     }
-    if keys.is_empty() {
-        return Err("Kein Repository gewählt".into());
+    if let Some(rule) = &settings.release {
+        if rule.tag_prefix.trim() != rule.tag_prefix || rule.tag_prefix.chars().any(|c| !c.is_ascii_alphanumeric() && !"-_./".contains(c)) {
+            return Err("Tag-Präfix: nur Buchstaben, Ziffern und - _ . /, keine Leerzeichen".into());
+        }
     }
-    if github::token().is_none() {
+    save_config(&app, |config| {
+        let repo = config.repositories.iter_mut().find(|r| r.key() == key).ok_or("Repository wird nicht verwaltet")?;
+        repo.enabled = settings.enabled;
+        repo.local_path = settings.local_path.trim().to_owned();
+        repo.release = settings.release;
+        Ok(())
+    })
+}
+
+/// Takes a repository out of the managed list. Deletes nothing: not on GitHub, not the clone, not
+/// the website's configuration.
+#[tauri::command]
+fn remove_repository(app: AppHandle, key: String) -> Result<(), String> {
+    if let Some(job) = with_model(&app, |m| held_by_job(m, &key)) {
+        return Err(format!("Gehört zum offenen Auftrag {job}; erst abschließen oder beenden"));
+    }
+    save_config(&app, |config| {
+        let users: Vec<String> = config.content_targets.iter().filter(|t| t.sources.contains(&key)).map(|t| t.name.clone()).collect();
+        if !users.is_empty() {
+            return Err(format!("Quelle von {}; dort erst entfernen", users.join(", ")));
+        }
+        config.repositories.retain(|r| r.key() != key);
+        Ok(())
+    })?;
+    with_model(&app, |m| m.repo_status.remove(&key));
+    changed(&app);
+    Ok(())
+}
+
+/// The website's product repositories, compared with the managed list.
+#[tauri::command]
+fn import_candidates(app: AppHandle) -> Result<Vec<repos::ImportCandidate>, String> {
+    let (site, config) = with_model(&app, |m| (m.site.clone(), m.config.clone()));
+    let site = site.map_err(|e| format!("Website nicht lesbar: {e}"))?;
+    Ok(repos::import_candidates(&site, &expand_home(&config.project_dir), &config))
+}
+
+/// Takes the chosen product repositories into the managed list; a release rule only where asked
+/// for. Repeating it adds nothing twice and overwrites nothing.
+#[tauri::command]
+fn import_repositories(app: AppHandle, keys: Vec<String>, release_for: Vec<String>) -> Result<Vec<String>, String> {
+    let (site, project) = with_model(&app, |m| (m.site.clone(), m.config.project_dir.clone()));
+    let site = site.map_err(|e| format!("Website nicht lesbar: {e}"))?;
+    let mut added = Vec::new();
+    save_config(&app, |config| {
+        let candidates = repos::import_candidates(&site, &expand_home(&project), config);
+        added = repos::import(config, &candidates, &keys, &release_for);
+        Ok(())
+    })?;
+    refresh_status(&app, &added.iter().map(|r| r.to_lowercase()).collect::<Vec<_>>());
+    Ok(added)
+}
+
+// MARK: Content targets
+
+/// Saves a content target; an empty id makes a new one. Checked before it is stored.
+#[tauri::command]
+fn save_target(app: AppHandle, target: ContentTarget) -> Result<String, String> {
+    let mut target = target;
+    target.name = target.name.trim().to_owned();
+    target.repo = target.repo.trim().to_owned();
+    target.branch = target.branch.trim().to_owned();
+    target.paths = target.paths.iter().map(|p| p.trim().to_owned()).filter(|p| !p.is_empty()).collect();
+    target.sources.dedup();
+    if !target.id.is_empty() {
+        let id = target.id.clone();
+        if with_model(&app, |m| m.jobs.iter().any(|j| j.open() && j.options.targets.iter().any(|t| t.id == id))) {
+            return Err("Gehört zu einem offenen Auftrag; erst abschließen oder beenden".into());
+        }
+    }
+    let mut id = target.id.clone();
+    save_config(&app, |config| {
+        let managed: Vec<String> = config.repositories.iter().map(|r| r.key()).collect();
+        content::validate(&target, &managed)?;
+        if target.id.is_empty() {
+            let next = (1..).find(|n| !config.content_targets.iter().any(|t| t.id == format!("t{n}"))).expect("a free id");
+            target.id = format!("t{next}");
+            id = target.id.clone();
+            config.content_targets.push(target);
+        } else {
+            let slot = config.content_targets.iter_mut().find(|t| t.id == target.id).ok_or("Ziel nicht gefunden")?;
+            *slot = target;
+        }
+        Ok(())
+    })?;
+    Ok(id)
+}
+
+/// Removes a content target from the app; nothing in the repository or wiki changes.
+#[tauri::command]
+fn remove_target(app: AppHandle, id: String) -> Result<(), String> {
+    if with_model(&app, |m| m.jobs.iter().any(|j| j.open() && j.options.targets.iter().any(|t| t.id == id))) {
+        return Err("Gehört zu einem offenen Auftrag; erst abschließen oder beenden".into());
+    }
+    save_config(&app, |config| {
+        config.content_targets.retain(|t| t.id != id);
+        Ok(())
+    })
+}
+
+// MARK: Jobs
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JobInput {
+    repos: Vec<String>,
+    options: JobOptions,
+}
+
+/// Starts a care job for exactly these repositories and choices; its first pass begins at once.
+#[tauri::command]
+fn start_job(app: AppHandle, input: JobInput) -> Result<String, String> {
+    if (input.options.prs || input.options.cleanup || input.options.release) && github::token().is_none() {
         return Err("Für die Pflege die GitHub-CLI anmelden: gh auth login".into());
     }
-    let (site, config) = with_model(&app, |m| (m.site.clone(), m.config.clone()));
-    let all = repo_targets(&site, &config);
-    let mut targets: Vec<repos::RepoTarget> = Vec::new();
-    for key in keys {
-        let target = all.iter().find(|t| t.key == key).ok_or_else(|| format!("{key} gehört zu keinem Produkt mehr"))?;
-        if !targets.contains(target) {
-            targets.push(target.clone());
+    let mut created = String::new();
+    steps::start_with(&app, |m| {
+        let open: Vec<&Job> = m.jobs.iter().filter(|j| j.open()).collect();
+        if let Some(why) = jobs::overlap(&open, &input.repos, &input.options) {
+            return Err(why);
+        }
+        let scope = jobs::Scope { config: &m.config, website_sources: website_sources(&m.config, &m.site) };
+        let now = steps::now();
+        let job = jobs::make(&jobs::new_id(now, next_token()), now, &input.repos, &input.options, &scope)?;
+        jobs::save(&job).map_err(|e| format!("{e:#}"))?;
+        created = job.id.clone();
+        m.jobs.insert(0, job);
+        Ok(vec![Work::Job(created.clone())])
+    })?;
+    Ok(created)
+}
+
+/// Continues a job that is ready, waits or was interrupted.
+#[tauri::command]
+fn continue_job(app: AppHandle, id: String) -> Result<(), String> {
+    steps::start_with(&app, |m| {
+        let job = m.jobs.iter().find(|j| j.id == id).ok_or("Auftrag nicht gefunden")?;
+        if job.ended.is_some() {
+            return Err("Der Auftrag ist beendet".into());
+        }
+        Ok(vec![Work::Job(id.clone())])
+    })
+}
+
+/// Changes a job that is not running, stores it, and continues it when nothing else waits for a
+/// decision.
+fn decide(app: &AppHandle, id: &str, change: impl FnOnce(&mut Job, u64) -> Result<(), String>) -> Result<(), String> {
+    let go_on = with_model(app, |m| {
+        if m.job_running.as_deref() == Some(id) {
+            return Err("Der Auftrag läuft gerade".to_owned());
+        }
+        let job = m.jobs.iter_mut().find(|j| j.id == id).ok_or("Auftrag nicht gefunden")?;
+        let mut next = job.clone();
+        change(&mut next, steps::now())?;
+        jobs::save(&next).map_err(|e| format!("{e:#}"))?;
+        *job = next;
+        Ok(!job.steps.iter().any(|s| s.state == jobs::StepState::NeedsApproval) && job.next_runnable().is_some())
+    })?;
+    changed(app);
+    if go_on {
+        if let Err(e) = steps::start(app, vec![Work::Job(id.to_owned())]) {
+            with_model(app, |m| m.notice = Some(format!("Entscheidung gespeichert; fortgesetzt wird, sobald der laufende Schritt fertig ist ({e}).")));
+            changed(app);
         }
     }
-    steps::start(&app, vec![Job::ReposCheck(steps::RepoOptions { targets, merge, cleanup, model, project: config.project_dir })])
-}
-
-/// Care, second part: runs the preview with this id. Taking it and starting the run happen under
-/// one lock, so a double click cannot run it twice.
-#[tauri::command]
-fn run_repos(app: AppHandle, plan_id: u64) -> Result<(), String> {
-    steps::start_with(&app, |m| Ok(vec![Job::Repos(repocare::take_plan(&mut m.repo_plan, plan_id)?)]))
+    Ok(())
 }
 
 #[tauri::command]
-fn discard_repo_plan(app: AppHandle, plan_id: u64) {
+fn approve_plan(app: AppHandle, id: String, plan_id: u64, excluded: Vec<String>) -> Result<(), String> {
+    decide(&app, &id, |job, now| jobs::approve_plan(job, plan_id, &excluded, now))
+}
+
+#[tauri::command]
+fn reject_plan(app: AppHandle, id: String, plan_id: u64) -> Result<(), String> {
+    decide(&app, &id, |job, now| jobs::reject_plan(job, plan_id, now))
+}
+
+#[tauri::command]
+fn approve_step(app: AppHandle, id: String, step: String, fingerprint: String) -> Result<(), String> {
+    decide(&app, &id, |job, now| jobs::approve_step(job, &step, &fingerprint, now))
+}
+
+#[tauri::command]
+fn reject_step(app: AppHandle, id: String, step: String) -> Result<(), String> {
+    decide(&app, &id, |job, now| jobs::reject_step(job, &step, now))
+}
+
+#[tauri::command]
+fn redo_step(app: AppHandle, id: String, step: String) -> Result<(), String> {
+    decide(&app, &id, |job, now| jobs::redo_step(job, &step, now))
+}
+
+/// Ends a job: a running pass is cancelled (it ends the job itself), a waiting one is ended here.
+#[tauri::command]
+fn end_job(app: AppHandle, id: String) -> Result<(), String> {
+    let runner = with_model(&app, |m| if m.job_running.as_deref() == Some(id.as_str()) { m.runner.clone() } else { None });
+    if let Some(runner) = runner {
+        runner.cancel();
+        return Ok(());
+    }
     with_model(&app, |m| {
-        if m.repo_plan.as_ref().is_some_and(|set| set.id == plan_id) {
-            m.repo_plan = None;
-        }
-    });
+        let job = m.jobs.iter_mut().find(|j| j.id == id).ok_or("Auftrag nicht gefunden")?;
+        jobs::end(job, "von dir beendet", steps::now());
+        jobs::save(job).map_err(|e| format!("{e:#}"))?;
+        content::remove_work(&job.id);
+        Ok::<(), String>(())
+    })?;
     changed(&app);
+    Ok(())
+}
+
+/// Removes a finished job from the history, with its log and work folder.
+#[tauri::command]
+fn delete_job(app: AppHandle, id: String) -> Result<(), String> {
+    with_model(&app, |m| {
+        let job = m.jobs.iter().find(|j| j.id == id).ok_or("Auftrag nicht gefunden")?;
+        if job.open() {
+            return Err("Nur abgeschlossene oder beendete Aufträge lassen sich entfernen".to_owned());
+        }
+        jobs::remove(&id);
+        m.jobs.retain(|j| j.id != id);
+        Ok(())
+    })?;
+    changed(&app);
+    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JobView {
+    #[serde(flatten)]
+    job: Job,
+    status: jobs::Status,
+    running: bool,
+}
+
+/// A job with everything: plan, items, proposals with their diffs.
+#[tauri::command]
+fn get_job(app: AppHandle, id: String) -> Result<JobView, String> {
+    with_model(&app, |m| {
+        let running = m.job_running.as_deref() == Some(id.as_str());
+        let job = m.jobs.iter().find(|j| j.id == id).ok_or("Auftrag nicht gefunden")?;
+        Ok(JobView { status: job.status(running), running, job: job.clone() })
+    })
+}
+
+#[tauri::command]
+async fn get_job_log(id: String) -> Vec<LogLine> {
+    blocking(move || {
+        jobs::read_log(&id)
+            .into_iter()
+            .map(|e| LogLine { kind: log_kind(&e.kind), text: e.text })
+            .collect()
+    })
+    .await
+}
+
+fn log_kind(kind: &str) -> &'static str {
+    match kind {
+        "ok" => "ok",
+        "warn" => "warn",
+        "error" => "error",
+        "cmd" => "cmd",
+        "out" => "out",
+        "claude" => "claude",
+        _ => "info",
+    }
 }
 
 /// Precheck, then Update (only if something is outdated or there are instructions), Upload, Verify.
 #[tauri::command]
 fn run_all(app: AppHandle, instructions: String) -> Result<(), String> {
-    steps::start(&app, vec![Job::Precheck, Job::Update(instructions), Job::Upload, Job::Verify])
+    steps::start(&app, vec![Work::Precheck, Work::Update(instructions), Work::Upload, Work::Verify])
 }
 
 /// Claude adds a repository as a new product (runs in the Update slot, ends with a commit).
@@ -835,7 +1264,7 @@ fn run_add_product(app: AppHandle, input: NewProductInput) -> Result<(), String>
     if !github::is_repo_name(input.repo.trim()) {
         return Err("Repository im Format owner/name angeben".into());
     }
-    steps::start(&app, vec![Job::AddProduct(input)])
+    steps::start(&app, vec![Work::AddProduct(input)])
 }
 
 #[derive(Serialize)]
@@ -847,6 +1276,8 @@ struct RepoEntry {
     local_path: Option<String>,
     on_site: bool,
     is_website: bool,
+    /// Already in the managed list.
+    managed: bool,
 }
 
 #[derive(Serialize)]
@@ -858,8 +1289,8 @@ struct RepoList {
     note: Option<String>,
 }
 
-/// The user's GitHub repositories with their local clone and their role on the site.
-/// Without a gh login: the public repositories of the owners already on the site.
+/// The user's GitHub repositories with their local clone, whether the app manages them and their
+/// role on the website. Without a gh login: the public repositories of the owners already known.
 #[tauri::command]
 async fn list_repos(app: AppHandle) -> Result<RepoList, String> {
     let (site, config) = with_model(&app, |m| (m.site.clone().ok(), m.config.clone()));
@@ -870,11 +1301,15 @@ async fn list_repos(app: AppHandle) -> Result<RepoList, String> {
             Err(e) => {
                 let mut owners: Vec<String> = site
                     .iter()
-                    .flat_map(|s| s.products.iter())
-                    .filter_map(|p| p.repo.split('/').next().map(str::to_owned))
+                    .flat_map(|s| s.products.iter().map(|p| p.repo.clone()))
+                    .chain(config.repositories.iter().map(|r| r.repo.clone()))
+                    .filter_map(|repo| repo.split('/').next().map(str::to_owned))
                     .collect();
                 owners.sort();
                 owners.dedup();
+                if owners.is_empty() {
+                    return Err(format!("{e:#}"));
+                }
                 let mut repos = Vec::new();
                 for owner in &owners {
                     repos.extend(github::owner_repos(owner).map_err(|e| format!("{e:#}"))?);
@@ -892,6 +1327,7 @@ async fn list_repos(app: AppHandle) -> Result<RepoList, String> {
                     local_path: clones.remove(&key).map(|p| p.display().to_string()),
                     on_site: site.iter().flat_map(|s| s.products.iter()).any(|p| p.repo.eq_ignore_ascii_case(&info.full_name)),
                     is_website: website.as_ref().is_some_and(|w| w.eq_ignore_ascii_case(&info.full_name)),
+                    managed: config.repository(&key).is_some(),
                     info,
                 }
             })
@@ -930,7 +1366,7 @@ struct RepoCheck {
 #[tauri::command]
 async fn inspect_repo(app: AppHandle, repo: String) -> Result<RepoCheck, String> {
     let (site, workspace) = with_model(&app, |m| (m.site.clone(), m.config.workspace()));
-    let site = site?;
+    let site = site.map_err(|e| format!("Website nicht lesbar: {e}"))?;
     blocking(move || {
         let info = github::repo_info(repo.trim()).map_err(|e| format!("{e:#}"))?;
         let latest_tag = github::latest_release(&info.full_name).map_err(|e| format!("{e:#}"))?;
@@ -980,9 +1416,24 @@ fn main() {
             refresh_repos,
             cancel_repo_refresh,
             load_repo_details,
-            check_repos,
-            run_repos,
-            discard_repo_plan,
+            add_repositories,
+            update_repository,
+            remove_repository,
+            import_candidates,
+            import_repositories,
+            save_target,
+            remove_target,
+            start_job,
+            continue_job,
+            approve_plan,
+            reject_plan,
+            approve_step,
+            reject_step,
+            redo_step,
+            end_job,
+            delete_job,
+            get_job,
+            get_job_log,
             set_task,
             set_products,
             check_for_updates,

@@ -74,10 +74,66 @@ pub struct TaskChoice {
     pub model: String,
 }
 
+/// A repository the app looks after, independent of any website.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedRepo {
+    /// `owner/name` as GitHub reported it when it was added.
+    pub repo: String,
+    /// GitHub's id, so a rename does not make it a second repository.
+    #[serde(default)]
+    pub github_id: Option<u64>,
+    /// Turned off: stays listed and readable, but no care job takes it.
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// Local clone (absolute or `~/…`); empty = none. Status and pull request care work without one.
+    #[serde(default)]
+    pub local_path: String,
+    /// How the repository releases; `None` = no automatic tag (never guessed).
+    #[serde(default)]
+    pub release: Option<ReleaseRule>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl ManagedRepo {
+    pub fn new(repo: &str) -> Self {
+        Self { repo: repo.trim().to_owned(), github_id: None, enabled: true, local_path: String::new(), release: None }
+    }
+
+    /// The identity: `owner/name` in lower case.
+    pub fn key(&self) -> String {
+        self.repo.trim().to_lowercase()
+    }
+}
+
+/// The release line the app may continue: tags `<prefix>x.y.z`, the next patch only.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseRule {
+    /// `v` for `v1.2.0`, empty for `1.2.0`.
+    pub tag_prefix: String,
+    /// A workflow of the repository publishes a GitHub release for each tag; the app waits for it
+    /// before steps that need the release.
+    #[serde(default)]
+    pub publishes_release: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Config {
-    /// Local clone of the website repository (contains `.openreleasepilot/site.json`).
+    /// The repositories the app looks after; the basis of everything else.
+    pub repositories: Vec<ManagedRepo>,
+    /// README/documentation and wiki targets fed by those repositories.
+    pub content_targets: Vec<crate::content::ContentTarget>,
+    /// Claude model for reviews and content work without a choice in the job; empty = the
+    /// website's setting, else Claude Code's default.
+    pub claude_model: String,
+    /// Cost limit per Claude run of a care job; `None` = the website's setting, if any.
+    pub max_budget_usd: Option<f64>,
+    /// Local clone of the website repository (contains `.openreleasepilot/site.json`); optional.
     pub project_dir: String,
     /// Folder that holds the local clones (website and products); empty = the project's parent.
     pub workspace_dir: String,
@@ -93,6 +149,26 @@ pub struct Config {
 impl Config {
     pub fn product_enabled(&self, id: &str) -> bool {
         !self.skipped_products.contains(id)
+    }
+
+    /// The managed repository with this key (`owner/name`, any case).
+    pub fn repository(&self, key: &str) -> Option<&ManagedRepo> {
+        let key = key.trim().to_lowercase();
+        self.repositories.iter().find(|r| r.key() == key)
+    }
+
+    /// Adds a repository unless it is managed already (same `owner/name` or same GitHub id);
+    /// returns whether it was added. Never changes an existing entry.
+    pub fn add_repository(&mut self, repo: ManagedRepo) -> bool {
+        let known = self.repositories.iter().any(|r| r.key() == repo.key() || (repo.github_id.is_some() && r.github_id == repo.github_id));
+        if !known {
+            self.repositories.push(repo);
+        }
+        !known
+    }
+
+    pub fn content_target(&self, id: &str) -> Option<&crate::content::ContentTarget> {
+        self.content_targets.iter().find(|t| t.id == id)
     }
 
     /// Where clones are searched and created.
@@ -129,4 +205,28 @@ pub fn save(config: &Config) -> Result<()> {
     fs::write(&tmp, serde_json::to_vec_pretty(config)?).context("Einstellungen schreiben")?;
     fs::rename(&tmp, &file).context("Einstellungen speichern")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_repository_is_managed_once() {
+        let mut config = Config::default();
+        assert!(config.add_repository(ManagedRepo { github_id: Some(7), ..ManagedRepo::new("Owner/App") }));
+        assert!(!config.add_repository(ManagedRepo::new("owner/app")), "same name, other case");
+        assert!(!config.add_repository(ManagedRepo { github_id: Some(7), ..ManagedRepo::new("owner/renamed") }), "same GitHub id");
+        assert_eq!(config.repositories.len(), 1);
+        assert_eq!(config.repository("OWNER/APP").map(|r| r.repo.as_str()), Some("Owner/App"));
+    }
+
+    #[test]
+    fn older_settings_load_without_repositories() {
+        let config: Config = serde_json::from_str(r#"{"projectDir":"~/site","sftp":{"host":"h"}}"#).unwrap();
+        assert!(config.repositories.is_empty() && config.content_targets.is_empty());
+        assert_eq!(config.project_dir, "~/site");
+        let repo: ManagedRepo = serde_json::from_str(r#"{"repo":"o/a"}"#).unwrap();
+        assert!(repo.enabled && repo.release.is_none(), "no release rule is guessed");
+    }
 }

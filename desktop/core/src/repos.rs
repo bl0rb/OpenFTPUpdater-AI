@@ -1,14 +1,17 @@
-//! The Repositories area: the repositories of the site's products, what GitHub reports about them
-//! (read only, without Claude) and what follows from it: a health state with its reasons, and the
-//! care actions that are possible.
+//! The Repositories area: the repositories the app manages (its own list, independent of any
+//! website), what GitHub reports about them (read only, without Claude) and what follows from it:
+//! a health state with its reasons, and the care actions that are possible.
 //!
-//! A repository is identified by `owner/name`, case-insensitive; several products may share one and
-//! keep their own documented version and tag prefix. Facts carry when they were read and which part
-//! failed, so "0 PRs", "not asked" and "query failed" stay apart, and nothing old or incomplete ever
-//! reads as healthy. Nothing in this module writes: no GitHub write, no git command.
+//! A repository is identified by `owner/name`, case-insensitive (and GitHub's id where known). A
+//! website may name it in products of its site.json; those links are shown, but they neither add
+//! nor configure a repository. Facts carry when they were read and which part failed, so "0 PRs",
+//! "not asked" and "query failed" stay apart, and nothing old or incomplete ever reads as healthy.
+//! Nothing in this module writes: no GitHub write, no git command.
 
+use crate::config::{Config, ManagedRepo, ReleaseRule};
 use crate::github::{encode_ref, get, get_list, is_newer, Forbidden};
 use crate::localrepo;
+use crate::paths::expand_home;
 use crate::repocare::latest_release_tag;
 use crate::site::Site;
 use anyhow::{Context, Result};
@@ -24,7 +27,7 @@ pub const DETAIL_LIMIT: usize = 30;
 
 // MARK: Identity
 
-/// One product's view of its repository.
+/// A website product that names the repository.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProductLink {
@@ -32,23 +35,19 @@ pub struct ProductLink {
     pub name: String,
     pub documented: String,
     pub tag_prefix: String,
-    pub local_path: Option<String>,
-    /// Selected for Precheck and Update; the Repositories area shows it either way.
+    /// Selected for the website's Precheck and Update.
     pub enabled: bool,
 }
 
-/// The local clone named by the products' `localPath`.
+/// The local clone of a managed repository.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "camelCase")]
 pub enum LocalCopy {
-    /// No product names a `localPath`.
     NotConfigured,
     Found { path: String },
     Missing { path: String },
     /// The folder is not a clone of this repository.
     Foreign { path: String, origin: Option<String> },
-    /// The products name different folders.
-    Conflict { paths: Vec<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -56,26 +55,30 @@ pub enum LocalCopy {
 pub struct RepoTarget {
     /// `owner/name` in lower case: the identity.
     pub key: String,
-    /// `owner/name` as the first product writes it.
+    /// `owner/name` as it was added.
     pub repo: String,
+    pub github_id: Option<u64>,
+    /// Turned off: listed and readable, but no care job takes it.
+    pub enabled: bool,
+    /// Website products that name it; empty without a website.
     pub products: Vec<ProductLink>,
-    /// `None` when the products disagree; `tag_conflict` says how.
-    pub tag_prefix: Option<String>,
-    pub tag_conflict: Option<String>,
+    /// The release line the app may continue; `None` = no automatic tag.
+    pub release: Option<ReleaseRule>,
+    /// Where the configuration disagrees with itself, e.g. site.json and the release rule.
+    pub conflicts: Vec<String>,
     pub local: LocalCopy,
     /// It is also the website's own repository.
     pub website: bool,
 }
 
 impl RepoTarget {
-    /// At least one of its products is selected.
-    pub fn selected(&self) -> bool {
-        self.products.iter().any(|p| p.enabled)
+    /// The short name, e.g. `app` for `owner/app`.
+    pub fn name(&self) -> String {
+        self.repo.rsplit('/').next().unwrap_or(&self.repo).to_owned()
     }
 
-    /// The product names, e.g. `App, App Pro`.
-    pub fn name(&self) -> String {
-        self.products.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")
+    pub fn tag_prefix(&self) -> Option<&str> {
+        self.release.as_ref().map(|r| r.tag_prefix.as_str())
     }
 
     /// The clone, only if it exists and belongs to this repository.
@@ -86,79 +89,182 @@ impl RepoTarget {
         }
     }
 
-    /// What a preview depends on: a preview is not run once this changed.
+    /// What a plan depends on: a plan is not run once this changed.
     pub fn fingerprint(&self) -> String {
-        format!("{}|{:?}|{:?}", self.key, self.tag_prefix, self.local)
+        format!("{}|{}|{:?}|{:?}", self.key, self.enabled, self.release, self.local)
     }
 }
 
-/// The repositories of all products in site.json, each once, in the order of their first product.
-/// Turned-off products stay in: their selection only limits Precheck and Update.
-pub fn targets(site: &Site, project: &Path, skipped: &BTreeSet<String>, website: Option<&str>) -> Vec<RepoTarget> {
-    let mut targets: Vec<RepoTarget> = Vec::new();
-    for product in &site.products {
-        let repo = product.repo.trim();
-        if repo.is_empty() {
-            continue;
+/// The managed repositories in the order they were added, each with the website products that
+/// name it. `website`: `owner/name` of the website's own repository, if there is one.
+pub fn targets(config: &Config, site: Option<&Site>, website: Option<&str>) -> Vec<RepoTarget> {
+    config.repositories.iter().map(|managed| target(managed, config, site, website)).collect()
+}
+
+fn target(managed: &ManagedRepo, config: &Config, site: Option<&Site>, website: Option<&str>) -> RepoTarget {
+    let key = managed.key();
+    let products: Vec<ProductLink> = site
+        .into_iter()
+        .flat_map(|s| s.products.iter())
+        .filter(|p| p.repo.trim().eq_ignore_ascii_case(&key))
+        .map(|p| ProductLink {
+            id: p.id.clone(),
+            name: p.name.clone(),
+            documented: p.documented.clone(),
+            tag_prefix: p.tag_prefix.clone(),
+            enabled: config.product_enabled(&p.id),
+        })
+        .collect();
+    let mut conflicts = Vec::new();
+    if let Some(rule) = &managed.release {
+        for product in products.iter().filter(|p| p.tag_prefix != rule.tag_prefix) {
+            conflicts.push(format!(
+                "site.json nennt für {} das Tag-Präfix „{}“, die Release-Regel „{}“; es gilt die Release-Regel",
+                product.name, product.tag_prefix, rule.tag_prefix
+            ));
         }
-        let link = ProductLink {
-            id: product.id.clone(),
-            name: product.name.clone(),
-            documented: product.documented.clone(),
-            tag_prefix: product.tag_prefix.clone(),
-            local_path: product.local_path.clone().filter(|p| !p.trim().is_empty()),
-            enabled: !skipped.contains(&product.id),
+    }
+    RepoTarget {
+        website: website.is_some_and(|w| w.eq_ignore_ascii_case(&key)),
+        repo: managed.repo.trim().to_owned(),
+        github_id: managed.github_id,
+        enabled: managed.enabled,
+        release: managed.release.clone(),
+        local: local_copy(&managed.local_path, &managed.repo),
+        conflicts,
+        products,
+        key,
+    }
+}
+
+fn local_copy(path: &str, repo: &str) -> LocalCopy {
+    if path.trim().is_empty() {
+        return LocalCopy::NotConfigured;
+    }
+    let dir = expand_home(path.trim());
+    let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+    let path = dir.display().to_string();
+    if !dir.is_dir() {
+        return LocalCopy::Missing { path };
+    }
+    match localrepo::origin_repo(&dir) {
+        Some(origin) if origin.eq_ignore_ascii_case(repo) => LocalCopy::Found { path },
+        origin => LocalCopy::Foreign { path, origin },
+    }
+}
+
+/// A product repository of the website that can be taken over into the managed list.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportCandidate {
+    pub key: String,
+    pub repo: String,
+    /// The products that name it.
+    pub products: Vec<String>,
+    /// The tag prefix the products agree on; `None` when they disagree.
+    pub tag_prefix: Option<String>,
+    pub prefix_conflict: Option<String>,
+    /// Absolute path of the clone the products name, if it is one of this repository.
+    pub local_path: Option<String>,
+    /// Why the products' clone is not taken.
+    pub local_note: Option<String>,
+    /// Already managed: the import leaves it as it is.
+    pub managed: bool,
+    /// Where an already managed repository differs from site.json; shown, never overwritten.
+    pub differences: Vec<String>,
+}
+
+/// The product repositories of site.json, each once, compared with the managed list.
+pub fn import_candidates(site: &Site, project: &Path, config: &Config) -> Vec<ImportCandidate> {
+    let mut candidates: Vec<ImportCandidate> = Vec::new();
+    let mut paths: Vec<Vec<PathBuf>> = Vec::new();
+    let mut prefixes: Vec<BTreeSet<String>> = Vec::new();
+    for product in site.products.iter().filter(|p| !p.repo.trim().is_empty()) {
+        let key = product.repo.trim().to_lowercase();
+        let index = match candidates.iter().position(|c| c.key == key) {
+            Some(i) => i,
+            None => {
+                candidates.push(ImportCandidate {
+                    key: key.clone(),
+                    repo: product.repo.trim().to_owned(),
+                    products: Vec::new(),
+                    tag_prefix: None,
+                    prefix_conflict: None,
+                    local_path: None,
+                    local_note: None,
+                    managed: false,
+                    differences: Vec::new(),
+                });
+                paths.push(Vec::new());
+                prefixes.push(BTreeSet::new());
+                candidates.len() - 1
+            }
         };
-        let key = repo.to_lowercase();
-        match targets.iter_mut().find(|t| t.key == key) {
-            Some(target) => target.products.push(link),
-            None => targets.push(RepoTarget {
-                website: website.is_some_and(|w| w.eq_ignore_ascii_case(repo)),
-                key,
-                repo: repo.to_owned(),
-                products: vec![link],
-                tag_prefix: None,
-                tag_conflict: None,
-                local: LocalCopy::NotConfigured,
-            }),
+        candidates[index].products.push(product.name.clone());
+        prefixes[index].insert(product.tag_prefix.clone());
+        if let Some(path) = product.local_path.as_deref().filter(|p| !p.trim().is_empty()) {
+            let dir = project.join(path.trim());
+            let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+            if !paths[index].contains(&dir) {
+                paths[index].push(dir);
+            }
         }
     }
-    for target in &mut targets {
-        let prefixes: BTreeSet<&str> = target.products.iter().map(|p| p.tag_prefix.as_str()).collect();
-        if prefixes.len() == 1 {
-            target.tag_prefix = prefixes.into_iter().next().map(str::to_owned);
+    for (i, candidate) in candidates.iter_mut().enumerate() {
+        if prefixes[i].len() == 1 {
+            candidate.tag_prefix = prefixes[i].iter().next().cloned();
         } else {
-            let each: Vec<String> = target.products.iter().map(|p| format!("„{}“ ({})", p.tag_prefix, p.name)).collect();
-            target.tag_conflict = Some(format!("widersprüchliche tagPrefix: {}", each.join(", ")));
+            let each: Vec<String> = prefixes[i].iter().map(|p| format!("„{p}“")).collect();
+            candidate.prefix_conflict = Some(format!("die Produkte nennen verschiedene Tag-Präfixe: {}", each.join(", ")));
         }
-        target.local = local_copy(project, &target.repo, &target.products);
+        match paths[i].as_slice() {
+            [] => {}
+            [dir] => match local_copy(&dir.display().to_string(), &candidate.repo) {
+                LocalCopy::Found { path } => candidate.local_path = Some(path),
+                LocalCopy::Missing { path } => candidate.local_note = Some(format!("lokale Kopie fehlt: {path}")),
+                LocalCopy::Foreign { path, .. } => candidate.local_note = Some(format!("{path} ist keine Kopie dieses Repositorys")),
+                LocalCopy::NotConfigured => {}
+            },
+            many => {
+                let list: Vec<String> = many.iter().map(|d| d.display().to_string()).collect();
+                candidate.local_note = Some(format!("die Produkte nennen verschiedene lokale Kopien: {}", list.join(", ")));
+            }
+        }
+        if let Some(managed) = config.repository(&candidate.key) {
+            candidate.managed = true;
+            let rule = managed.release.as_ref().map(|r| r.tag_prefix.as_str());
+            if let (Some(rule), Some(prefix)) = (rule, &candidate.tag_prefix) {
+                if rule != prefix {
+                    candidate.differences.push(format!("Release-Regel „{rule}“, site.json „{prefix}“"));
+                }
+            }
+            if let Some(path) = &candidate.local_path {
+                let current = std::fs::canonicalize(expand_home(managed.local_path.trim())).ok();
+                if current.as_deref() != Some(Path::new(path)) {
+                    candidate.differences.push(format!("lokale Kopie: verwaltet „{}“, site.json {path}", managed.local_path));
+                }
+            }
+        }
     }
-    targets
+    candidates
 }
 
-fn local_copy(project: &Path, repo: &str, products: &[ProductLink]) -> LocalCopy {
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    for path in products.iter().filter_map(|p| p.local_path.as_deref()) {
-        let dir = project.join(path.trim());
-        let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
-        if !dirs.contains(&dir) {
-            dirs.push(dir);
+/// Adds the chosen candidates that are not managed yet; a release rule only where the user asked
+/// for it and the products agree on the prefix. Returns the repositories added. Repeating the
+/// import adds nothing twice and changes nothing that is already managed.
+pub fn import(config: &mut Config, candidates: &[ImportCandidate], keys: &[String], release_for: &[String]) -> Vec<String> {
+    let mut added = Vec::new();
+    for candidate in candidates.iter().filter(|c| keys.contains(&c.key)) {
+        let release = match &candidate.tag_prefix {
+            Some(prefix) if release_for.contains(&candidate.key) => Some(ReleaseRule { tag_prefix: prefix.clone(), publishes_release: false }),
+            _ => None,
+        };
+        let repo = ManagedRepo { local_path: candidate.local_path.clone().unwrap_or_default(), release, ..ManagedRepo::new(&candidate.repo) };
+        if config.add_repository(repo) {
+            added.push(candidate.repo.clone());
         }
     }
-    match dirs.as_slice() {
-        [] => LocalCopy::NotConfigured,
-        [dir] => {
-            let path = dir.display().to_string();
-            if !dir.is_dir() {
-                return LocalCopy::Missing { path };
-            }
-            match localrepo::origin_repo(dir) {
-                Some(origin) if origin.eq_ignore_ascii_case(repo) => LocalCopy::Found { path },
-                origin => LocalCopy::Foreign { path, origin },
-            }
-        }
-        _ => LocalCopy::Conflict { paths: dirs.iter().map(|d| d.display().to_string()).collect() },
-    }
+    added
 }
 
 // MARK: Facts
@@ -389,10 +495,10 @@ pub fn fetch_facts(target: &RepoTarget, now: u64) -> Facts {
     };
     facts.prs = Fetch::from(open_prs(repo, &access.default_branch));
     facts.release = Fetch::from(crate::github::latest_release(repo));
-    facts.tag = match (&facts.release, &target.tag_prefix) {
+    facts.tag = match (&facts.release, target.tag_prefix()) {
         (Fetch::Ok(Some(_)), _) => Fetch::NotQueried("es gibt ein veröffentlichtes Release".into()),
         (Fetch::Ok(None), Some(prefix)) => Fetch::from(stable_tag(repo, prefix)),
-        (Fetch::Ok(None), None) => Fetch::NotQueried(target.tag_conflict.clone().unwrap_or_default()),
+        (Fetch::Ok(None), None) => Fetch::NotQueried("keine Release-Regel, also kein Tag-Präfix".into()),
         _ => Fetch::NotQueried("Release-Abfrage fehlgeschlagen".into()),
     };
     let base = match (&facts.release, &facts.tag) {
@@ -551,17 +657,17 @@ pub struct Health {
 pub fn health(target: &RepoTarget, facts: Option<&Facts>, details: Option<&Details>, now: u64) -> Health {
     let (mut blockers, mut attention, mut gaps, mut notes) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     match &target.local {
-        LocalCopy::NotConfigured => notes.push("keine lokale Kopie eingetragen (localPath)".to_owned()),
+        LocalCopy::NotConfigured => notes.push("keine lokale Kopie eingetragen".to_owned()),
         LocalCopy::Found { .. } => {}
         LocalCopy::Missing { path } => notes.push(format!("lokale Kopie fehlt: {path}")),
         LocalCopy::Foreign { path, origin } => {
             notes.push(format!("{path} ist keine Kopie dieses Repositorys ({})", origin.as_deref().unwrap_or("ohne GitHub-origin")))
         }
-        LocalCopy::Conflict { .. } => notes.push("Produkte nennen verschiedene lokale Kopien".to_owned()),
     }
-    if let Some(conflict) = &target.tag_conflict {
-        notes.push(conflict.clone());
+    if !target.enabled {
+        notes.push("deaktiviert: wird gelesen, aber nicht gepflegt".to_owned());
     }
+    notes.extend(target.conflicts.iter().cloned());
     let Some(facts) = facts else {
         gaps.insert(0, "noch nicht geprüft".to_owned());
         return Health { state: HealthState::Unknown, reasons: Vec::new(), gaps, notes, stale: false };
@@ -667,8 +773,9 @@ pub fn health(target: &RepoTarget, facts: Option<&Facts>, details: Option<&Detai
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Capabilities {
-    /// Preview and run.
+    /// Care jobs at all.
     pub care: Option<String>,
+    /// Release (patch tag).
     pub tag: Option<String>,
     /// Local branches.
     pub local: Option<String>,
@@ -676,7 +783,9 @@ pub struct Capabilities {
 
 /// `signed_in`: whether gh is signed in, `None` while unknown (the care check asks again).
 pub fn capabilities(target: &RepoTarget, facts: Option<&Facts>, signed_in: Option<bool>) -> Capabilities {
-    let care = if signed_in == Some(false) {
+    let care = if !target.enabled {
+        Some("deaktiviert".to_owned())
+    } else if signed_in == Some(false) {
         Some("GitHub-CLI nicht angemeldet (gh auth login)".to_owned())
     } else {
         match facts {
@@ -693,7 +802,8 @@ pub fn capabilities(target: &RepoTarget, facts: Option<&Facts>, signed_in: Optio
         LocalCopy::NotConfigured => Some("keine lokale Kopie eingetragen".to_owned()),
         other => local_problem(other),
     };
-    Capabilities { care, tag: target.tag_conflict.clone(), local }
+    let tag = target.release.is_none().then(|| "keine Release-Regel eingerichtet".to_owned());
+    Capabilities { care, tag, local }
 }
 
 /// Why a configured local clone cannot be used; `None` when it can (or none is configured).
@@ -702,7 +812,6 @@ pub fn local_problem(local: &LocalCopy) -> Option<String> {
         LocalCopy::Found { .. } | LocalCopy::NotConfigured => None,
         LocalCopy::Missing { path } => Some(format!("lokale Kopie fehlt: {path}")),
         LocalCopy::Foreign { path, .. } => Some(format!("{path} gehört nicht zu diesem Repository")),
-        LocalCopy::Conflict { paths } => Some(format!("widersprüchliche lokale Kopien: {}", paths.join(", "))),
     }
 }
 
@@ -724,37 +833,68 @@ mod tests {
         json!({ "id": id, "name": id.to_uppercase(), "repo": repo, "tagPrefix": prefix, "documented": "1.0.0" })
     }
 
+    fn managed(repos: &[&str]) -> Config {
+        let mut config = Config::default();
+        for repo in repos {
+            config.add_repository(ManagedRepo::new(repo));
+        }
+        config
+    }
+
+    /// A managed repository with release rule (no prefix), named by one product of a website.
     fn target(repo: &str) -> RepoTarget {
-        targets(&site(json!([product("a", repo, "")])), Path::new("/nowhere"), &BTreeSet::new(), None).remove(0)
+        let mut config = managed(&[repo]);
+        config.repositories[0].release = Some(ReleaseRule { tag_prefix: String::new(), publishes_release: false });
+        targets(&config, Some(&site(json!([product("a", repo, "")]))), None).remove(0)
     }
 
     #[test]
-    fn one_repository_per_identity_with_all_its_products() {
+    fn the_managed_list_is_the_basis_and_a_website_only_adds_links() {
         let site = site(json!([product("a", "Owner/App", "v"), product("b", "owner/app", "v"), product("c", "owner/other", "")]));
-        let skipped = BTreeSet::from(["b".to_owned(), "c".to_owned()]);
-        let targets = targets(&site, Path::new("/nowhere"), &skipped, Some("OWNER/OTHER"));
-        assert_eq!(targets.len(), 2, "case does not make a second repository");
-        assert_eq!(targets[0].repo, "Owner/App");
-        assert_eq!(targets[0].products.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["a", "b"]);
-        assert!(targets[0].selected());
-        assert!(!targets[1].selected(), "turned off, but still listed");
-        assert!(targets[1].website);
-        assert_eq!(targets[0].tag_prefix.as_deref(), Some("v"));
+        let mut config = managed(&["owner/app", "owner/tool"]);
+        config.skipped_products.insert("b".into());
+        config.repositories[0].release = Some(ReleaseRule { tag_prefix: "".into(), publishes_release: false });
+        let list = targets(&config, Some(&site), Some("OWNER/TOOL"));
+        assert_eq!(list.len(), 2, "only managed repositories; owner/other is a product, not managed");
+        assert_eq!(list[0].products.iter().map(|p| (p.id.as_str(), p.enabled)).collect::<Vec<_>>(), [("a", true), ("b", false)]);
+        assert_eq!(list[0].conflicts.len(), 2, "site.json and the release rule disagree, visibly");
+        assert_eq!(list[0].tag_prefix(), Some(""), "the release rule counts");
+        assert!(list[1].products.is_empty() && list[1].website);
+        assert!(targets(&config, None, None).iter().all(|t| t.products.is_empty()), "works without a website");
+        let caps = capabilities(&list[1], None, Some(true));
+        assert!(caps.tag.is_some() && caps.care.is_none(), "no release rule, no tag; care still possible");
+        config.repositories[1].enabled = false;
+        assert_eq!(capabilities(&targets(&config, None, None)[1], None, Some(true)).care.as_deref(), Some("deaktiviert"));
     }
 
     #[test]
-    fn conflicting_configuration_is_not_guessed() {
+    fn importing_from_a_website_is_repeatable_and_overwrites_nothing() {
         let mut a = product("a", "o/app", "v");
         a["localPath"] = json!("../one");
         let mut b = product("b", "o/app", "");
         b["localPath"] = json!("../two");
-        let target = targets(&site(json!([a, b])), Path::new("/nowhere/site"), &BTreeSet::new(), None).remove(0);
-        assert_eq!(target.tag_prefix, None);
-        assert!(target.tag_conflict.as_deref().unwrap().contains("„v“ (A)"));
-        assert!(matches!(target.local, LocalCopy::Conflict { .. }));
-        assert_eq!(target.clone_dir(), None);
-        let caps = capabilities(&target, None, Some(true));
-        assert!(caps.tag.is_some() && caps.local.is_some() && caps.care.is_none());
+        let site = site(json!([a, b, product("c", "o/lib", "v"), product("d", "O/Lib", "v")]));
+        let mut config = Config::default();
+        let candidates = import_candidates(&site, Path::new("/nowhere/site"), &config);
+        assert_eq!(candidates.len(), 2);
+        let app = &candidates[0];
+        assert!(app.tag_prefix.is_none() && app.prefix_conflict.is_some(), "no prefix is guessed");
+        assert!(app.local_note.as_deref().unwrap().contains("verschiedene lokale Kopien"));
+        assert_eq!(candidates[1].products, ["C", "D"]);
+        assert_eq!(candidates[1].tag_prefix.as_deref(), Some("v"));
+
+        let keys = vec!["o/app".to_owned(), "o/lib".to_owned()];
+        let added = import(&mut config, &candidates, &keys, &keys);
+        assert_eq!(added, ["o/app", "o/lib"]);
+        assert_eq!(config.repositories[0].release, None, "conflicting prefixes: no release rule");
+        assert_eq!(config.repositories[1].release.as_ref().map(|r| r.tag_prefix.as_str()), Some("v"));
+
+        config.repositories[1].release = Some(ReleaseRule { tag_prefix: "".into(), publishes_release: true });
+        let again = import_candidates(&site, Path::new("/nowhere/site"), &config);
+        assert!(again.iter().all(|c| c.managed));
+        assert_eq!(again[1].differences.len(), 1, "{:?}", again[1].differences);
+        assert!(import(&mut config, &again, &keys, &keys).is_empty(), "nothing twice");
+        assert_eq!(config.repositories[1].release.as_ref().map(|r| r.tag_prefix.as_str()), Some(""), "nothing overwritten");
     }
 
     fn runs(list: Value) -> Value {

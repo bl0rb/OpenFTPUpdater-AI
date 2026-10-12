@@ -140,6 +140,8 @@ pub fn latest_release(repo: &str) -> Result<Option<String>> {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepoInfo {
+    /// GitHub's id; stays the same when the repository is renamed.
+    pub id: u64,
     /// `owner/name`
     pub full_name: String,
     pub name: String,
@@ -155,6 +157,7 @@ pub struct RepoInfo {
 impl RepoInfo {
     fn from_json(json: &serde_json::Value) -> Option<Self> {
         Some(Self {
+            id: json["id"].as_u64()?,
             full_name: json["full_name"].as_str()?.to_owned(),
             name: json["name"].as_str()?.to_owned(),
             description: json["description"].as_str().filter(|d| !d.trim().is_empty()).map(str::to_owned),

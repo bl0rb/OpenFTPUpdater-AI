@@ -1,7 +1,7 @@
-//! The four steps and the repository care. Each runs on its own thread, writes log lines as it goes
-//! and ends with a status and a one-line summary.
+//! The website's four steps and the passes of care jobs (see `jobrun`). Each runs on its own
+//! thread, writes log lines as it goes and ends with a status and a one-line summary.
 
-use crate::{changed, load_site, with_model, Check, ClaudeRun, ItemOutcome, LogLine, Model, RepoItem, RepoReport, Status, Step, UploadResult};
+use crate::{changed, load_site, with_model, Check, ClaudeRun, LogLine, Model, Status, Step, UploadResult};
 use anyhow::{anyhow, bail, Context, Result};
 use openreleasepilot_core::claude::{self, Event, Outdated, ProductRelease, ReleaseCheck};
 use openreleasepilot_core::config::{AuthKind, Config};
@@ -9,8 +9,7 @@ use openreleasepilot_core::paths::expand_home;
 use openreleasepilot_core::sftp::{self, ConnectError, Connection};
 use openreleasepilot_core::shell::{self, Runner};
 use openreleasepilot_core::site::{Site, Task};
-use openreleasepilot_core::repocare::{self, Done};
-use openreleasepilot_core::{git, github, localrepo, manifest, repos, secrets, verify};
+use openreleasepilot_core::{git, github, jobs, localrepo, manifest, secrets, verify};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -53,15 +52,22 @@ fn strip_ansi(text: &str) -> String {
 }
 
 pub struct Ctx {
-    app: AppHandle,
+    pub(crate) app: AppHandle,
     step: Step,
-    runner: Arc<Runner>,
+    pub(crate) runner: Arc<Runner>,
+    /// The care job this pass belongs to; its lines go to the job's own log.
+    pub(crate) job: Option<String>,
 }
 
 impl Ctx {
-    fn log(&self, kind: &'static str, text: impl Into<String>) {
+    pub(crate) fn log(&self, kind: &'static str, text: impl Into<String>) {
         let text = strip_ansi(&text.into());
         let line = LogLine { kind, text };
+        if let Some(job) = &self.job {
+            let _ = jobs::append_log(job, &jobs::LogEntry { kind: kind.to_owned(), text: line.text.clone() });
+            let _ = self.app.emit("log", serde_json::json!({ "step": self.step, "job": job, "line": line }));
+            return;
+        }
         with_model(&self.app, |m| {
             if let Some(state) = m.steps.get_mut(&self.step) {
                 if state.log.len() >= MAX_LOG_LINES {
@@ -72,27 +78,27 @@ impl Ctx {
         });
         let _ = self.app.emit("log", serde_json::json!({ "step": self.step, "line": line }));
     }
-    fn info(&self, text: impl Into<String>) {
+    pub(crate) fn info(&self, text: impl Into<String>) {
         self.log("info", text)
     }
-    fn ok(&self, text: impl Into<String>) {
+    pub(crate) fn ok(&self, text: impl Into<String>) {
         self.log("ok", text)
     }
-    fn warn(&self, text: impl Into<String>) {
+    pub(crate) fn warn(&self, text: impl Into<String>) {
         self.log("warn", text)
     }
-    fn cmd(&self, text: impl Into<String>) {
+    pub(crate) fn cmd(&self, text: impl Into<String>) {
         self.log("cmd", text)
     }
 
-    fn config(&self) -> Config {
+    pub(crate) fn config(&self) -> Config {
         with_model(&self.app, |m| m.config.clone())
     }
 
-    fn project(&self) -> Result<PathBuf> {
+    pub(crate) fn project(&self) -> Result<PathBuf> {
         let dir = self.config().project_dir;
         if dir.trim().is_empty() {
-            bail!("Kein Projektordner eingerichtet");
+            bail!("Keine Website eingerichtet (Projektordner fehlt)");
         }
         let path = expand_home(&dir);
         if !path.is_dir() {
@@ -102,7 +108,7 @@ impl Ctx {
     }
 
     /// Reloads site.json, so edits (e.g. a raised `documented`) are always current.
-    fn site(&self) -> Result<Site> {
+    pub(crate) fn site(&self) -> Result<Site> {
         let config = self.config();
         let site = load_site(&config);
         with_model(&self.app, |m| m.site = site.clone());
@@ -111,26 +117,24 @@ impl Ctx {
 }
 
 /// One unit of work; each shows up in the slot of its step.
-pub enum Job {
+pub enum Work {
     Precheck,
     Update(String),
     Upload,
     Verify,
     AddProduct(NewProductInput),
-    /// Repository care: the preview, with Claude's review.
-    ReposCheck(RepoOptions),
-    /// Repository care: a confirmed preview.
-    Repos(repocare::PlanSet),
+    /// One pass of a care job: runs until it needs a decision, waits or is finished.
+    Job(String),
 }
 
-impl Job {
+impl Work {
     fn step(&self) -> Step {
         match self {
-            Job::Precheck => Step::Precheck,
-            Job::Update(_) | Job::AddProduct(_) => Step::Update,
-            Job::Upload => Step::Upload,
-            Job::Verify => Step::Verify,
-            Job::ReposCheck(_) | Job::Repos(_) => Step::Repos,
+            Work::Precheck => Step::Precheck,
+            Work::Update(_) | Work::AddProduct(_) => Step::Update,
+            Work::Upload => Step::Upload,
+            Work::Verify => Step::Verify,
+            Work::Job(_) => Step::Jobs,
         }
     }
 }
@@ -237,36 +241,43 @@ fn busy(runner: Option<&Arc<Runner>>, running: Option<Step>) -> bool {
     runner.is_some() || running.is_some()
 }
 
-/// Runs the jobs one after another on a background thread; stops at the first error.
-pub fn start(app: &AppHandle, jobs: Vec<Job>) -> Result<(), String> {
-    start_with(app, |_| Ok(jobs))
+/// Runs the work one after another on a background thread; stops at the first error.
+pub fn start(app: &AppHandle, work: Vec<Work>) -> Result<(), String> {
+    start_with(app, |_| Ok(work))
 }
 
-/// Like `start`, but `jobs` builds the jobs under the same lock that marks the app busy: taking a
-/// preview and starting its run happen together, so a second click finds the app busy.
-pub fn start_with(app: &AppHandle, jobs: impl FnOnce(&mut Model) -> Result<Vec<Job>, String>) -> Result<(), String> {
+/// Like `start`, but `work` is built under the same lock that marks the app busy: checking a job's
+/// state and starting its pass happen together, so a second click finds the app busy.
+pub fn start_with(app: &AppHandle, work: impl FnOnce(&mut Model) -> Result<Vec<Work>, String>) -> Result<(), String> {
     let runner = Arc::new(Runner::default());
-    let jobs = with_model(app, |m| {
+    let work = with_model(app, |m| {
         if busy(m.runner.as_ref(), m.running) {
-            return Err("Es läuft bereits ein Schritt.".to_owned());
+            return Err("Es läuft bereits ein Schritt oder Auftrag.".to_owned());
         }
-        let jobs = jobs(m)?;
+        let work = work(m)?;
         m.runner = Some(runner.clone());
         m.error = None;
         m.notice = None;
-        Ok(jobs)
+        if let Some(Work::Job(id)) = work.first() {
+            m.job_running = Some(id.clone());
+        }
+        Ok(work)
     })?;
     let app = app.clone();
     std::thread::spawn(move || {
-        let all = jobs.len() > 1;
-        for job in jobs {
-            if let (true, Job::Update(instructions)) = (all, &job) {
+        let all = work.len() > 1;
+        for unit in work {
+            if let (true, Work::Update(instructions)) = (all, &unit) {
                 if with_model(&app, |m| ReleaseCheck::nothing_to_do(m.outdated.as_ref(), instructions)) {
                     continue;
                 }
             }
-            let step = job.step();
-            let ctx = Ctx { app: app.clone(), step, runner: runner.clone() };
+            let step = unit.step();
+            let job = match &unit {
+                Work::Job(id) => Some(id.clone()),
+                _ => None,
+            };
+            let ctx = Ctx { app: app.clone(), step, runner: runner.clone(), job };
             with_model(&app, |m| {
                 m.running = Some(step);
                 let state = m.steps.entry(step).or_default();
@@ -280,23 +291,17 @@ pub fn start_with(app: &AppHandle, jobs: impl FnOnce(&mut Model) -> Result<Vec<J
                     Step::Update => m.claude_runs.clear(),
                     Step::Upload => m.upload = None,
                     Step::Verify => m.verify = None,
-                    Step::Repos => {
-                        m.repo_reports.clear();
-                        if matches!(job, Job::ReposCheck(_)) {
-                            m.repo_plan = None;
-                        }
-                    }
+                    Step::Jobs => {}
                 }
             });
             changed(&app);
-            let result = match &job {
-                Job::Precheck => precheck(&ctx),
-                Job::Update(instructions) => update(&ctx, instructions),
-                Job::Upload => upload(&ctx),
-                Job::Verify => verify(&ctx),
-                Job::AddProduct(input) => add_product(&ctx, input),
-                Job::ReposCheck(options) => repos_check(&ctx, options),
-                Job::Repos(set) => repos_run(&ctx, set),
+            let result = match &unit {
+                Work::Precheck => precheck(&ctx),
+                Work::Update(instructions) => update(&ctx, instructions),
+                Work::Upload => upload(&ctx),
+                Work::Verify => verify(&ctx),
+                Work::AddProduct(input) => add_product(&ctx, input),
+                Work::Job(id) => crate::jobrun::pass(&ctx, id),
             };
             let (status, summary) = match result {
                 Ok(done) => done,
@@ -326,6 +331,7 @@ pub fn start_with(app: &AppHandle, jobs: impl FnOnce(&mut Model) -> Result<Vec<J
         with_model(&app, |m| {
             m.running = None;
             m.runner = None;
+            m.job_running = None;
         });
         changed(&app);
     });
@@ -381,12 +387,12 @@ fn connect(ctx: &Ctx) -> Result<Connection> {
     }
 }
 
-/// Looks up the newest release of every selected product; products the user turned off are skipped.
-/// A failed lookup lands in `unknown`, never among the current ones.
-fn find_outdated(ctx: &Ctx, site: &Site, mut on_check: impl FnMut(Check)) -> ReleaseCheck {
+/// Looks up the newest release of every selected product in scope; products the user turned off
+/// are skipped. A failed lookup lands in `unknown`, never among the current ones.
+fn find_outdated(ctx: &Ctx, site: &Site, in_scope: &dyn Fn(&openreleasepilot_core::site::Product) -> bool, mut on_check: impl FnMut(Check)) -> ReleaseCheck {
     let config = ctx.config();
     let mut check = ReleaseCheck::default();
-    for product in &site.products {
+    for product in site.products.iter().filter(|p| in_scope(p)) {
         let label = format!("Release {}", product.name);
         if !config.product_enabled(&product.id) {
             ctx.info(format!("{}: nicht ausgewählt, übersprungen", product.name));
@@ -493,7 +499,7 @@ fn precheck(ctx: &Ctx) -> Result<(Status, String)> {
     publish(&checks);
     ctx.runner.check()?;
 
-    let release_check = find_outdated(ctx, &site, |check| checks.push(check));
+    let release_check = find_outdated(ctx, &site, &|_| true, |check| checks.push(check));
     with_model(&ctx.app, |m| m.outdated = Some(release_check.clone()));
     publish(&checks);
     ctx.runner.check()?;
@@ -561,7 +567,7 @@ fn precheck(ctx: &Ctx) -> Result<(Status, String)> {
 
 /// Update and Upload need a clean working tree. Lists what is dirty in the log with the commands to
 /// look at it, keep it or put it aside; the error names the files and the recommendation.
-fn dirty_tree(ctx: &Ctx, project: &std::path::Path, changes: &[String], step: &str, why: &str) -> anyhow::Error {
+pub(crate) fn dirty_tree(ctx: &Ctx, project: &std::path::Path, changes: &[String], step: &str, why: &str) -> anyhow::Error {
     // `git status --porcelain`: two status letters, a space, the path.
     let entries: Vec<(&str, &str)> = changes.iter().map(|line| (line.get(..2).unwrap_or(""), line.get(3..).unwrap_or(line))).collect();
     let untracked_only = entries.iter().all(|(code, _)| *code == "??");
@@ -619,7 +625,7 @@ fn prepare_tree(ctx: &Ctx, project: &std::path::Path) -> Result<()> {
 /// Brings Claude Code up to date before it runs, at most every six hours: aliases like `opus` or
 /// `fable` point to the newest model only in a current CLI, and one that only ever runs headless
 /// (as here) does not update itself. A failed update only warns.
-fn update_claude(ctx: &Ctx, dir: &std::path::Path) -> Result<()> {
+pub(crate) fn update_claude(ctx: &Ctx, dir: &std::path::Path) -> Result<()> {
     static LAST: Mutex<Option<Instant>> = Mutex::new(None);
     let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
     if last.is_some_and(|at| at.elapsed() < Duration::from_secs(6 * 3600)) {
@@ -703,24 +709,51 @@ fn build_and_commit(ctx: &Ctx, site: &Site, project: &std::path::Path, subject: 
 }
 
 fn update(ctx: &Ctx, instructions: &str) -> Result<(Status, String)> {
+    let result = update_site(ctx, instructions, None)?;
+    match result.commit {
+        Some((sha, files)) => Ok((Status::Ok, format!("Commit {sha}: {files} Dateien geändert"))),
+        None if result.nothing => Ok((Status::Ok, result.summary)),
+        None => Ok((Status::Warning, result.summary)),
+    }
+}
+
+/// What a website update did.
+pub struct SiteUpdate {
+    /// The local commit and the number of files, if anything changed.
+    pub commit: Option<(String, usize)>,
+    /// Nothing outdated and no instruction: Claude did not run.
+    pub nothing: bool,
+    pub summary: String,
+    /// e.g. `App 1.2.0 → 1.3.0`.
+    pub products: Vec<String>,
+}
+
+/// The website's Update: Claude runs the selected tasks, then build and a local commit. `only`
+/// limits it to products from these repositories (a care job); the website's product selection
+/// applies either way.
+pub fn update_site(ctx: &Ctx, instructions: &str, only: Option<&[String]>) -> Result<SiteUpdate> {
     let project = ctx.project()?;
     let site = ctx.site()?;
     prepare_tree(ctx, &project)?;
 
     ctx.info("Neueste Releases abfragen …");
-    let release_check = find_outdated(ctx, &site, |_| {});
-    with_model(&ctx.app, |m| m.outdated = Some(release_check.clone()));
+    let in_scope = |p: &openreleasepilot_core::site::Product| only.is_none_or(|keys| keys.contains(&p.repo.trim().to_lowercase()));
+    let release_check = find_outdated(ctx, &site, &in_scope, |_| {});
+    if only.is_none() {
+        with_model(&ctx.app, |m| m.outdated = Some(release_check.clone()));
+    }
     require_complete(&release_check)?;
     let outdated = release_check.outdated;
     let config = ctx.config();
-    let skipped: Vec<String> = site.products.iter().filter(|p| !config.product_enabled(&p.id)).map(|p| p.name.clone()).collect();
+    let skipped: Vec<String> = site.products.iter().filter(|p| !config.product_enabled(&p.id) || !in_scope(p)).map(|p| p.name.clone()).collect();
+    let products: Vec<String> = outdated.iter().map(|o| format!("{} {} → {}", o.name, o.documented, o.latest_version())).collect();
     if outdated.is_empty() && instructions.trim().is_empty() {
         let what = if skipped.is_empty() { "alle Produkte" } else { "alle ausgewählten Produkte" };
-        return Ok((Status::Ok, format!("Nichts zu tun: {what} aktuell")));
+        return Ok(SiteUpdate { commit: None, nothing: true, summary: format!("Nichts zu tun: {what} aktuell"), products });
     }
     let tasks: Vec<ResolvedTask> = resolve_tasks(&site, &config).into_iter().filter(|t| t.enabled).collect();
     if tasks.is_empty() {
-        bail!("Keine Aufgabe ausgewählt");
+        bail!("Keine Website-Aufgabe ausgewählt");
     }
 
     let mut summaries = Vec::new();
@@ -740,12 +773,13 @@ fn update(ctx: &Ctx, instructions: &str) -> Result<(Status, String)> {
             outdated.iter().map(|o| format!("{} {}", o.name, o.latest_version())).collect::<Vec<_>>().join(", ")
         )
     };
-    match build_and_commit(ctx, &site, &project, &subject, &summaries.join("\n\n"))? {
-        Some((sha, files)) => {
+    let summary = summaries.join("\n\n");
+    match build_and_commit(ctx, &site, &project, &subject, &summary)? {
+        Some(commit) => {
             with_model(&ctx.app, |m| m.outdated = None);
-            Ok((Status::Ok, format!("Commit {sha}: {files} Dateien geändert")))
+            Ok(SiteUpdate { commit: Some(commit), nothing: false, summary, products })
         }
-        None => Ok((Status::Warning, "Claude hat keine Dateien geändert".into())),
+        None => Ok(SiteUpdate { commit: None, nothing: false, summary: "Claude hat keine Dateien geändert".into(), products }),
     }
 }
 
@@ -816,7 +850,7 @@ fn add_product(ctx: &Ctx, input: &NewProductInput) -> Result<(Status, String)> {
 
 // MARK: Upload
 
-fn upload(ctx: &Ctx) -> Result<(Status, String)> {
+pub(crate) fn upload(ctx: &Ctx) -> Result<(Status, String)> {
     let project = ctx.project()?;
     let site = ctx.site()?;
     let config = ctx.config();
@@ -897,7 +931,7 @@ fn upload(ctx: &Ctx) -> Result<(Status, String)> {
 
 // MARK: Verify
 
-fn verify(ctx: &Ctx) -> Result<(Status, String)> {
+pub(crate) fn verify(ctx: &Ctx) -> Result<(Status, String)> {
     let project = ctx.project()?;
     let site = ctx.site()?;
     let config = ctx.config();
@@ -931,326 +965,6 @@ fn verify(ctx: &Ctx) -> Result<(Status, String)> {
     }
 }
 
-// MARK: Repository care
-
-/// What a care preview looks at.
-#[derive(Debug, Clone)]
-pub struct RepoOptions {
-    /// Exactly these repositories, each once.
-    pub targets: Vec<repos::RepoTarget>,
-    pub merge: bool,
-    pub cleanup: bool,
-    /// Model alias for the review; empty = the site's default.
-    pub model: String,
-    /// Project the preview is for; dropped if the project changes meanwhile.
-    pub project: String,
-}
-
-/// The preview: GitHub's state of the chosen repositories (read only), then Claude judges the open
-/// pull requests. Ends with a plan the user confirms or discards.
-fn repos_check(ctx: &Ctx, options: &RepoOptions) -> Result<(Status, String)> {
-    if github::token().is_none() {
-        bail!("Für die Pflege die GitHub-CLI anmelden: gh auth login");
-    }
-    if options.targets.is_empty() {
-        bail!("Kein Repository gewählt");
-    }
-    let site = ctx.site()?;
-    let names: Vec<&str> = options.targets.iter().map(|t| t.repo.as_str()).collect();
-    ctx.info(format!("Lese den Stand auf GitHub (nur lesend): {}", names.join(", ")));
-    let (merge, cleanup) = (options.merge, options.cleanup);
-    // One thread per repository: each needs a dozen or more API calls.
-    let mut plans: Vec<repocare::Plan> = std::thread::scope(|scope| {
-        let handles: Vec<_> = options.targets.iter().map(|target| scope.spawn(move || repocare::scan(target, merge, cleanup))).collect();
-        handles.into_iter().map(|h| h.join().expect("scan thread panicked")).collect()
-    });
-    if merge && plans.iter().any(|p| !p.prs.is_empty()) {
-        update_claude(ctx, &std::env::temp_dir())?;
-    }
-    for plan in &mut plans {
-        ctx.runner.check()?;
-        ctx.cmd(format!("{} · {}", plan.name, plan.repo));
-        if let Some(error) = &plan.error {
-            ctx.warn(format!("  {error}"));
-            continue;
-        }
-        if merge && !plan.prs.is_empty() {
-            match review(ctx, plan, options, &site) {
-                Ok(()) => {}
-                Err(e) if ctx.runner.is_cancelled() => return Err(e),
-                Err(e) => {
-                    ctx.warn(format!("  Claude-Prüfung fehlgeschlagen: {e:#}"));
-                    plan.review_note = Some(format!("Claude-Prüfung fehlgeschlagen ({e:#}); alle PRs bleiben offen."));
-                    repocare::apply_review(plan, &[]);
-                }
-            }
-            for pr in &plan.prs {
-                let (kind, what) = match pr.action {
-                    repocare::Action::Merge => ("ok", "mergen"),
-                    repocare::Action::Close => ("warn", "schließen"),
-                    repocare::Action::Rebase => ("info", "Rebase anstoßen"),
-                    repocare::Action::Keep => ("info", "bleibt offen"),
-                };
-                ctx.log(kind, format!("  PR #{} {}: {what} – {}", pr.number, pr.title, pr.reason));
-            }
-        }
-        repocare::finish(plan, merge, cleanup);
-    }
-    let summary = plan_summary(&plans);
-    let notes = plans.iter().filter(|p| p.error.is_some() || p.review_note.is_some()).count();
-    let set = repocare::PlanSet {
-        id: crate::next_token(),
-        project: options.project.clone(),
-        created_at: now(),
-        merge,
-        cleanup,
-        model: options.model.clone(),
-        targets: options.targets.iter().map(|t| (t.key.clone(), t.fingerprint())).collect(),
-        plans,
-    };
-    with_model(&ctx.app, |m| repocare::store_plan(&mut m.repo_plan, &m.config.project_dir, set)).map_err(|e| anyhow!(e))?;
-    Ok((if notes > 0 { Status::Warning } else { Status::Ok }, format!("Vorschau: {summary}. Bestätigen oder verwerfen.")))
-}
-
-/// `3 PRs mergen, 1 Tag, 5 Branches löschen`, or `nichts zu tun`.
-fn plan_summary(plans: &[repocare::Plan]) -> String {
-    use repocare::Action;
-    let sum = |f: &dyn Fn(&repocare::Plan) -> usize| plans.iter().map(f).sum::<usize>();
-    let parts: Vec<String> = [
-        (sum(&|p| p.count(Action::Merge)), "PR mergen", "PRs mergen"),
-        (sum(&|p| p.count(Action::Close)), "PR schließen", "PRs schließen"),
-        (sum(&|p| p.count(Action::Rebase)), "Rebase", "Rebases"),
-        (sum(&|p| p.tag.is_some() as usize), "Tag", "Tags"),
-        (sum(&|p| p.branches.len() + p.local_branches.len()), "Branch löschen", "Branches löschen"),
-    ]
-    .into_iter()
-    .filter(|(n, ..)| *n > 0)
-    .map(|(n, one, many)| format!("{n} {}", if n == 1 { one } else { many }))
-    .collect();
-    if parts.is_empty() {
-        "nichts zu tun".into()
-    } else {
-        parts.join(", ")
-    }
-}
-
-/// Claude judges the open pull requests of one repository, read-only, in its local clone if there is one.
-fn review(ctx: &Ctx, plan: &mut repocare::Plan, options: &RepoOptions, site: &Site) -> Result<()> {
-    let dir = match &plan.clone {
-        Some(dir) => PathBuf::from(dir),
-        None => {
-            let dir = std::env::temp_dir().join("OpenReleasePilot-Review");
-            std::fs::create_dir_all(&dir).context("Arbeitsordner für die Prüfung anlegen")?;
-            dir
-        }
-    };
-    let model = Some(options.model.trim()).filter(|m| !m.is_empty()).or(site.claude.model.as_deref());
-    let prompt = claude::review_prompt(plan);
-    let args = claude::review_args(&prompt, model, site.claude.effort.as_deref(), site.claude.max_budget_usd);
-    ctx.cmd(format!("  $ claude -p … --model {} (prüft {} PRs, nur lesend)", model.unwrap_or("Standard"), plan.prs.len()));
-    let mut outcome = None;
-    // No GITHUB_TOKEN: gh reads with its own login; the allowlist keeps Claude to reading.
-    let code = shell::stream("claude", &args, &dir, &HashMap::new(), &ctx.runner, |line| match claude::parse(line) {
-        Event::Line(text) => ctx.log("claude", format!("  {text}")),
-        Event::Done(done) => outcome = Some(done),
-        Event::Ignore => {}
-    })?;
-    let outcome = outcome.ok_or_else(|| anyhow!("Claude Code hat ohne Ergebnis beendet (Exit-Code {code})"))?;
-    plan.review_cost = outcome.cost_usd;
-    if !outcome.success {
-        bail!("{}", outcome.text);
-    }
-    let review: repocare::Review = serde_json::from_value(outcome.structured.context("Claude hat keine strukturierte Antwort geliefert")?)
-        .context("Claudes Antwort passt nicht zum Schema")?;
-    let problems = repocare::apply_review(plan, &review.prs);
-    for problem in &problems {
-        ctx.warn(format!("  Bewertung verworfen: {problem}"));
-    }
-    if !problems.is_empty() {
-        plan.review_note = Some(format!("Nicht verwendbare Bewertungen, die betroffenen PRs bleiben offen: {}", problems.join("; ")));
-    }
-    Ok(())
-}
-
-/// Counts of what the run did, for the summary.
-#[derive(Default)]
-struct Tally {
-    done: HashMap<&'static str, usize>,
-    skipped: usize,
-    failed: usize,
-    cancelled: usize,
-}
-
-/// Carries out a confirmed preview in three rounds over all repositories, so their CI runs while
-/// the app works on the next one: pull requests (close, merge, rebase), then the tags, then the
-/// branches. Each item is checked again right before it writes (see `repocare`). A cancel stops
-/// before the next item and lists the rest as not done; nothing done is rolled back.
-fn repos_run(ctx: &Ctx, set: &repocare::PlanSet) -> Result<(Status, String)> {
-    use repocare::{Action, CiWait, RunState};
-    if github::token().is_none() {
-        bail!("Für die Pflege die GitHub-CLI anmelden: gh auth login");
-    }
-    let config = ctx.config();
-    let current = crate::repo_targets(&ctx.site().map_err(|e| format!("{e:#}")), &config);
-    set.check_binding(&config.project_dir, &current).map_err(|e| anyhow!(e))?;
-
-    let plans = &set.plans;
-    let mut reports: Vec<RepoReport> = plans.iter().map(|p| RepoReport { name: p.name.clone(), repo: p.repo.clone(), items: Vec::new() }).collect();
-    let mut states: Vec<RunState> = plans.iter().map(RunState::new).collect();
-    let mut tally = Tally::default();
-    let publish = |reports: &Vec<RepoReport>| {
-        with_model(&ctx.app, |m| m.repo_reports = reports.clone());
-        changed(&ctx.app);
-    };
-
-    ctx.info("Pull Requests …");
-    for (i, plan) in plans.iter().enumerate() {
-        ctx.cmd(format!("{} · {}", plan.name, plan.repo));
-        if let Some(error) = &plan.error {
-            let result = Ok(Done::Skipped(format!("in der Vorschau nicht lesbar ({error}); nichts ausgeführt")));
-            record(ctx, &mut reports[i].items, &mut tally, None, "Repository".into(), "", result);
-            continue;
-        }
-        for (action, key) in [(Action::Close, "geschlossen"), (Action::Merge, "gemergt"), (Action::Rebase, "Rebase")] {
-            for pr in plan.prs.iter().filter(|pr| pr.action == action) {
-                let label = format!("PR #{}", pr.number);
-                let outcome = if ctx.runner.is_cancelled() {
-                    not_run(ctx, &mut reports[i].items, &mut tally, label)
-                } else {
-                    let result = match action {
-                        Action::Close => repocare::close(plan, pr),
-                        Action::Merge => repocare::merge(plan, pr, &mut states[i]),
-                        _ => repocare::rebase(plan, pr),
-                    };
-                    record(ctx, &mut reports[i].items, &mut tally, Some(key), label, &pr.title, result)
-                };
-                if action == Action::Merge && outcome != ItemOutcome::Done {
-                    states[i].missed.push(pr.number);
-                }
-            }
-        }
-        publish(&reports);
-    }
-
-    if plans.iter().any(|p| p.tag.is_some() && p.error.is_none()) {
-        ctx.info("Tags, sobald die CI des Ziel-Commits grün ist …");
-    }
-    for (i, plan) in plans.iter().enumerate() {
-        let Some(tag) = plan.tag.as_ref().filter(|_| plan.error.is_none()) else { continue };
-        let label = format!("Tag {tag}");
-        if ctx.runner.is_cancelled() {
-            not_run(ctx, &mut reports[i].items, &mut tally, label);
-        } else {
-            let result = repocare::tag(plan, &states[i], &ctx.runner, &CiWait::default(), &|text| ctx.info(format!("  {}: {text}", plan.name)));
-            record(ctx, &mut reports[i].items, &mut tally, Some("Tag"), label, "", result);
-        }
-        publish(&reports);
-    }
-
-    if plans.iter().any(|p| !p.branches.is_empty() || !p.local_branches.is_empty()) {
-        ctx.info("Branches …");
-    }
-    for (i, plan) in plans.iter().enumerate() {
-        if plan.error.is_some() {
-            continue;
-        }
-        for branch in &plan.branches {
-            let label = format!("Branch {}", branch.name);
-            if ctx.runner.is_cancelled() {
-                not_run(ctx, &mut reports[i].items, &mut tally, label);
-            } else {
-                let result = repocare::delete_branch(plan, branch, &states[i]);
-                record(ctx, &mut reports[i].items, &mut tally, Some("Branch"), label, "", result);
-            }
-        }
-        if !plan.local_branches.is_empty() && plan.local_sync.is_some() {
-            let label = "Lokale Kopie abgleichen".to_owned();
-            if ctx.runner.is_cancelled() {
-                not_run(ctx, &mut reports[i].items, &mut tally, label);
-            } else {
-                {
-                    let result = repocare::sync_local(plan, &mut states[i]);
-                    record(ctx, &mut reports[i].items, &mut tally, None, label, "", result);
-                }
-            }
-        }
-        for branch in &plan.local_branches {
-            let label = format!("Lokal {}", branch.name);
-            if ctx.runner.is_cancelled() {
-                not_run(ctx, &mut reports[i].items, &mut tally, label);
-            } else {
-                let result = repocare::delete_local_branch(plan, branch, &states[i]);
-                record(ctx, &mut reports[i].items, &mut tally, Some("Branch"), label, "", result);
-            }
-        }
-        publish(&reports);
-    }
-
-    // What changed is read again (read only), so the overview shows the new state.
-    crate::refresh_status(&ctx.app, &plans.iter().map(|p| p.key.clone()).collect::<Vec<_>>());
-
-    let mut parts = Vec::new();
-    for (key, one, many) in [
-        ("gemergt", "PR gemergt", "PRs gemergt"),
-        ("geschlossen", "PR geschlossen", "PRs geschlossen"),
-        ("Rebase", "Rebase angestoßen", "Rebases angestoßen"),
-        ("Tag", "Tag gesetzt", "Tags gesetzt"),
-        ("Branch", "Branch gelöscht", "Branches gelöscht"),
-    ] {
-        let n = tally.done.get(key).copied().unwrap_or(0);
-        if n > 0 {
-            parts.push(format!("{n} {}", if n == 1 { one } else { many }));
-        }
-    }
-    for (n, what) in [(tally.skipped, "übersprungen"), (tally.failed, "fehlgeschlagen"), (tally.cancelled, "abgebrochen")] {
-        if n > 0 {
-            parts.push(format!("{n} {what}"));
-        }
-    }
-    let summary = if parts.is_empty() { "Nichts zu tun".to_owned() } else { parts.join(", ") };
-    let status = if tally.failed > 0 {
-        Status::Error
-    } else if tally.skipped + tally.cancelled > 0 {
-        Status::Warning
-    } else {
-        Status::Ok
-    };
-    Ok((status, summary))
-}
-
-/// Logs one item and adds it to the result; `done` names what it counts as when it worked.
-fn record(ctx: &Ctx, items: &mut Vec<RepoItem>, tally: &mut Tally, done: Option<&'static str>, label: String, context: &str, result: Result<Done>) -> ItemOutcome {
-    let (outcome, text) = match result {
-        Ok(Done::Ok(text)) => (ItemOutcome::Done, text),
-        Ok(Done::Skipped(text)) => (ItemOutcome::Skipped, text),
-        Err(e) if ctx.runner.is_cancelled() => (ItemOutcome::Cancelled, format!("abgebrochen ({e:#})")),
-        Err(e) => (ItemOutcome::Failed, format!("{e:#}")),
-    };
-    match outcome {
-        ItemOutcome::Done => *tally.done.entry(done.unwrap_or("")).or_default() += 1,
-        ItemOutcome::Skipped => tally.skipped += 1,
-        ItemOutcome::Failed => tally.failed += 1,
-        ItemOutcome::Cancelled => tally.cancelled += 1,
-    }
-    let detail = if context.is_empty() { text } else { format!("{context} – {text}") };
-    let kind = match outcome {
-        ItemOutcome::Done => "ok",
-        ItemOutcome::Skipped | ItemOutcome::Cancelled => "warn",
-        ItemOutcome::Failed => "error",
-    };
-    ctx.log(kind, format!("  {label}: {detail}"));
-    items.push(RepoItem { label, outcome, detail });
-    outcome
-}
-
-/// An item the run did not get to because it was cancelled.
-fn not_run(ctx: &Ctx, items: &mut Vec<RepoItem>, tally: &mut Tally, label: String) -> ItemOutcome {
-    tally.cancelled += 1;
-    ctx.log("warn", format!("  {label}: nicht ausgeführt, abgebrochen"));
-    items.push(RepoItem { label, outcome: ItemOutcome::Cancelled, detail: "nicht ausgeführt, abgebrochen".into() });
-    ItemOutcome::Cancelled
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1259,7 +973,7 @@ mod tests {
     fn a_start_counts_as_busy_before_its_thread_runs() {
         let runner = Arc::new(Runner::default());
         assert!(busy(Some(&runner), None), "a second click right after the first");
-        assert!(busy(None, Some(Step::Repos)));
+        assert!(busy(None, Some(Step::Jobs)));
         assert!(!busy(None, None));
     }
 }

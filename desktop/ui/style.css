@@ -136,7 +136,7 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent-soft
 main { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px; padding: 14px 16px 16px; overflow: auto; }
 /* One per main area; the hidden one keeps its state (log, input, scroll). */
 .area { flex: 1 0 auto; display: flex; flex-direction: column; gap: 12px; }
-button:focus-visible, .repo-card:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button:focus-visible, .repo-card:focus-visible, summary:focus-visible, .diff:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* Main navigation in the toolbar. */
 .nav { display: flex; gap: 2px; margin-left: 14px; padding: 2px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); }
@@ -144,6 +144,7 @@ button:focus-visible, .repo-card:focus-visible, summary:focus-visible { outline:
 .nav-item:hover:not(:disabled) { background: var(--surface); color: var(--text); }
 .nav-item.active { background: var(--surface); color: var(--text); font-weight: 600; box-shadow: 0 0 0 1px var(--border); }
 .nav-badge { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--orange-soft); color: var(--orange); font-size: 11px; font-weight: 600; display: inline-grid; place-items: center; }
+.nav-badge.decision { background: var(--accent); color: #fff; }
 
 .section { display: flex; flex-direction: column; gap: 8px; }
 .section-head { display: flex; align-items: center; gap: 10px; min-height: var(--control-h); }
@@ -377,9 +378,15 @@ legend { font-weight: 600; padding: 0 4px; }
 /* Repositories: one card per repository, state in words, never by colour alone. */
 .repo-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr)); gap: 10px; }
 .repo-card {
-  display: flex; flex-direction: column; align-items: stretch; gap: 4px; height: auto; min-width: 0;
-  padding: 10px 12px; text-align: left; white-space: normal; border-radius: 12px; border-left-width: 4px;
+  display: flex; flex-direction: column; align-items: stretch; gap: 4px; min-width: 0; cursor: pointer;
+  padding: 10px 12px; border: 1px solid var(--border); border-left-width: 4px; border-radius: 12px; background: var(--surface);
 }
+.repo-card:hover { background: var(--surface-2); }
+.repo-card.off { opacity: 0.7; }
+.repo-card-head input[type=checkbox] { align-self: center; flex: none; margin: 0; }
+/* The repository's name opens its details; looks like text, works like a button. */
+.repo-name { flex: 0 1 auto; display: inline-flex; align-items: baseline; gap: 8px; min-width: 0; height: auto; padding: 0; border: 0; background: none; color: inherit; }
+.repo-name:hover:not(:disabled) { background: none; text-decoration: underline; }
 .repo-card.error { border-left-color: var(--red); }
 .repo-card.warning { border-left-color: var(--orange); }
 .repo-card.ok { border-left-color: var(--green); }
@@ -410,7 +417,58 @@ legend { font-weight: 600; padding: 0 4px; }
 .plain-list { margin: 4px 0 0; padding-left: 18px; }
 .plain-list li { margin: 2px 0; overflow-wrap: anywhere; }
 
-/* The care panel above the list: only while a preview, a run or a result exists. */
-.detail.care { flex: none; min-height: 0; }
-.care .log { min-height: 220px; max-height: 50vh; }
+/* Open jobs above the repositories: what needs a decision first. */
+.job-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr)); gap: 10px; }
+.job-card, .job-row { display: flex; flex-direction: column; gap: 6px; min-width: 0; padding: 10px 12px; border: 1px solid var(--border); border-left-width: 4px; border-radius: 12px; background: var(--surface); }
+.job-row { cursor: pointer; }
+.job-row:hover { background: var(--surface-2); }
+.job-card.warning, .job-row.warning { border-left-color: var(--orange); }
+.job-card.error, .job-row.error { border-left-color: var(--red); }
+.job-card.running, .job-row.running { border-left-color: var(--accent); }
+.job-card.ok, .job-row.ok { border-left-color: var(--green); }
+.job-card-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.job-card-head strong { font-size: 14px; min-width: 0; }
+.job-card-head .chip { flex: none; }
+.job-card-reason { overflow-wrap: anywhere; }
+.job-card-steps { display: flex; flex-wrap: wrap; gap: 4px; }
+.job-list { display: flex; flex-direction: column; gap: 8px; }
+.step-pill { padding: 1px 7px; border-radius: 999px; font-size: 11px; border: 1px solid var(--border); color: var(--muted); background: var(--surface-2); }
+.step-pill.ok { color: var(--green); border-color: color-mix(in srgb, var(--green) 40%, transparent); }
+.step-pill.warning { color: var(--orange); border-color: color-mix(in srgb, var(--orange) 45%, transparent); background: var(--orange-soft); }
+.step-pill.error { color: var(--red); border-color: color-mix(in srgb, var(--red) 40%, transparent); }
+.step-pill.running { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+
+/* A job: its state in words, its steps, the decisions it waits for. */
+.job-detail { display: flex; flex-direction: column; gap: 12px; }
+.note-box { display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); overflow-wrap: anywhere; }
+.note-box.warning { border-color: color-mix(in srgb, var(--orange) 45%, transparent); background: var(--orange-soft); }
+.note-box.error { border-color: color-mix(in srgb, var(--red) 40%, transparent); background: var(--red-soft); }
+.note-box.ok { border-color: color-mix(in srgb, var(--green) 40%, transparent); background: var(--green-soft); }
+.note-box.running { border-color: color-mix(in srgb, var(--accent) 40%, transparent); background: var(--accent-soft); }
+.repo-detail > .note-box { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px; }
+.step-block { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.step-block + .step-block { border-top: 1px solid var(--border); }
+.step-block.decide { border-color: color-mix(in srgb, var(--orange) 55%, transparent); box-shadow: 0 0 0 2px var(--orange-soft); }
+.step-block > summary { flex-wrap: wrap; row-gap: 4px; }
+.step-detail { flex: 0 1 auto; min-width: 0; max-width: 60%; }
+.decision-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px; border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); background: var(--accent-soft); }
+.item.excluded .item-line > :not(input), .item.excluded .item-reason, .item.excluded .item-check { opacity: 0.45; text-decoration: line-through; }
+.item-line > input[type=checkbox] { margin: 0; }
+.diff { margin: 0; max-height: 60vh; overflow: auto; padding: 8px 0; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-2); font: 12px/1.45 var(--mono); white-space: pre; }
+.diff span { display: block; padding: 0 12px; min-height: 1.45em; }
+.diff .d-head { font-weight: 600; color: var(--text); background: var(--surface); border-top: 1px solid var(--border); margin-top: 4px; padding-top: 4px; }
+.diff .d-head:first-child { border-top: 0; margin-top: 0; }
+.diff .d-file { color: var(--muted); }
+.diff .d-hunk { color: var(--accent); }
+.diff .d-add { color: var(--green); background: var(--green-soft); }
+.diff .d-del { color: var(--red); background: var(--red-soft); }
+.target-choice { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.basis-select { font-size: 12px; }
+.import-item { padding: 6px 0; border-bottom: 1px solid var(--border); }
+.import-item:last-child { border-bottom: 0; }
+.indent { margin-left: 23px; }
+.target-item { padding: 6px 0; }
+.target-item + .target-item { border-top: 1px solid var(--border); }
+.item-reason.orange { color: var(--orange); }
+.runs-list { display: flex; flex-direction: column; gap: 14px; }
 @media (max-width: 700px) { .fact-grid { grid-template-columns: minmax(0, 1fr); } .fact-grid .label { margin-top: 4px; } }

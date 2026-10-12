@@ -30,7 +30,7 @@
     ],
     "category": "DeveloperTool",
     "copyright": "© 2026 bl0rb · MIT License · github.com/bl0rb/OpenReleasePilot",
-    "shortDescription": "Update a static website with Claude Code and publish it via SFTP",
+    "shortDescription": "Look after your GitHub repositories with Claude Code: pull requests, releases, README, wiki and, optionally, a website",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

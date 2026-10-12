@@ -1,17 +1,21 @@
-//! OpenReleasePilot core: everything the four steps need, without UI.
+//! OpenReleasePilot core: repository care, content targets and the website steps, without UI.
 //!
-//! - `config`: the app's own settings (project folder, SFTP target), stored in the app data folder
+//! - `config`: the app's own settings (managed repositories, targets, website project, SFTP), stored in the app data folder
 //! - `site`: the project's `.openreleasepilot/site.json` (build, output, URL, watched products)
 //! - `shell`, `git`, `github`, `claude`: external tools
 //! - `sftp`, `manifest`, `verify`, `secrets`: upload, change tracking, live check, password storage
 //! - `update`: updates of the app itself from its GitHub releases
-//! - `repos`: the products' repositories, what GitHub reports about them, their health (read only)
-//! - `repocare`: merging, tagging and branch cleanup in the products' repositories
+//! - `repos`: the managed repositories, what GitHub reports about them, their health (read only)
+//! - `repocare`: merging, tagging and branch cleanup in the managed repositories
+//! - `content`: README/documentation and wiki targets: work folder, checks, proposal, publishing
+//! - `jobs`: care jobs with their steps, approvals and results, stored so they survive a restart
 
 pub mod claude;
 pub mod config;
+pub mod content;
 pub mod git;
 pub mod github;
+pub mod jobs;
 pub mod localrepo;
 pub mod manifest;
 pub mod paths;

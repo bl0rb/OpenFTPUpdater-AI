@@ -1,7 +1,9 @@
-//! Care for the products' repositories on GitHub: merge open pull requests that GitHub reports
-//! mergeable with green checks and Claude judges safe, close superfluous ones, ask Dependabot to
-//! rebase conflicting ones, tag the next patch version once the CI of exactly that commit is green,
-//! delete branches whose commits are all in the default branch (on GitHub and in the local clone).
+//! Care for the managed repositories on GitHub, three separate choices: pull requests (merge what
+//! GitHub reports mergeable with green checks and Claude judges safe, close superfluous ones, ask
+//! Dependabot to rebase conflicting ones), cleanup (delete branches whose commits are all in the
+//! default branch, on GitHub and in the local clone) and release (tag the next patch version once the
+//! CI of exactly that commit is green, then wait for the published release). A release needs a
+//! release rule of the repository; the app never guesses one.
 //!
 //! `scan` only reads: no GitHub write, no fetch, no checkout. Claude's review (`apply_review`) and
 //! `finish` complete the preview. The run checks every item again right before it writes, so a
@@ -22,7 +24,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 /// What happens with an open pull request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Action {
     #[default]
@@ -34,7 +36,7 @@ pub enum Action {
 }
 
 /// What the run will do in one repository, as shown in the preview.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Plan {
     /// The products, e.g. `App, App Pro`.
@@ -76,7 +78,7 @@ pub struct Plan {
     pub error: Option<String>,
     /// GitHub deletes head branches after a merge itself.
     pub github_deletes_merged: bool,
-    /// The products disagree on the tag prefix: no tag.
+    /// No release rule: no tag.
     #[serde(skip)]
     pub tag_blocked: bool,
 }
@@ -87,7 +89,7 @@ impl Plan {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PullRequest {
     pub number: u64,
@@ -125,7 +127,7 @@ pub struct PullRequest {
 }
 
 /// Why a branch may go; checked again before it is deleted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "pr", rename_all = "camelCase")]
 pub enum Proof {
     /// Every commit is in the default branch.
@@ -136,7 +138,7 @@ pub enum Proof {
     AfterMerge(u64),
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Branch {
     pub name: String,
@@ -172,25 +174,28 @@ pub struct Verdict {
 pub enum Done {
     Ok(String),
     Skipped(String),
+    /// Not yet: still waiting for something outside the app (the CI); asking again later may do it.
+    Pending(String),
 }
 
 // MARK: Preview
 
-/// The facts of one repository: open pull requests with GitHub's verdict, branches to delete.
-/// Reads only. Errors end up in `Plan::error`, so one unreachable repository does not hide the others.
-pub fn scan(target: &RepoTarget, merge: bool, cleanup: bool) -> Plan {
+/// The facts of one repository: open pull requests with GitHub's verdict (`prs`), branches to
+/// delete (`cleanup`). Reads only. Errors end up in `Plan::error`, so one unreachable repository
+/// does not hide the others.
+pub fn scan(target: &RepoTarget, prs: bool, cleanup: bool) -> Plan {
     let mut plan = Plan {
         name: target.name(),
         key: target.key.clone(),
         repo: target.repo.clone(),
-        tag_prefix: target.tag_prefix.clone().unwrap_or_default(),
+        tag_prefix: target.tag_prefix().unwrap_or_default().to_owned(),
         ..Plan::default()
     };
-    if let Some(conflict) = &target.tag_conflict {
+    if target.release.is_none() {
         plan.tag_blocked = true;
-        plan.tag_note = Some(format!("{conflict}; kein Tag, bis site.json eindeutig ist"));
+        plan.tag_note = Some("keine Release-Regel eingerichtet; kein Tag".into());
     }
-    if let Err(e) = look(&mut plan, target, merge, cleanup) {
+    if let Err(e) = look(&mut plan, target, prs, cleanup) {
         plan.prs.clear();
         plan.branches.clear();
         plan.local_branches.clear();
@@ -393,12 +398,13 @@ pub fn apply_review(plan: &mut Plan, verdicts: &[Verdict]) -> Vec<String> {
     problems
 }
 
-/// Completes the preview after the review: the tag and the head branches of the merges.
-pub fn finish(plan: &mut Plan, merge: bool, cleanup: bool) {
+/// Completes the preview after the review: the tag (only with `release`) and the head branches of
+/// the merges.
+pub fn finish(plan: &mut Plan, cleanup: bool, release: bool) {
     if plan.error.is_some() {
         return;
     }
-    if merge {
+    if release {
         if let Err(e) = plan_tag(plan) {
             plan.tag = None;
             plan.tag_note = Some(format!("{e:#}"));
@@ -446,69 +452,46 @@ fn plan_tag(plan: &mut Plan) -> Result<()> {
     Ok(())
 }
 
-// MARK: Preview lifecycle
+// MARK: Plan binding
 
-/// A preview waiting for the user, bound to what it was made for: the project, the options and each
-/// repository's configuration. The window confirms it only by its id, never with actions of its own.
-#[derive(Debug, Clone, Serialize)]
+/// A care plan, bound to what it was made for: the choices and each repository's configuration.
+/// The window approves it only by its id and revision, never with actions of its own.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanSet {
     pub id: u64,
-    #[serde(skip)]
-    pub project: String,
     pub created_at: u64,
-    pub merge: bool,
+    pub prs: bool,
     pub cleanup: bool,
+    pub release: bool,
     pub model: String,
     /// Key and `RepoTarget::fingerprint` of each repository.
-    #[serde(skip)]
     pub targets: Vec<(String, String)>,
     pub plans: Vec<Plan>,
 }
 
 impl PlanSet {
-    /// `Ok` while project and configuration are as the preview saw them; else why the run must not use it.
-    pub fn check_binding(&self, project: &str, current: &[RepoTarget]) -> Result<(), String> {
-        if project != self.project {
-            return Err("Das Projekt wurde gewechselt; die Vorschau gilt nicht mehr. Neu prüfen.".into());
-        }
+    /// `Ok` while the configuration is as the plan saw it; else why the run must not use it.
+    pub fn check_binding(&self, current: &[RepoTarget]) -> Result<(), String> {
         for (key, fingerprint) in &self.targets {
             match current.iter().find(|t| &t.key == key) {
                 Some(target) if &target.fingerprint() == fingerprint => {}
-                Some(target) => return Err(format!("{}: tagPrefix oder lokale Kopie in site.json haben sich seit der Vorschau geändert. Neu prüfen.", target.repo)),
-                None => return Err(format!("{key} gehört zu keinem Produkt mehr. Neu prüfen.")),
+                Some(target) => {
+                    return Err(format!("{}: Release-Regel, lokale Kopie oder Aktivierung haben sich seit dem Plan geändert. Neu prüfen.", target.repo))
+                }
+                None => return Err(format!("{key} wird nicht mehr verwaltet. Neu prüfen.")),
             }
         }
         Ok(())
     }
 }
 
-/// Takes the preview with this id for its run, so a second confirmation (a double click) finds none;
-/// another preview stays where it is.
-pub fn take_plan(slot: &mut Option<PlanSet>, id: u64) -> Result<PlanSet, String> {
-    match slot.take() {
-        Some(set) if set.id == id => Ok(set),
-        Some(other) => {
-            *slot = Some(other);
-            Err("Diese Vorschau gilt nicht mehr; es gibt eine neuere".into())
-        }
-        None => Err("Keine Vorschau vorhanden; erst prüfen".into()),
-    }
-}
-
-/// Stores a finished preview, unless the project changed while it was made: a late answer is dropped.
-pub fn store_plan(slot: &mut Option<PlanSet>, project: &str, set: PlanSet) -> Result<(), String> {
-    if set.project != project {
-        return Err("Das Projekt wurde während der Prüfung gewechselt; die Vorschau ist verworfen.".into());
-    }
-    *slot = Some(set);
-    Ok(())
-}
-
 // MARK: Run
 
-/// What the run did so far in one repository; decides whether the tag may follow.
-#[derive(Debug, Default)]
+/// What the run did so far in one repository; decides whether the tag may follow. Kept with the
+/// job, so a run continued after a restart knows its own merges.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct RunState {
     /// Pull requests this run merged.
     pub merged: HashSet<u64>,
@@ -577,9 +560,13 @@ pub fn merge(plan: &Plan, pr: &PullRequest, state: &mut RunState) -> Result<Done
     }
 }
 
+/// The comment that goes with closing a pull request; resolving an interrupted close looks for it.
+pub const CLOSE_COMMENT: &str = "Geschlossen von OpenReleasePilot:";
+
 /// Closes a superfluous pull request with the reason as a comment, after checking it again: still
-/// open, same head and target, and a named replacement is still open or merged.
-pub fn close(plan: &Plan, pr: &PullRequest) -> Result<Done> {
+/// open, same head and target, and a named replacement is still open or merged. `commented`: an
+/// interrupted earlier attempt already posted the comment.
+pub fn close(plan: &Plan, pr: &PullRequest, commented: bool) -> Result<Done> {
     let current = pull(&plan.repo, pr.number)?;
     if current["state"].as_str() != Some("open") {
         return Ok(Done::Skipped("war schon geschlossen".into()));
@@ -596,7 +583,9 @@ pub fn close(plan: &Plan, pr: &PullRequest) -> Result<Done> {
             Some(_) => {}
         }
     }
-    comment(plan, pr.number, &format!("Geschlossen von OpenReleasePilot: {}", pr.reason)).context("Kommentar nicht gepostet; der PR bleibt offen")?;
+    if !commented {
+        comment(plan, pr.number, &format!("{CLOSE_COMMENT} {}", pr.reason)).context("Kommentar nicht gepostet; der PR bleibt offen")?;
+    }
     match send("PATCH", &format!("repos/{}/pulls/{}", plan.repo, pr.number), Some(&json!({ "state": "closed" }))) {
         Ok((200, _)) => Ok(Done::Ok("Kommentar gepostet, geschlossen".into())),
         Ok((_, body)) => bail!("Kommentar gepostet, aber GitHub lehnt das Schließen ab: {}", message(&body)),
@@ -729,7 +718,7 @@ pub fn tag(plan: &Plan, state: &RunState, runner: &Runner, wait: &CiWait, progre
     match ci.state {
         CiState::Passed => {}
         CiState::Failed => return Ok(Done::Skipped(format!("CI von {commit} rot ({}); kein Tag", ci.detail))),
-        CiState::Pending => return Ok(Done::Skipped(format!("CI von {commit} läuft nach {} Minuten noch; kein Tag", wait.timeout.as_secs() / 60))),
+        CiState::Pending => return Ok(Done::Pending(format!("CI von {commit} läuft nach {} Minuten noch; noch kein Tag", wait.timeout.as_secs() / 60))),
         CiState::NoChecks => return Ok(Done::Skipped(format!("keine CI-Checks für {commit} gefunden; ohne grüne CI kein automatischer Tag"))),
         CiState::Unknown => return Ok(Done::Skipped(format!("CI von {commit} unklar ({}); kein Tag", ci.detail))),
     }
@@ -782,9 +771,71 @@ fn release_line_changed(plan: &Plan, last: &str, tag: &str) -> Result<Option<Str
     })
 }
 
+/// Where the GitHub release of a new tag stands.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReleaseWait {
+    /// Published (not a draft), the tag still on the expected commit.
+    Published { url: String },
+    /// It will not come: the tag moved.
+    Failed(String),
+    /// A workflow run for the tag failed; after a new run, asking again may find the release.
+    WorkflowFailed(String),
+    /// Not (yet) published when the wait ended; asking again later may find it.
+    Pending(String),
+}
+
+/// Waits, at most `wait.timeout`, until the GitHub release of `tag` is published and the tag still
+/// points to `commit`; stops early when a workflow run for the tag failed. Reads only.
+pub fn wait_for_release(repo: &str, tag: &str, commit: &str, runner: &Runner, wait: &CiWait, progress: &dyn Fn(&str)) -> Result<ReleaseWait> {
+    let start = Instant::now();
+    let mut reported = false;
+    loop {
+        runner.check()?;
+        let now = crate::content::resolve_tag(repo, tag)?;
+        if now != commit {
+            return Ok(ReleaseWait::Failed(format!("{tag} zeigt inzwischen auf {} statt auf {}", short(&now), short(commit))));
+        }
+        if let Some(release) = get(&format!("repos/{repo}/releases/tags/{}", encode_ref(tag)))? {
+            if release["draft"].as_bool() != Some(true) {
+                return Ok(ReleaseWait::Published { url: release["html_url"].as_str().unwrap_or_default().to_owned() });
+            }
+        }
+        // A failed release workflow means no release; waiting longer would not change that.
+        if let Ok(Some(runs)) = get(&format!("repos/{repo}/actions/runs?head_sha={commit}&event=push&per_page=30")) {
+            let failed = runs["workflow_runs"].as_array().into_iter().flatten().find(|run| {
+                run["head_branch"].as_str() == Some(tag)
+                    && run["status"].as_str() == Some("completed")
+                    && matches!(run["conclusion"].as_str(), Some("failure" | "cancelled" | "timed_out" | "startup_failure"))
+            });
+            if let Some(run) = failed {
+                return Ok(ReleaseWait::WorkflowFailed(format!(
+                    "Workflow „{}“ für {tag} endete mit {}: {}",
+                    run["name"].as_str().unwrap_or("?"),
+                    run["conclusion"].as_str().unwrap_or("?"),
+                    run["html_url"].as_str().unwrap_or_default()
+                )));
+            }
+        }
+        if start.elapsed() >= wait.timeout {
+            return Ok(ReleaseWait::Pending(format!("nach {} Minuten noch kein veröffentlichtes Release {tag}", wait.timeout.as_secs() / 60)));
+        }
+        if !reported {
+            progress(&format!("warte auf das Release {tag} …"));
+            reported = true;
+        }
+        let mut slept = Duration::ZERO;
+        while slept < wait.poll {
+            runner.check()?;
+            let step = Duration::from_secs(1).min(wait.poll - slept);
+            thread::sleep(step);
+            slept += step;
+        }
+    }
+}
+
 /// Waits until the CI of `sha` has a result: passed, failed, unknown, no checks after
 /// `no_checks_after`, or still pending after `timeout`.
-fn wait_for_checks(repo: &str, sha: &str, runner: &Runner, wait: &CiWait, progress: &dyn Fn(&str)) -> Result<repos::Ci> {
+pub fn wait_for_checks(repo: &str, sha: &str, runner: &Runner, wait: &CiWait, progress: &dyn Fn(&str)) -> Result<repos::Ci> {
     let start = Instant::now();
     let mut reported = false;
     loop {
@@ -925,8 +976,31 @@ fn proof_gone(plan: &Plan, branch: &Branch, state: &RunState, local: bool) -> Re
 
 // MARK: GitHub facts
 
+/// Whether a comment starting with `prefix` was posted on the pull request since `since` (Unix seconds).
+pub fn commented_since(repo: &str, number: u64, prefix: &str, since: u64) -> Result<bool> {
+    let list = get_list(&format!("repos/{repo}/issues/{number}/comments?since={}", iso8601(since)), 3)?;
+    Ok(list.items.iter().any(|c| c["body"].as_str().is_some_and(|b| b.starts_with(prefix))))
+}
+
+/// `2026-10-12T14:03:00Z` for Unix seconds (UTC).
+pub fn iso8601(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rest = secs % 86_400;
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z", rest / 3600, rest / 60 % 60, rest % 60)
+}
+
 /// The pull request with `mergeable` computed; GitHub fills it in the background after a change.
-fn pull(repo: &str, number: u64) -> Result<Value> {
+pub(crate) fn pull(repo: &str, number: u64) -> Result<Value> {
     let path = format!("repos/{repo}/pulls/{number}");
     for _ in 0..5 {
         let pr = get(&path)?.with_context(|| format!("PR #{number} nicht gefunden"))?;
@@ -972,7 +1046,7 @@ fn blocked_reason(state: &str) -> Option<&'static str> {
 }
 
 /// Merge commit if the repository allows it, else squash, else rebase.
-fn merge_method(info: &Value) -> &'static str {
+pub(crate) fn merge_method(info: &Value) -> &'static str {
     let allowed = |key: &str| info[key].as_bool() != Some(false);
     if allowed("allow_merge_commit") {
         "merge"
@@ -1051,8 +1125,8 @@ fn short(sha: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ReleaseRule;
     use crate::github::mock;
-    use crate::repos::ProductLink;
 
     #[test]
     fn finds_the_latest_release_and_the_next_patch() {
@@ -1194,7 +1268,7 @@ mod tests {
             mock::install([("repos/o/app/pulls/1".to_owned(), Some(current)), main.clone()]);
             match merge(&plan, &approved(1), &mut state).unwrap() {
                 Done::Skipped(text) => assert!(text.contains(why), "{text}"),
-                Done::Ok(text) => panic!("merged: {text}"),
+                other => panic!("unexpected: {other:?}"),
             }
             assert!(mock::writes().is_empty());
         }
@@ -1225,7 +1299,7 @@ mod tests {
             mock::install([("repos/o/app/pulls/2".to_owned(), Some(current))]);
             match rebase(&plan, &rebase_pr).unwrap() {
                 Done::Skipped(text) => assert!(text.contains(why), "{text}"),
-                Done::Ok(text) => panic!("commented: {text}"),
+                other => panic!("unexpected: {other:?}"),
             }
             assert!(mock::writes().is_empty());
         }
@@ -1238,12 +1312,12 @@ mod tests {
             ("repos/o/app/pulls/3".to_owned(), Some(open_pr(3, "h3", "dependabot[bot]", "clean"))),
             ("repos/o/app/pulls/9".to_owned(), Some(json!({ "state": "closed", "merged": false }))),
         ]);
-        assert!(matches!(close(&plan, &close_pr).unwrap(), Done::Skipped(text) if text.contains("ohne Merge geschlossen")));
+        assert!(matches!(close(&plan, &close_pr, false).unwrap(), Done::Skipped(text) if text.contains("ohne Merge geschlossen")));
         assert!(mock::writes().is_empty(), "the reason no longer holds");
 
         mock::answer("repos/o/app/pulls/9", Some(json!({ "state": "open", "merged": false })));
         mock::reply("PATCH repos/o/app/pulls/3", 422, json!({ "message": "nope" }));
-        let error = close(&plan, &close_pr).unwrap_err();
+        let error = close(&plan, &close_pr, false).unwrap_err();
         assert!(format!("{error:#}").starts_with("Kommentar gepostet, aber"), "both parts are reported: {error:#}");
         assert_eq!(mock::writes(), ["POST repos/o/app/issues/3/comments", "PATCH repos/o/app/pulls/3"]);
     }
@@ -1271,7 +1345,7 @@ mod tests {
         let runner = Runner::default();
         let skipped = |state: &RunState, why: &str| match tag(&plan, state, &runner, &quick(), &|_| {}).unwrap() {
             Done::Skipped(text) => assert!(text.contains(why), "{text}"),
-            Done::Ok(text) => panic!("tagged: {text}"),
+            other => panic!("unexpected: {other:?}"),
         };
         let mut state = RunState { expected_head: Some("m2".into()), ..RunState::default() };
 
@@ -1294,7 +1368,7 @@ mod tests {
             ("repos/o/app/commits/m2/status?per_page=100".to_owned(), Some(json!({ "total_count": 0, "statuses": [] }))),
         ]);
         mock::install(world);
-        skipped(&state, "läuft nach 0 Minuten noch");
+        assert!(matches!(tag(&plan, &state, &runner, &quick(), &|_| {}).unwrap(), Done::Pending(text) if text.contains("läuft nach 0 Minuten noch")));
 
         let mut world = tag_world("m2");
         world[1].1 = Some(json!([{ "name": "1.0.0" }, { "name": "1.0.5" }]));
@@ -1342,7 +1416,7 @@ mod tests {
         };
         let skipped = |b: &Branch, state: &RunState, why: &str| match delete_branch(&plan, b, state).unwrap() {
             Done::Skipped(text) => assert!(text.contains(why), "{text}"),
-            Done::Ok(text) => panic!("deleted: {text}"),
+            other => panic!("unexpected: {other:?}"),
         };
         mock::install(world("f1", false, json!([])));
         skipped(&branch(Proof::AfterMerge(5)), &state, "nicht gemergt");
@@ -1391,9 +1465,11 @@ mod tests {
         RepoTarget {
             key: "o/app".into(),
             repo: "o/app".into(),
-            products: vec![ProductLink { id: "app".into(), name: "App".into(), documented: "1.0.0".into(), tag_prefix: String::new(), local_path: None, enabled: false }],
-            tag_prefix: Some(String::new()),
-            tag_conflict: None,
+            github_id: None,
+            enabled: true,
+            products: Vec::new(),
+            release: Some(ReleaseRule { tag_prefix: String::new(), publishes_release: false }),
+            conflicts: Vec::new(),
             local: LocalCopy::Found { path: dir.display().to_string() },
             website: false,
         }
@@ -1460,7 +1536,7 @@ mod tests {
         let state = RunState::new(&plan);
         let skipped = |plan: &Plan, state: &RunState, why: &str| match delete_local_branch(plan, &merged, state).unwrap() {
             Done::Skipped(text) => assert!(text.contains(why), "{text}"),
-            Done::Ok(text) => panic!("deleted: {text}"),
+            other => panic!("unexpected: {other:?}"),
         };
         // The clone's origin/main contains the branch, but main on GitHub was rewritten without it.
         mock::install([on_github(&sha, Some("diverged"))]);
@@ -1486,7 +1562,7 @@ mod tests {
         let runner = Runner::default();
         let skipped = |why: &str| match tag(&plan, &state, &runner, &quick(), &|_| {}).unwrap() {
             Done::Skipped(text) => assert!(text.contains(why) && text.contains("nach dem Warten"), "{text}"),
-            Done::Ok(text) => panic!("tagged: {text}"),
+            other => panic!("unexpected: {other:?}"),
         };
         let mut world = tag_world("m2");
         world.extend(green("m2"));
@@ -1504,32 +1580,51 @@ mod tests {
     }
 
     #[test]
-    fn a_preview_runs_once_and_only_for_what_it_was_made_for() {
+    fn a_plan_runs_only_for_what_it_was_made_for() {
         let target = target_with(Path::new("/nowhere/app"));
-        let set = |id| PlanSet {
-            id,
-            project: "~/site".into(),
+        let set = PlanSet {
+            id: 1,
             created_at: 0,
-            merge: true,
+            prs: true,
             cleanup: true,
+            release: true,
             model: String::new(),
             targets: vec![(target.key.clone(), target.fingerprint())],
             plans: vec![plan()],
         };
-        assert_eq!(set(1).check_binding("~/site", &[target.clone()]), Ok(()));
-        assert!(set(1).check_binding("~/other", &[target.clone()]).is_err(), "project switched");
-        let changed = RepoTarget { tag_prefix: Some("v".into()), ..target.clone() };
-        assert!(set(1).check_binding("~/site", &[changed]).is_err(), "tag prefix changed in site.json");
-        assert!(set(1).check_binding("~/site", &[]).is_err(), "repository no longer a product");
+        assert_eq!(set.check_binding(std::slice::from_ref(&target)), Ok(()));
+        let changed = RepoTarget { release: Some(ReleaseRule { tag_prefix: "v".into(), publishes_release: false }), ..target.clone() };
+        assert!(set.check_binding(&[changed]).is_err(), "release rule changed");
+        let off = RepoTarget { enabled: false, ..target.clone() };
+        assert!(set.check_binding(&[off]).is_err(), "turned off meanwhile");
+        assert!(set.check_binding(&[]).is_err(), "no longer managed");
+        let stored: PlanSet = serde_json::from_str(&serde_json::to_string(&set).unwrap()).unwrap();
+        assert_eq!(stored.check_binding(&[target]), Ok(()), "survives being stored");
+    }
 
-        let mut slot = None;
-        assert!(store_plan(&mut slot, "~/other", set(1)).is_err(), "a late answer for another project");
-        assert!(slot.is_none());
-        store_plan(&mut slot, "~/site", set(2)).unwrap();
-        assert!(take_plan(&mut slot, 1).is_err(), "an older preview's id");
-        assert!(slot.is_some(), "the newer one stays");
-        assert_eq!(take_plan(&mut slot, 2).unwrap().id, 2);
-        assert!(take_plan(&mut slot, 2).is_err(), "a second click runs nothing");
+    #[test]
+    fn a_tag_is_a_release_only_once_it_is_published() {
+        let runner = Runner::default();
+        let wait = |tag_commit: &str| {
+            vec![("repos/o/app/git/ref/tags/1.0.1".to_owned(), Some(json!({ "object": { "type": "commit", "sha": tag_commit } })))]
+        };
+        let runs = |list: Value| ("repos/o/app/actions/runs?head_sha=m2&event=push&per_page=30".to_owned(), Some(json!({ "workflow_runs": list })));
+
+        mock::install(wait("m2").into_iter().chain([runs(json!([]))]));
+        mock::sequence("repos/o/app/releases/tags/1.0.1", vec![None, Some(json!({ "draft": true })), Some(json!({ "draft": false, "html_url": "https://r" }))]);
+        let patient = CiWait { no_checks_after: Duration::ZERO, timeout: Duration::from_secs(60), poll: Duration::ZERO };
+        assert_eq!(wait_for_release("o/app", "1.0.1", "m2", &runner, &patient, &|_| {}).unwrap(), ReleaseWait::Published { url: "https://r".into() });
+
+        mock::install(wait("m2").into_iter().chain([("repos/o/app/releases/tags/1.0.1".to_owned(), None), runs(json!([]))]));
+        assert!(matches!(wait_for_release("o/app", "1.0.1", "m2", &runner, &quick(), &|_| {}).unwrap(), ReleaseWait::Pending(_)), "a bounded wait");
+
+        let failed = json!([{ "head_branch": "1.0.1", "status": "completed", "conclusion": "failure", "name": "Release", "html_url": "u" }]);
+        mock::install(wait("m2").into_iter().chain([("repos/o/app/releases/tags/1.0.1".to_owned(), None), runs(failed)]));
+        assert!(matches!(wait_for_release("o/app", "1.0.1", "m2", &runner, &patient, &|_| {}).unwrap(), ReleaseWait::WorkflowFailed(why) if why.contains("Release")));
+
+        mock::install(wait("elsewhere"));
+        assert!(matches!(wait_for_release("o/app", "1.0.1", "m2", &runner, &patient, &|_| {}).unwrap(), ReleaseWait::Failed(why) if why.contains("zeigt inzwischen")));
+        assert!(mock::writes().is_empty());
     }
 
     fn own_target() -> RepoTarget {
@@ -1569,11 +1664,18 @@ mod tests {
         println!("cost {:?}, denials {:?}", outcome.cost_usd, outcome.denials);
         let review: Review = serde_json::from_value(outcome.structured.expect("structured output")).unwrap();
         println!("problems {:?}", apply_review(&mut plan, &review.prs));
-        finish(&mut plan, true, false);
+        finish(&mut plan, false, true);
         for pr in &plan.prs {
             println!("#{} {:?} {:?} {:?}: {}", pr.number, pr.action, pr.risk, pr.bump, pr.reason);
         }
         assert_eq!(review.prs.len(), plan.prs.len());
+    }
+
+    #[test]
+    fn formats_timestamps_for_github() {
+        assert_eq!(iso8601(0), "1970-01-01T00:00:00Z");
+        assert_eq!(iso8601(1_791_813_780), "2026-10-12T14:03:00Z");
+        assert_eq!(iso8601(951_782_400), "2000-02-29T00:00:00Z");
     }
 
     #[test]

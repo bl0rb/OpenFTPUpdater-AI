@@ -4,15 +4,198 @@
 
 # OpenReleasePilot
 
-Desktop app that keeps a static website in step with the releases of the products it
-describes, and publishes it: Claude Code updates the content, the app builds, commits,
-pushes and uploads the result via SFTP, then checks the live site byte for byte. A second
-area, **Repositories**, shows the state of the products' repositories and takes care of them:
-merge reviewed pull requests, tag the next patch version, delete merged branches.
+Desktop app that looks after the GitHub repositories you choose, with Claude Code doing the work and
+you making the decisions. It reads their state, reviews and merges pull requests, cleans up merged
+branches, tags patch releases and waits for the published release, keeps a README, other documentation
+or a GitHub wiki up to date, and, if you have one, updates and publishes a static website as the last
+step. Everything that changes something on GitHub, in a wiki or on a website is first shown as a
+concrete proposal and only carried out after your approval.
 
-The app has two main areas, switched in the toolbar: **Übersicht** (the website) and
-**Repositories**; Settings stay under **Einrichtung**. The overview has four buttons, run one by one
-or all in a row:
+The app has three areas, switched in the toolbar, and its settings under **Einrichtung**:
+
+| Area | What it is for |
+|---|---|
+| **Repositories** (start view) | the managed repositories with their health, open jobs and the decisions they wait for; select repositories and start a care job |
+| **Läufe** | every care job: its steps, plans, proposals with their diffs, results and log; running, waiting and earlier ones |
+| **Website** (only with a website) | the website's own four steps, Precheck, Update, Upload, Verify, as before |
+
+## Getting started
+
+A fresh installation starts with **Repositories auswählen**: pick repositories from your GitHub list (or
+type `owner/name`). Nothing else is needed: no website, no SFTP access, no release. A read-only status
+check works without Claude; a care job needs Claude Code and the signed-in GitHub CLI, a README job
+additionally only Git access to the repository.
+
+An installation that already has a website (`.openreleasepilot/site.json`) offers **Aus Website
+übernehmen**: the product repositories of `site.json`, each once, with their local clone where it is
+unambiguous and, if you tick it, a release rule with the products' tag prefix. Conflicting tag prefixes
+or clone paths are shown and not taken over; repositories that are managed already stay as they are;
+`site.json` is not changed. Repeating the import adds nothing twice.
+
+## Managed repositories
+
+The app keeps its own list of repositories (identity: `owner/name`, case-insensitive, and GitHub's id).
+Each can be turned off (stays readable, no job takes it) or taken out of the list; that deletes
+nothing, neither on GitHub nor the local clone nor any website configuration. In the repository's
+**Verwaltung** section:
+
+- **Local clone** (optional): only used for cleaning up local branches and for Claude's look at the
+  code during a pull request review. Status and pull request care work without one.
+- **Release rule**: whether the app may tag the next patch version, with which tag prefix (`v` for
+  `v1.2.3`, empty for `1.2.3`), and whether a workflow of the repository publishes a GitHub release for
+  each tag. Without a rule the app never tags; it does not guess a versioning scheme.
+
+Which website products name a repository is shown (and where `site.json` disagrees with the release rule,
+also that), but the website's product selection does not decide what the app manages.
+
+## Repository status
+
+**Status aktualisieren** reads GitHub only: no Claude, no cost, no write, no `git fetch`. It runs when
+the area is first opened and on request, never in the background; a failed read keeps the older state
+but marks it as old, and data older than five minutes is shown as old. Without a `gh` login public
+repositories can still be read (GitHub then allows 60 requests per hour; a repository needs about eight).
+
+| State | When |
+|---|---|
+| **Blockiert** | the default branch's CI failed, or the repository cannot be read (GitHub answers 404 or refuses access; a 404 can also mean private without access) |
+| **Aufmerksamkeit nötig** | open Dependabot pull requests, commits since the last release or tag, a website product documents an older version than the latest release, or (after the detail view read them) pull requests with conflicts or failed CI |
+| **Unbekannt** | nothing of the above, but required facts are missing, incomplete or old: CI still running, no checks found, unclear result, query failed |
+| **In Ordnung** | everything required was read successfully and recently, and nothing needs doing |
+
+Missing release data alone does not prevent "In Ordnung"; missing or incomplete data never produces it.
+An open pull request from a person is no finding by itself, and a red pull request does not block the
+repository. Archived repositories and those without write access stay readable, but care is locked.
+The health of a repository and the progress of a job are shown separately: a repository can need
+attention while a job is already working on it.
+
+The detail view shows default branch and head commit, CI with its commit, release and tag, commits since
+that base (only where it is an ancestor of the head, otherwise "nicht bestimmbar"), release rule, local
+clone, every open pull request with target branch, author, CI and mergeability, the content targets the
+repository feeds with what each was last brought to, and the management settings.
+
+## Care jobs
+
+Select repositories on their cards (or open one) and choose **Pflegen …**. A job is made of the
+activities you pick, each optional:
+
+- **Pull requests**: Claude reviews every open pull request into the default branch, the app merges,
+  closes or asks Dependabot to rebase (rules below).
+- **Cleanup**: delete merged branches on GitHub and in the local clone.
+- **Release**: tag the next patch version where a release rule exists, once the CI of exactly that
+  commit passed, and, if the rule says so, wait for the published GitHub release. Pull request care no
+  longer implies a tag.
+- **Content targets** fed by the selected repositories: README/documentation or wiki, each with the
+  basis chosen for this job (newest release or current state of the default branch).
+- **Website** (if the selected repositories feed it): update, publish and verify as the last step.
+
+The app turns this into steps and runs them as far as it can without you: reading, Claude's review,
+preparing content in its own work folder. Before anything external changes it stops with a concrete
+proposal: the care plan (each action can be left out, none added), a content change with its diff and
+the app's checks, the website commit with its diff. Approving continues the job; nothing else needs to
+be started by hand. A tag is not a release: a step that needs the release waits for it (up to 30 minutes
+per look, then the job waits visibly and **Erneut prüfen** looks again). A failed step stops the steps
+that depend on it; independent ones go on, and a partial success is shown as such.
+
+| Job state | Meaning |
+|---|---|
+| **Geplant** | ready to continue |
+| **In Vorbereitung** / **Läuft** | the app reads, prepares or carries out an approved step |
+| **Freigabe nötig** | a plan or proposal waits for your decision |
+| **Wartet** | waiting for something outside the app: CI, a release workflow |
+| **Blockiert** | cannot go on without you: a conflict, a changed precondition, an interrupted run |
+| **Erfolgreich**, **Teilweise erfolgreich**, **Fehlgeschlagen**, **Abgebrochen** | finished, with the reason |
+
+Jobs are stored in the app's data folder (one file per job, written atomically after every change), with
+their plan, approvals, pinned source revisions, each result and the log. A restart forgets nothing and
+starts nothing by itself: a job that was running is marked interrupted, and **Fortsetzen** first looks
+up on GitHub (or in the wiki, or the clone) whether a write that had begun happened, before anything else
+runs, so nothing is merged, commented, tagged, opened or published twice. An approval only counts for
+the unchanged proposal: a changed target, a changed repository configuration, a newer release of a
+release-based source or a changed file makes the step ask again. **Abbrechen** stops after the current
+item; nothing done is rolled back. A repository, content target or the website belongs to at most one
+open job, and only one job (or website step) runs at a time.
+
+## Repository care rules
+
+The app decides, not Claude: a pull request needs exactly one valid verdict (green or yellow for a merge,
+a reason for a close); red, missing, duplicate or invalid verdicts leave it open. The review follows the
+rules of the `dependabot-pr` skill: risk class (green, yellow, red; below 1.0 a change of the first
+non-zero digit counts as major), release notes from the upstream repository, only manifest/lock/workflow
+files in Dependabot pull requests, SHA pins of Actions, related dependencies only together, majors checked
+against the actual use in the code. It costs Claude usage, roughly a few cents up to about a dollar per
+repository depending on the model and the number of pull requests. Right before each write the app
+checks again:
+
+- **Merge:** still open and no draft, same head commit, same target branch and repository, mergeable
+  according to GitHub, CI of the head commit passed; GitHub gets the expected head commit, so a push in
+  between makes it refuse. Merge commit where the repository allows it.
+- **Close:** still open, same head and target; a replacing pull request Claude named must still be open
+  or merged. The reason is posted as a comment; comment and close are reported separately.
+- **Rebase:** still open, really from Dependabot, same head, still in conflict or behind; then
+  `@dependabot rebase`. A Dependabot pull request that a merge of the same job put into conflict gets
+  this instead of the merge, as the plan says.
+- **Tag:** the next patch version of the newest `x.y.z` tag with the rule's prefix, only if every
+  planned merge of the repository succeeded, the default branch is exactly where this job's merges left
+  it, the release line is unchanged, there are commits since the last tag, and the CI of exactly that
+  commit passed (the app waits up to 30 minutes, then the job waits and can look again). Red, unclear,
+  cancelled or **no checks at all** mean no tag. Right before writing, after the wait, the app checks the
+  release line again: a newer tag or a moved base makes the planned version invalid. Existing tags are
+  never moved; the first release is tagged by hand.
+- **Delete merged branches:** on GitHub only while the branch is on the same commit, not protected, not
+  the default branch, no open pull request comes from or targets it, and its proof still holds on GitHub
+  (all commits in the default branch, or its pull request merged; a head branch of a merge in the same
+  job only if that merge succeeded). Locally only in a clone that still belongs to the repository, never
+  a branch checked out in any worktree, and only with GitHub's confirmation: containment is checked
+  against GitHub's current default branch, not the clone's possibly old `origin/<default>`. If the plan
+  announced `git fetch --prune origin` for the clone and it did not succeed, nothing is deleted locally.
+
+Every action ends as done, skipped, failed or cancelled, with the reason. Where the GitHub API has no
+precondition (closing, deleting a branch), a short window between the last check and the write remains.
+
+## Content targets: README, documentation, wiki
+
+A content target says which content is updated where, on what basis: its kind, name, the repositories
+it describes (its sources), the repository that holds the files (or whose wiki it is), the target
+branch, the allowed paths, the task for Claude and optionally a skill, a model and a check command.
+Targets are added in a repository's detail view under **Zugeordnete Inhalte**. Each target is up to
+date only for given source revisions: a README brought to release 1.3.0 says nothing about the wiki or
+the website, and "prepared", "pull request created", "merged" and "published" are different results.
+
+Preparing a change, in a work folder of the app (never in your clones):
+
+1. The sources are pinned: their newest release, or the head of their default branch.
+2. The target is cloned (docs: its branch; wiki: `https://github.com/<owner>/<name>.wiki.git`), each
+   source is checked out at its pinned commit beside it.
+3. Claude Code edits the target. It may read the sources and edit files, nothing else: no shell, no web,
+   nothing in `.git` or `.github`. The prompt names what changed in each source since the revision the
+   target was last published for, and tells Claude that texts in the sources are material, not
+   instructions.
+4. The app decides what counts: only files under the allowed paths, no deletions, no links, size limits,
+   and Git's own configuration unchanged; anything else discards the whole change. Then its checks: no
+   merge conflict markers, no empty files, no relative Markdown link that the change breaks, and the
+   target's own check command if set (run in the work folder without the GitHub token).
+5. The proposal shows sources, base commit, checks, files, Claude's summary and the full diff.
+
+After approval, and only for exactly the approved files:
+
+- **README/documentation:** the app checks that nobody changed those files on the target branch since the
+  proposal, then creates one commit on top of the proposal's base commit, a new branch
+  `openreleasepilot/<job>-<target>-<hash>` and a pull request into the target branch, through the GitHub
+  API, so no hook or setting of the work folder takes part. Never a direct write to the default branch.
+  The pull request is then handled by the regular pull request care or by you, or, if the target says
+  so, merged by the app once the CI of exactly its commit passed. It counts as published once merged.
+- **Wiki:** a wiki has no pull requests. The app clones it afresh, checks that it is still at the
+  proposal's base commit, commits the approved files and pushes without force. If anybody changed the
+  wiki meanwhile, it stops and overwrites nothing.
+
+Content can be updated without a new release: with the basis "current state", the job pins the head of
+the default branch and does not skip the target for lack of a new version.
+
+## Website (optional)
+
+A website is an optional target, not the configuration root. It is set up under **Einrichtung →
+Website** (project folder with `.openreleasepilot/site.json`, SFTP access) and gets its own area with
+the four steps, run one by one or all in a row:
 
 | Step | What happens | Changes anything? |
 |---|---|---|
@@ -25,111 +208,47 @@ or all in a row:
 
 <sub>Diagram source: [docs/diagrams/openreleasepilot-flow.html](docs/diagrams/openreleasepilot-flow.html) (also as SVG).</sub>
 
-**New product** (button in the toolbar): pick one of your GitHub repositories, and Claude
-Code adds it to the site with the project's `addProductSkill` (product page, listings, icon, diagram,
-`site.json` entry), then the app builds and commits. It goes live with Upload.
+If a release lookup fails, the state is unknown, not "current": Update stops, and with it **Alle
+Schritte** before Upload, instead of publishing on an incomplete basis.
 
-## Selecting products
+As the last step of a care job, the same update runs for the products of the job's repositories (the
+website's product selection applies, too), and several repositories feeding one website are updated
+together in one step, after their releases. The resulting local commit is the proposal, with its diff;
+after approval the app pushes, uploads and verifies. Rejecting leaves the commit unpublished in the
+website project.
 
-The main window lists the products from `site.json` with a checkbox each. Precheck and Update only
+**New product** (button in the Website area): pick one of your GitHub repositories, and Claude Code adds
+it to the site with the project's `addProductSkill` (product page, listings, icon, diagram, `site.json`
+entry), then the app builds and commits. It goes live with Upload.
+
+The Website area lists the products from `site.json` with a checkbox each. Precheck and Update only
 handle selected products: Precheck does not look up the others, and Update names them to Claude as "not
-selected, leave unchanged". Every row shows the documented version, after a Precheck also whether a newer
-release exists, and "kein Klon" if `localPath` is missing. The selection is stored in the app's settings,
-not in the website repository. It does not hide anything in **Repositories**: turned-off products stay
-listed there.
+selected, leave unchanged". The selection is stored in the app's settings, not in the website
+repository; it does not change which repositories the app manages.
 
-## Repositories
+## Changed from earlier versions
 
-The **Repositories** area lists the repository of every product in `site.json`, each once even when
-several products share it (`owner/name`, case-insensitive), including products turned off in the
-overview. Each row shows a state in words with its main reason, open pull requests (with how many
-come from Dependabot), the CI of the default branch, the latest published release (or, without one, the
-highest matching tag, marked as tag), the local clone and when it was last read. The website's own
-repository is named in the header.
-
-**Status aktualisieren** reads GitHub only: no Claude, no cost, no write, no `git fetch`. It runs when
-the area is first opened and on request, never in the background; a failed read keeps the older state
-but marks it as old, and data older than five minutes is shown as old. Without a `gh` login public
-repositories can still be read (GitHub then allows 60 requests per hour; a repository needs about eight).
-
-| State | When |
-|---|---|
-| **Blockiert** | the default branch's CI failed, or the repository cannot be read (GitHub answers 404 or refuses access; a 404 can also mean private without access) |
-| **Aufmerksamkeit nötig** | open Dependabot pull requests, commits since the last release or tag, the website documents an older version than the latest release, or (after the detail view read them) pull requests with conflicts or failed CI |
-| **Unbekannt** | nothing of the above, but required facts are missing, incomplete or old: CI still running, no checks found, unclear result, query failed |
-| **In Ordnung** | everything required was read successfully and recently, and nothing needs doing |
-
-Missing release data alone does not prevent "In Ordnung"; missing or incomplete data never produces it.
-An open pull request from a person is no finding by itself, and a red pull request does not block the
-repository. Archived repositories and those without write access stay readable, but care is locked.
-
-The detail view (click a row) shows default branch and head commit, CI with its commit, release and tag,
-commits since that base (only where it is an ancestor of the head, otherwise "nicht bestimmbar"),
-tag prefix, local clone, the products with their documented version, and every open pull request with
-target branch, author, CI and mergeability. Only pull requests into the default branch go into care.
-
-## Repository care
-
-Care starts from the detail view (**Dieses Repository prüfen**) or for the repositories of the selected
-products (**Ausgewählte pflegen …**, which names them first and leaves out locked ones), through the
-signed-in `gh` CLI, in two parts:
-
-1. **Prüfen** reads the state on GitHub (read only, no fetch), then Claude Code judges each open pull
-   request into the default branch, read-only (in the local clone if there is one), by the rules of the
-   `dependabot-pr` skill: risk class (green, yellow, red; below 1.0 a change of the first non-zero digit
-   counts as major), release notes from the upstream repository, only manifest/lock/workflow files in
-   Dependabot pull requests, SHA pins of Actions, related dependencies only together, majors checked
-   against the actual use in the code. This costs Claude usage, roughly a few cents up to about a dollar
-   per repository depending on the model and the number of pull requests.
-2. The preview under **Pflege** lists per repository what will happen: merge, close, rebase, tag, clean
-   up, left open, each with Claude's risk and reason and what the app checks right before. **Ausführen**
-   carries out exactly this preview, **Verwerfen** drops it. A new check, discarding it or switching the
-   project drops it too; a change of tag prefix or local clone in `site.json` makes the run refuse it.
-
-The app decides, not Claude: a pull request needs exactly one valid verdict (green or yellow for a merge,
-a reason for a close); red, missing, duplicate or invalid verdicts leave it open. Right before each write
-the app checks again:
-
-- **Merge:** still open and no draft, same head commit, same target branch and repository, mergeable
-  according to GitHub, CI of the head commit passed; GitHub gets the expected head commit, so a push in
-  between makes it refuse. Merge commit where the repository allows it.
-- **Close:** still open, same head and target; a replacing pull request Claude named must still be open
-  or merged. The reason is posted as a comment; comment and close are reported separately.
-- **Rebase:** still open, really from Dependabot, same head, still in conflict or behind; then
-  `@dependabot rebase`. A Dependabot pull request that a merge of the same run put into conflict gets
-  this instead of the merge, as the preview says.
-- **Tag:** the next patch version of the newest `x.y.z` tag with the product's `tagPrefix`, only if every
-  planned merge of the repository succeeded, the default branch is exactly where this run's merges left
-  it, the release line is unchanged, there are commits since the last tag, and the CI of exactly that
-  commit passed (the app waits up to 30 minutes). Red, still running, unclear, cancelled or **no checks
-  at all** mean no tag. Existing tags are never moved. In repositories with a release workflow the tag
-  starts it; the release itself is that workflow's business. The first release is tagged by hand.
-- **Delete merged branches** (optional): on GitHub only while the branch is on the same commit, not
-  protected, not the default branch, no open pull request comes from or targets it, and its proof still
-  holds (all commits in the default branch, or its pull request merged; a head branch of a merge in the
-  same run only if that merge succeeded). Locally only in a clone that still belongs to the repository,
-  never a branch checked out in any worktree. If the clone's `origin/<default>` differs from GitHub, the
-  preview announces `git fetch --prune origin` and the run does it before deleting; only branches named
-  in the preview are deleted.
-
-Every action ends as done, skipped, failed or cancelled, with the reason. Done stays done after an error
-or a cancel; nothing is rolled back, and the run never tries a write twice (after an unclear answer it
-reads the state first). Afterwards the app reads the touched repositories again. Where the GitHub API has
-no precondition (closing, deleting a branch), a short window between the last check and the write remains.
-
-**Changed from earlier versions:** a tag now needs CI that positively passed for exactly the tagged commit. Before,
-the app tagged after three minutes without any checks; repositories without CI now get no automatic tag.
+- The managed repositories are the app's own list. Product repositories of `site.json` no longer appear
+  by themselves; **Aus Website übernehmen** takes them over once. The start view is **Repositories**.
+- Pull request care, cleanup and release are chosen separately; merging no longer implies a patch tag,
+  and a tag needs a release rule set up in the app (the `tagPrefix` of `site.json` alone is not enough).
+- Care runs as stored jobs in **Läufe**: the plan is approved there and survives a restart.
+- Local branches are only deleted with GitHub's confirmation, and not after a failed update of the clone.
+- A failed release lookup stops the website's Update (and **Alle Schritte**) instead of counting as
+  "nothing new".
+- From 0.3.0: a tag needs CI that positively passed for exactly the tagged commit; repositories without CI
+  get no automatic tag.
 
 ## Choosing repositories
 
 The app lists your GitHub repositories through the signed-in `gh` CLI, private ones included, and marks
-each one: local clone found, already on the site, website repository. Without a `gh` login it falls back
-to the public repositories of the owners already on the site.
+each one: managed already, local clone found, product of the website, website repository. Without a
+`gh` login it falls back to the public repositories of the owners it already knows.
 
-- **Website repository** (Settings): pick it from the list; the project folder follows from its local
-  clone. If there is none, the app clones it into the repo folder.
 - **Repo folder** (Settings): where local clones are searched and created; by default the parent of the
-  project folder. Product clones found there are handed to Claude as `localPath`.
+  website project or `~/Documents/Code`.
+- **Website repository** (Settings, optional): pick it from the list; the project folder follows from its
+  local clone. If there is none, the app clones it into the repo folder.
 
 ## Installation
 
@@ -169,13 +288,16 @@ suchen** or when a beta is installed. Development builds do not check.
 ## Requirements
 
 - macOS (developed on macOS 27; the code is cross-platform Tauri, Windows is untested)
-- On the machine: `git`, Node.js/npm (for the site build), [Claude Code](https://claude.com/claude-code) signed in, recommended the GitHub CLI `gh` signed in (raises the GitHub API limit from 60 to 5000 requests per hour; the token is also handed to the build the app runs as `GITHUB_TOKEN`, but never to Claude Code)
-- An SFTP account for the web space
+- On the machine: `git` with access to your repositories, [Claude Code](https://claude.com/claude-code)
+  signed in, the GitHub CLI `gh` signed in for care jobs (it also raises the GitHub API limit from 60 to
+  5000 requests per hour; the token is used by the app, and handed to the website build as
+  `GITHUB_TOKEN`, but never to Claude Code)
+- Only for a website: Node.js/npm (or whatever its build needs) and an SFTP account for the web space
 
 The app starts from the Finder and asks the login shell for the user's `PATH` once, so tools
 installed with nvm, Homebrew or into `~/.local/bin` are found.
 
-## Project file `.openreleasepilot/site.json`
+## Website project file `.openreleasepilot/site.json`
 
 Lives in the website repository and describes how to build and what to watch. Projects set up
 before the app was renamed from OpenFTPUpdater-AI keep their `.openftpupdater/site.json`; it is read as
@@ -241,17 +363,31 @@ six hours); the log shows the version and, at the start of every run, the exact 
 |---|---|---|---|
 | `opus` | Claude Opus 5.5 | $4 / $20 | Default: public product claims in two languages need accuracy |
 | `sonnet` | Claude Sonnet 5.5 | $2 / $10 | Worth trying for mechanical tasks such as screenshots and diagrams |
-| `haiku` | Claude Haiku 4.5 | $1 / $5 | Small, clearly scripted tasks |
+| `haiku` | Claude Haiku 5.5 | see Anthropic's price list | Small, clearly scripted tasks |
 | `fable` | Claude Fable 5.1 | $10 / $50 | Only if Opus results fall short, e.g. for a new product page |
 
 Effort is the first lever: `high` for texts and the consistency check, `medium` for screenshots and
 diagrams. With a Claude subscription login, the cost shown per run is a notional API price; the runs
 count against the subscription's usage limits instead.
 
+Care jobs use the model chosen for the job (a content target can set its own), else the default under
+**Einrichtung → Ausführungsregeln**, else the website's `claude.model`, else Claude Code's default; the
+cost limit per run likewise.
+
 ## What Claude may do
 
-Claude Code runs as `claude -p … --permission-mode acceptEdits` in the project folder. Headless
-runs cannot ask, so everything not on the allowlist is denied:
+Every Claude Code run is headless (`claude -p`), so it cannot ask; whatever is not allowed is denied, and
+denied calls are listed after the run. Each kind of run has its own rights:
+
+- **Pull request review:** read only: the clone, `gh pr view|diff|checks|list`, `gh release`, reading
+  `gh api` calls, the web for release notes. No edits, no `gh pr merge|close|comment`, no write calls.
+  The app merges, closes and comments.
+- **Content (README, documentation, wiki):** reading and editing files in the app's work folder (the
+  target's clone) and reading the pinned sources beside it; skills. No shell, no web, nothing in `.git`
+  or `.github`. What counts is decided afterwards by the app (see Content targets).
+- **Website update:** as follows.
+
+For the website, Claude Code runs as `claude -p … --permission-mode acceptEdits` in the project folder:
 
 - read, search, edit and write files in the project; use skills
 - read-only git in the project and in other repositories via `git -C <path> log|show|diff|tag|describe|ls-tree|fetch --tags`
@@ -278,9 +414,12 @@ cannot widen its own rights; adding products is not affected.
   before; other files on the server (other domains, `.htaccess`, …) are never touched.
 - Only a committed, clean working tree is uploaded, and only if it is not behind `origin`.
 
-Settings live in `~/Library/Application Support/OpenReleasePilot/config.json` (no secrets). On the
-first start after the rename the app takes over the folder `OpenFTPUpdater-AI` and the SFTP password
-saved under the old name; macOS may ask once whether OpenReleasePilot may use that keychain entry.
+Settings live in `~/Library/Application Support/OpenReleasePilot/config.json` (managed repositories,
+content targets, website and SFTP settings; no secrets). Next to it: `jobs/` (one file and one log per
+care job; the newest 50 finished jobs are kept), `content.json` (what each content target was last
+brought to) and `work/` (the work folders of open jobs, removed when a job is finished). On the first
+start after the rename the app takes over the folder `OpenFTPUpdater-AI` and the SFTP password saved
+under the old name; macOS may ask once whether OpenReleasePilot may use that keychain entry.
 
 ## Building
 
@@ -312,15 +451,18 @@ git tag 0.2.0 && git push origin 0.2.0
 ```
 
 The app ends up in `desktop/target/release/bundle/macos/OpenReleasePilot.app` (ad-hoc signed).
-During development: `npm run dev`. Core tests: `cargo test -p openreleasepilot-core`.
+During development: `npm run dev`. Tests: `cargo test --workspace`; tests that read GitHub or run
+Claude (a few cents) are marked `ignored` and run with `cargo test -p openreleasepilot-core -- --ignored`;
+none of them writes to a real repository.
 
 `bundle.macOS.minimumSystemVersion` is deliberately unset: with `MACOSX_DEPLOYMENT_TARGET=14.0`,
 Rust 1.94 on macOS 27 produced proc-macro libraries that fail to load in release builds
 ("mis-aligned LINKEDIT string pool").
 
 ```
-desktop/core       Rust library: config, site.json, shell/PATH, git, GitHub, Claude, SFTP, manifest, verify
-desktop/src-tauri  Tauri app: state, commands, the four steps
+desktop/core       Rust library: config, repositories and their health, care rules, content targets,
+                   jobs, site.json, shell/PATH, git, GitHub, Claude, SFTP, manifest, verify
+desktop/src-tauri  Tauri app: state, commands, job passes, the website's four steps
 desktop/ui         Web UI (HTML, JS, CSS), no build step
 ```
 

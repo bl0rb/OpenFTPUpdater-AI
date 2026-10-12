@@ -16,5 +16,5 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 ssh2 = { version = "0.9", features = ["vendored-openssl"] }
-ureq = "2"
+ureq = "3"
 walkdir = "2"

@@ -86,7 +86,8 @@ activities you pick, each optional:
 
 The app turns this into steps and runs them as far as it can without you: reading, Claude's review,
 preparing content in its own work folder. Before anything external changes it stops with a concrete
-proposal: the care plan (each action can be left out, none added), a content change with its diff and
+proposal: the care plan (each action can be left out; merges Claude advised against but the app's rules
+allow are offered for you to tick; nothing else can be added), a content change with its diff and
 the app's checks, the website commit with its diff. Approving continues the job; nothing else needs to
 be started by hand. A tag is not a release: a step that needs the release waits for it (up to 30 minutes
 per look, then the job waits visibly and **Erneut prüfen** looks again). A failed step stops the steps
@@ -114,7 +115,12 @@ open job, and only one job (or website step) runs at a time.
 ## Repository care rules
 
 The app decides, not Claude: a pull request needs exactly one valid verdict (green or yellow for a merge,
-a reason for a close); red, missing, duplicate or invalid verdicts leave it open. The review follows the
+a reason for a close); red, missing, duplicate or invalid verdicts leave it open. Claude's "keep open" is
+advice, not a veto: a pull request it rates green or yellow and that GitHub reports mergeable with green
+CI is offered in the plan under **Zur Wahl**, unticked, with Claude's reason; ticked, it is merged after
+your approval with the same checks as any other merge. Then the plan waits for your decision instead of
+ending with "nothing to do". A tag that would only follow such a merge is planned and dropped again if
+nothing is merged. The review follows the
 rules of the `dependabot-pr` skill: risk class (green, yellow, red; below 1.0 a change of the first
 non-zero digit counts as major), release notes from the upstream repository, only manifest/lock/workflow
 files in Dependabot pull requests, SHA pins of Actions, related dependencies only together, majors checked

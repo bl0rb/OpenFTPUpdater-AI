@@ -257,6 +257,10 @@ pub struct CareItem {
     /// Close: the comment is posted already, only the close is missing.
     #[serde(default)]
     pub commented: bool,
+    /// Offered for the user to choose (a merge Claude advised against, see `PullRequest::optional`);
+    /// it only runs when the approval names it.
+    #[serde(default)]
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -583,11 +587,15 @@ pub fn care_items(set: &PlanSet) -> Vec<CareItem> {
             detail: String::new(),
             writing: false,
             commented: false,
+            optional: false,
         };
         for (action, kind) in [(Action::Close, ItemKind::Close), (Action::Merge, ItemKind::Merge), (Action::Rebase, ItemKind::Rebase)] {
             for pr in plan.prs.iter().filter(|pr| pr.action == action) {
                 items.push(item(kind, pr.number.to_string(), format!("PR #{}", pr.number), pr.title.clone()));
             }
+        }
+        for pr in plan.prs.iter().filter(|pr| pr.action == Action::Keep && pr.optional) {
+            items.push(CareItem { optional: true, ..item(ItemKind::Merge, pr.number.to_string(), format!("PR #{}", pr.number), pr.title.clone()) });
         }
         if let Some(tag) = &plan.tag {
             items.push(item(ItemKind::Tag, tag.clone(), format!("Tag {tag}"), "im Release-Schritt".into()));
@@ -617,9 +625,12 @@ fn kind_key(kind: ItemKind) -> &'static str {
     }
 }
 
-/// Approves the plan with this id, minus the items the user left out. The window can only narrow
-/// the plan: every id must be one of its items. A left-out tag is removed from the plan itself.
-pub fn approve_plan(job: &mut Job, plan_id: u64, excluded: &[String], now: u64) -> Result<(), String> {
+/// Approves the plan with this id: the items the user left out do not run, and of the merges the
+/// plan offered for choice (`CareItem::optional`) only those in `included` do. The window cannot add
+/// anything else: every id must be one of the plan's items, every included one an offered one. A
+/// left-out tag is removed from the plan itself, and so is a tag that rested on merges none of which
+/// remains.
+pub fn approve_plan(job: &mut Job, plan_id: u64, excluded: &[String], included: &[String], now: u64) -> Result<(), String> {
     let set = job.plan.as_mut().ok_or("Kein Pflegeplan vorhanden")?;
     if set.id != plan_id {
         return Err("Dieser Plan gilt nicht mehr; es gibt einen neueren".into());
@@ -631,14 +642,42 @@ pub fn approve_plan(job: &mut Job, plan_id: u64, excluded: &[String], now: u64) 
     if let Some(unknown) = excluded.iter().find(|id| !job.items.iter().any(|item| &item.id == *id)) {
         return Err(format!("{unknown} gehört nicht zu diesem Plan"));
     }
-    for item in job.items.iter_mut().filter(|item| excluded.contains(&item.id)) {
-        item.outcome = Some(ItemOutcome::Excluded);
-        item.detail = "von dir ausgenommen".into();
-        if item.kind == ItemKind::Tag {
-            if let Some(plan) = set.plans.iter_mut().find(|p| p.key == item.repo) {
-                plan.tag = None;
-                plan.tag_note = Some("von dir ausgenommen".into());
+    if let Some(unknown) = included.iter().find(|id| !job.items.iter().any(|item| &item.id == *id && item.optional)) {
+        return Err(format!("{unknown} steht nicht zur Wahl"));
+    }
+    for item in job.items.iter_mut() {
+        let chosen = item.optional && included.contains(&item.id) && !excluded.contains(&item.id);
+        if item.optional && !chosen {
+            item.outcome = Some(ItemOutcome::Excluded);
+            item.detail = "nicht gewählt; bleibt offen, wie Claude riet".into();
+        } else if chosen {
+            // The user's choice turns the advice into a planned merge; the run checks it like any other.
+            let plan = set.plans.iter_mut().find(|p| p.key == item.repo);
+            if let Some(pr) = plan.and_then(|p| p.prs.iter_mut().find(|pr| pr.number.to_string() == item.reference)) {
+                pr.action = Action::Merge;
+                pr.reason = format!("von dir gewählt; Claude riet, offen zu lassen: {}", pr.reason);
             }
+        } else if excluded.contains(&item.id) {
+            item.outcome = Some(ItemOutcome::Excluded);
+            item.detail = "von dir ausgenommen".into();
+            if item.kind == ItemKind::Tag {
+                if let Some(plan) = set.plans.iter_mut().find(|p| p.key == item.repo) {
+                    plan.tag = None;
+                    plan.tag_note = Some("von dir ausgenommen".into());
+                }
+            }
+        }
+    }
+    for plan in set.plans.iter_mut().filter(|p| p.tag.is_some() && p.tag_needs_merge) {
+        let merging = job.items.iter().any(|i| i.repo == plan.key && i.kind == ItemKind::Merge && i.outcome.is_none());
+        if !merging {
+            let why = format!("{} unverändert seit {}, und es wird nichts gemergt; kein Tag", plan.default_branch, plan.last_tag.as_deref().unwrap_or("dem letzten Tag"));
+            for item in job.items.iter_mut().filter(|i| i.repo == plan.key && i.kind == ItemKind::Tag && i.outcome.is_none()) {
+                item.outcome = Some(ItemOutcome::Excluded);
+                item.detail = why.clone();
+            }
+            plan.tag = None;
+            plan.tag_note = Some(why);
         }
     }
     let step = job.step_mut("care").expect("checked above");
@@ -1018,15 +1057,55 @@ mod tests {
         let ids: Vec<&str> = job.items.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids, ["o/app|close|3", "o/app|merge|1", "o/app|tag|v1.0.1", "o/app|branch|old", "o/app|sync|", "o/app|local|local"], "nothing for a repository that could not be read");
         job.plan = Some(set);
-        assert!(approve_plan(&mut job, 7, &[], 1).is_err(), "not waiting for approval yet");
+        assert!(approve_plan(&mut job, 7, &[], &[], 1).is_err(), "not waiting for approval yet");
         job.step_mut("care").unwrap().state = StepState::NeedsApproval;
-        assert!(approve_plan(&mut job, 6, &[], 1).is_err(), "an older plan");
-        assert!(approve_plan(&mut job, 7, &["o/app|merge|99".into()], 1).is_err(), "an item that is not in the plan");
-        approve_plan(&mut job, 7, &["o/app|merge|1".into(), "o/app|tag|v1.0.1".into()], 1).unwrap();
+        assert!(approve_plan(&mut job, 6, &[], &[], 1).is_err(), "an older plan");
+        assert!(approve_plan(&mut job, 7, &["o/app|merge|99".into()], &[], 1).is_err(), "an item that is not in the plan");
+        assert!(approve_plan(&mut job, 7, &[], &["o/app|merge|1".into()], 1).is_err(), "only offered items can be chosen");
+        approve_plan(&mut job, 7, &["o/app|merge|1".into(), "o/app|tag|v1.0.1".into()], &[], 1).unwrap();
         assert_eq!(job.step("care").unwrap().state, StepState::Approved);
         assert_eq!(job.items[1].outcome, Some(ItemOutcome::Excluded));
         assert_eq!(job.plan.as_ref().unwrap().plans[0].tag, None, "a left-out tag is not set");
-        assert!(approve_plan(&mut job, 7, &[], 2).is_err(), "approved once");
+        assert!(approve_plan(&mut job, 7, &[], &[], 2).is_err(), "approved once");
+    }
+
+    /// A plan that only offers a merge Claude advised against (yellow, mergeable), and a tag that
+    /// rests on it.
+    fn advised_plan() -> PlanSet {
+        let pr = PullRequest { number: 20, action: Action::Keep, optional: true, reviewed: true, risk: Some("yellow".into()), reason: "manueller Test offen".into(), ..PullRequest::default() };
+        let plan = Plan { key: "o/app".into(), repo: "o/app".into(), default_branch: "main".into(), prs: vec![pr], tag: Some("v1.3.1".into()), last_tag: Some("v1.3.0".into()), tag_needs_merge: true, ..Plan::default() };
+        PlanSet { id: 8, created_at: 0, prs: true, cleanup: false, release: true, model: String::new(), targets: Vec::new(), plans: vec![plan] }
+    }
+
+    #[test]
+    fn a_merge_claude_advised_against_is_the_users_choice() {
+        let set = advised_plan();
+        let items = care_items(&set);
+        assert_eq!(items.iter().map(|i| (i.id.as_str(), i.optional)).collect::<Vec<_>>(), [("o/app|merge|20", true), ("o/app|tag|v1.3.1", false)]);
+
+        // Not chosen: nothing merges, and the tag that needed the merge goes too.
+        let mut job = job(&all());
+        job.items = items.clone();
+        job.plan = Some(set.clone());
+        job.step_mut("care").unwrap().state = StepState::NeedsApproval;
+        approve_plan(&mut job, 8, &[], &[], 1).unwrap();
+        assert!(job.items.iter().all(|i| i.outcome == Some(ItemOutcome::Excluded)), "{:?}", job.items);
+        let plan = &job.plan.as_ref().unwrap().plans[0];
+        assert_eq!(plan.prs[0].action, Action::Keep);
+        assert_eq!(plan.tag, None);
+        assert!(plan.tag_note.as_deref().unwrap().contains("nichts gemergt"));
+
+        // Chosen: it becomes a planned merge, checked like any other, and the tag stays.
+        let mut job = self::job(&all());
+        job.items = items;
+        job.plan = Some(set);
+        job.step_mut("care").unwrap().state = StepState::NeedsApproval;
+        approve_plan(&mut job, 8, &[], &["o/app|merge|20".into()], 1).unwrap();
+        assert_eq!(job.items[0].outcome, None, "runs");
+        let plan = &job.plan.as_ref().unwrap().plans[0];
+        assert_eq!(plan.prs[0].action, Action::Merge);
+        assert!(plan.prs[0].reason.starts_with("von dir gewählt"));
+        assert_eq!(plan.tag.as_deref(), Some("v1.3.1"));
     }
 
     fn proposal(fingerprint: &str, checks_ok: bool) -> Proposal {

@@ -1178,8 +1178,8 @@ fn decide(app: &AppHandle, id: &str, change: impl FnOnce(&mut Job, u64) -> Resul
 }
 
 #[tauri::command]
-fn approve_plan(app: AppHandle, id: String, plan_id: u64, excluded: Vec<String>) -> Result<(), String> {
-    decide(&app, &id, |job, now| jobs::approve_plan(job, plan_id, &excluded, now))
+fn approve_plan(app: AppHandle, id: String, plan_id: u64, excluded: Vec<String>, included: Vec<String>) -> Result<(), String> {
+    decide(&app, &id, |job, now| jobs::approve_plan(job, plan_id, &excluded, &included, now))
 }
 
 #[tauri::command]

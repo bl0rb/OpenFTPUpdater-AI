@@ -81,6 +81,10 @@ pub struct Plan {
     /// No release rule: no tag.
     #[serde(skip)]
     pub tag_blocked: bool,
+    /// The planned tag rests on a merge: the default branch is unchanged since the last tag, so without
+    /// a merge there is nothing new to tag.
+    #[serde(default)]
+    pub tag_needs_merge: bool,
 }
 
 impl Plan {
@@ -117,6 +121,10 @@ pub struct PullRequest {
     pub bump: Option<String>,
     /// For a close: the newer pull request that replaces it.
     pub superseded_by: Option<u64>,
+    /// Claude advises keeping it open, but a merge would pass the app's rules (valid green or yellow
+    /// verdict, mergeable with green CI): offered to the user, unticked, to merge after all.
+    #[serde(default)]
+    pub optional: bool,
     /// Why the action: Claude's reason, or the gate.
     pub reason: String,
     /// e.g. `+12 −3 in 2 Dateien`, for the prompt.
@@ -176,6 +184,8 @@ pub enum Done {
     Skipped(String),
     /// Not yet: still waiting for something outside the app (the CI); asking again later may do it.
     Pending(String),
+    /// Nothing to do: the state already is what the item would make it (e.g. nothing new to tag).
+    Nothing(String),
 }
 
 // MARK: Preview
@@ -339,6 +349,7 @@ pub fn apply_review(plan: &mut Plan, verdicts: &[Verdict]) -> Vec<String> {
         pr.risk = None;
         pr.bump = None;
         pr.superseded_by = None;
+        pr.optional = false;
         let matching: Vec<&Verdict> = verdicts.iter().filter(|v| v.number == pr.number).collect();
         let verdict = match matching.as_slice() {
             [] => {
@@ -387,6 +398,8 @@ pub fn apply_review(plan: &mut Plan, verdicts: &[Verdict]) -> Vec<String> {
             "merge" => (Action::Keep, format!("{}; {reason}", pr.gate)),
             _ => (Action::Keep, reason),
         };
+        // Claude's "keep" is advice: a merge that the app's rules allow stays the user's choice.
+        pr.optional = pr.action == Action::Keep && verdict.action == "keep" && safe && pr.ready;
     }
     // Low risk first, as in the dependabot-pr skill.
     let order = |pr: &PullRequest| match pr.risk.as_deref() {
@@ -444,9 +457,14 @@ fn plan_tag(plan: &mut Plan) -> Result<()> {
         plan.tag_note = Some(format!("{next} gibt es schon"));
         return Ok(());
     }
+    let merges = plan.count(Action::Merge) + plan.prs.iter().filter(|pr| pr.optional).count();
     match repos::commits_since(&plan.repo, &last, &plan.base_head) {
         Err(e) => plan.tag_note = Some(format!("Änderungen seit {last} {e:#}")),
-        Ok(0) if plan.count(Action::Merge) == 0 => plan.tag_note = Some(format!("{} unverändert seit {last}", plan.default_branch)),
+        Ok(0) if merges == 0 => plan.tag_note = Some(format!("{} unverändert seit {last}", plan.default_branch)),
+        Ok(0) => {
+            plan.tag = Some(next);
+            plan.tag_needs_merge = true;
+        }
         Ok(_) => plan.tag = Some(next),
     }
     Ok(())
@@ -709,7 +727,7 @@ pub fn tag(plan: &Plan, state: &RunState, runner: &Runner, wait: &CiWait, progre
         return Ok(Done::Skipped(why));
     }
     match repos::commits_since(&plan.repo, last, &target) {
-        Ok(0) => return Ok(Done::Skipped(format!("{} unverändert seit {last}", plan.default_branch))),
+        Ok(0) => return Ok(Done::Nothing(format!("{} unverändert seit {last}; nichts Neues zu taggen", plan.default_branch))),
         Err(e) => return Ok(Done::Skipped(format!("Änderungen seit {last} {e:#}; kein Tag"))),
         Ok(_) => {}
     }
@@ -734,7 +752,7 @@ pub fn tag(plan: &Plan, state: &RunState, runner: &Runner, wait: &CiWait, progre
         return Ok(Done::Skipped(format!("{why} (nach dem Warten auf die CI)")));
     }
     match repos::commits_since(&plan.repo, last, &target) {
-        Ok(0) => return Ok(Done::Skipped(format!("{} unverändert seit {last} (nach dem Warten auf die CI)", plan.default_branch))),
+        Ok(0) => return Ok(Done::Nothing(format!("{} unverändert seit {last} (nach dem Warten auf die CI)", plan.default_branch))),
         Err(e) => return Ok(Done::Skipped(format!("Änderungen seit {last} {e:#} (nach dem Warten auf die CI); kein Tag"))),
         Ok(_) => {}
     }
@@ -1188,6 +1206,14 @@ mod tests {
         assert_eq!(action(4), Action::Keep, "not ready, not Dependabot");
         assert_eq!(action(5), Action::Close);
         assert_eq!(plan.prs.iter().map(|pr| pr.number).collect::<Vec<_>>(), [3, 4, 5, 6, 1, 2], "green, then yellow, then red");
+
+        let mut advised = Plan { prs: vec![pr(8, true, false, false), pr(9, true, false, true), pr(10, false, true, true)], ..Plan::default() };
+        apply_review(&mut advised, &[verdict(8, "keep", "yellow"), verdict(9, "keep", "red"), verdict(10, "keep", "green")]);
+        let optional = |n| advised.prs.iter().find(|pr| pr.number == n).unwrap().optional;
+        assert!(optional(8), "yellow and ready: Claude's keep is advice, the merge stays the user's choice");
+        assert!(!optional(9), "red is never offered");
+        assert!(!optional(10), "not mergeable now: nothing to choose");
+        assert!(advised.prs.iter().all(|pr| pr.action == Action::Keep), "nothing merges without the user");
 
         let mut unreviewed = Plan { prs: vec![pr(7, true, false, true)], ..Plan::default() };
         apply_review(&mut unreviewed, &[]);

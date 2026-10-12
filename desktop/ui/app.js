@@ -1100,7 +1100,8 @@ function manageSection(r) {
 // Full jobs as `get_job` returns them, by id; reloaded when the job's `updatedAt` changes.
 const jobCache = new Map();
 const jobLoading = new Set();
-// Items the user left out of a plan before approving it: `jobId:planId` → item ids.
+// The user's marks on a plan before approving it, `jobId:planId` → { excluded, included }: items left
+// out, and merges chosen among those the plan offers for choice.
 const exclusions = new Map();
 // Which step blocks the user opened or closed; survives re-rendering.
 const stepOpen = new Map();
@@ -1312,18 +1313,19 @@ function careBlock(job, step) {
   if (!set) return [waitsFor(job, step) || h('div', { class: 'note' }, step.state === 'running' ? 'Die App liest GitHub und lässt Claude die offenen PRs bewerten …' : 'Noch nicht geprüft.')];
   const decide = step.state === 'needsApproval';
   const markKey = `${job.id}:${set.id}`;
-  const excluded = exclusions.get(markKey) ?? new Set();
-  exclusions.set(markKey, excluded);
+  const marks = exclusions.get(markKey) ?? { excluded: new Set(), included: new Set() };
+  exclusions.set(markKey, marks);
   const cost = set.plans.reduce((sum, p) => sum + (p.reviewCost ?? 0), 0);
-  const actionable = job.items.filter((i) => !excluded.has(i.id)).length;
+  const actionable = job.items.filter((i) => (i.optional ? marks.included.has(i.id) : !marks.excluded.has(i.id))).length;
+  const offered = job.items.filter((i) => i.optional).length;
   return [
     h('div', { class: 'note' }, `Plan von ${formatTime(set.createdAt)}${cost ? `, Claude-Prüfung ${usd(cost)}` : ''}. ${decide
-      ? 'Häkchen entfernen nimmt einzelne Aktionen aus; hinzufügen kann die Freigabe nichts. Vor jeder Aktion prüft die App erneut, was sich geändert hat, wird übersprungen.'
+      ? `Häkchen entfernen nimmt einzelne Aktionen aus${offered ? '; unter „Zur Wahl“ kannst du Merges anhaken, von denen Claude abrät' : ''}. Mehr kann die Freigabe nicht hinzufügen. Vor jeder Aktion prüft die App erneut, was sich geändert hat, wird übersprungen.`
       : 'Erledigtes bleibt bestehen, auch nach Fehlern oder Abbruch.'}`),
-    h('div', { class: 'runs' }, set.plans.map((p) => planRepo(job, p, decide, excluded, set.plans.length === 1))),
+    h('div', { class: 'runs' }, set.plans.map((p) => planRepo(job, p, decide, marks, set.plans.length === 1))),
     decide && decisionBar(
       button(actionable ? `Plan freigeben (${actionable} Aktion${actionable === 1 ? '' : 'en'})` : 'Freigeben (nichts ausführen)', async () => {
-        if (await act('approve_plan', { id: job.id, planId: set.id, excluded: [...excluded] })) exclusions.delete(markKey);
+        if (await act('approve_plan', { id: job.id, planId: set.id, excluded: [...marks.excluded], included: [...marks.included] })) exclusions.delete(markKey);
       }, { cls: 'primary', iconName: 'check', disabled: !!view.running, id: 'plan-approve' }),
       button('Plan verwerfen', () => act('reject_plan', { id: job.id, planId: set.id }), { disabled: !!view.running }),
       button('Neu prüfen', () => act('redo_step', { id: job.id, step: 'care' }), { disabled: !!view.running, title: 'Liest GitHub erneut und lässt Claude neu bewerten (kostet Claude-Nutzung)' })),
@@ -1332,11 +1334,15 @@ function careBlock(job, step) {
   ].filter(Boolean);
 }
 
-function itemControl(item, decide, excluded, rerender) {
+/** Whether an item runs with the marks so far: an offered merge only when chosen, anything else unless left out. */
+const runs = (item, marks) => (item.optional ? marks.included.has(item.id) : !marks.excluded.has(item.id));
+
+function itemControl(item, decide, marks, rerender) {
   if (decide) {
+    const set = item.optional ? marks.included : marks.excluded;
     return h('input', {
-      type: 'checkbox', id: domId('item', item.id), checked: !excluded.has(item.id), 'aria-label': `${item.label} ausführen`,
-      onchange: (e) => { e.target.checked ? excluded.delete(item.id) : excluded.add(item.id); rerender(); },
+      type: 'checkbox', id: domId('item', item.id), checked: runs(item, marks), 'aria-label': `${item.label} ausführen`,
+      onchange: (e) => { (e.target.checked === item.optional) ? set.add(item.id) : set.delete(item.id); rerender(); },
     });
   }
   if (!item.outcome) return item.writing ? h('span', { class: 'chip running' }, h('span', { class: 'spinner' }), 'Läuft') : h('span', { class: 'chip idle' }, 'Offen');
@@ -1344,11 +1350,11 @@ function itemControl(item, decide, excluded, rerender) {
   return h('span', { class: `chip ${cls}` }, text);
 }
 
-function planRepo(job, p, decide, excluded, single) {
+function planRepo(job, p, decide, marks, single) {
   const items = job.items.filter((i) => i.repo === p.key);
   const rerender = () => { renderedJob = ''; renderRuns(); };
-  const line = (item, main, extra = []) => h('div', { class: `item ${excluded.has(item.id) && decide ? 'excluded' : ''}` },
-    h('div', { class: 'item-line' }, itemControl(item, decide, excluded, rerender), main),
+  const line = (item, main, extra = []) => h('div', { class: `item ${decide && !runs(item, marks) ? 'excluded' : ''}` },
+    h('div', { class: 'item-line' }, itemControl(item, decide, marks, rerender), main),
     extra, !decide && item.detail && h('div', { class: 'item-reason selectable' }, item.detail));
   const prLine = (item) => {
     const pr = p.prs.find((x) => String(x.number) === item.reference);
@@ -1361,6 +1367,7 @@ function planRepo(job, p, decide, excluded, single) {
       h('span', { class: 'spacer' }), risk && badge(risk[0], `Claude: ${risk[1]}`)], [
       pr.reason && h('div', { class: 'item-reason selectable' }, pr.reviewed ? `Claude: ${pr.reason}` : pr.reason),
       pr.supersededBy && h('div', { class: 'item-reason' }, `Ersetzt durch #${pr.supersededBy}`),
+      decide && item.optional && h('div', { class: 'item-check' }, 'Claude rät, ihn offen zu lassen; nach den Regeln der App wäre er mergebar. Anhaken heißt: nach der Freigabe mergen, mit denselben Prüfungen direkt davor (noch offen, gleicher Commit, mergebar, CI des PR-Commits grün).'),
       decide && APP_CHECK[pr.action] && h('div', { class: 'item-check' }, APP_CHECK[pr.action]),
       decide && pr.action === 'merge' && pr.dependabot && h('div', { class: 'item-check' }, 'Bedingt: Verursacht ein vorheriger Merge dieses Laufs einen Konflikt, stößt die App statt des Merges @dependabot rebase an.')]);
   };
@@ -1371,13 +1378,15 @@ function planRepo(job, p, decide, excluded, single) {
   };
   const group = (title, list) => list.length > 0 && [h('div', { class: 'item-group' }, `${title} (${list.length})`), ...list];
   const of = (kind) => items.filter((i) => i.kind === kind);
-  const keep = p.prs.filter((pr) => pr.action === 'keep');
-  const counts = ['merge', 'close', 'rebase'].map((k) => [k, of(k).length]).filter(([, n]) => n);
+  const keep = p.prs.filter((pr) => pr.action === 'keep' && !pr.optional);
+  const choice = items.filter((i) => i.optional);
+  const counts = ['merge', 'close', 'rebase'].map((k) => [k, of(k).filter((i) => !i.optional).length]).filter(([, n]) => n);
   const branches = of('branch').length + of('localBranch').length;
   return h('details', { class: 'run repo', open: stepOpen.get(`${job.id}:plan:${p.key}`) ?? (single || !!p.error || decide), ontoggle: (e) => stepOpen.set(`${job.id}:plan:${p.key}`, e.target.open) },
     h('summary', null, h('strong', null, p.name), h('span', { class: 'muted small mono' }, p.repo), h('span', { class: 'spacer' }),
       p.error && badge('red', 'nicht lesbar'),
       counts.map(([k, n]) => badge(k === 'merge' ? 'green' : k === 'close' ? 'red' : 'accent', `${n} ${{ merge: 'mergen', close: 'schließen', rebase: 'Rebase' }[k]}`)),
+      choice.length > 0 && badge('orange', `${choice.length} zur Wahl`),
       of('tag').length > 0 && badge('green', `Tag ${p.tag ?? of('tag')[0].reference}`),
       branches > 0 && badge('', `${branches} Branches`),
       keep.length > 0 && badge('', `${keep.length} offen`)),
@@ -1385,7 +1394,8 @@ function planRepo(job, p, decide, excluded, single) {
       p.error && h('div', { class: 'note error-text' }, p.error),
       p.reviewNote && h('div', { class: 'note orange' }, p.reviewNote),
       h('div', { class: 'items' },
-        group('Mergen', of('merge').map(prLine)),
+        group('Mergen', of('merge').filter((i) => !i.optional).map(prLine)),
+        group('Zur Wahl: Claude rät, offen zu lassen', choice.map(prLine)),
         group('Schließen', of('close').map(prLine)),
         group('Rebase anstoßen', of('rebase').map(prLine)),
         group('Tag', of('tag').map((item) => line(item, [h('strong', null, item.reference), h('span', { class: 'muted small' }, `nach ${p.lastTag ?? '?'}`), h('span', { class: 'spacer' }), badge('', 'bedingt')],

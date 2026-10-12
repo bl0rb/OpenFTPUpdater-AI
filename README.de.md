@@ -88,8 +88,9 @@ besteht aus den Tätigkeiten, die du wählst, jede optional:
 
 Die App macht daraus Schritte und führt sie so weit aus, wie es ohne dich geht: lesen, Claudes
 Bewertung, Inhalte in ihrem eigenen Arbeitsordner vorbereiten. Bevor sich außerhalb etwas ändert, hält
-sie mit einem konkreten Vorschlag an: dem Pflegeplan (jede Aktion lässt sich ausnehmen, keine
-hinzufügen), einer Inhaltsänderung mit Diff und den Prüfungen der App, dem Website-Commit mit Diff. Die
+sie mit einem konkreten Vorschlag an: dem Pflegeplan (jede Aktion lässt sich ausnehmen; Merges, von denen
+Claude abrät, die nach den Regeln der App aber zulässig sind, stehen zum Anhaken bereit; sonst lässt sich
+nichts hinzufügen), einer Inhaltsänderung mit Diff und den Prüfungen der App, dem Website-Commit mit Diff. Die
 Freigabe setzt den Auftrag fort; einzeln starten musst du nichts. Ein Tag ist kein Release: Ein Schritt,
 der das Release braucht, wartet darauf (bis zu 30 Minuten je Blick, danach wartet der Auftrag sichtbar,
 und **Erneut prüfen** schaut wieder nach). Ein fehlgeschlagener Schritt stoppt die Schritte, die von ihm
@@ -119,7 +120,12 @@ gehört höchstens zu einem offenen Auftrag, und es läuft immer nur ein Auftrag
 
 Die App entscheidet, nicht Claude: Ein Pull Request braucht genau eine gültige Bewertung (grün oder gelb
 für einen Merge, eine Begründung fürs Schließen); rote, fehlende, doppelte oder ungültige Bewertungen
-lassen ihn offen. Die Bewertung folgt den Regeln des Skills `dependabot-pr`: Risikoklasse (grün, gelb,
+lassen ihn offen. Claudes „offen lassen“ ist ein Rat, kein Veto: Einen Pull Request, den Claude grün oder
+gelb bewertet und den GitHub als mergebar mit grüner CI meldet, bietet der Plan unter **Zur Wahl** an,
+nicht angehakt und mit Claudes Begründung; angehakt wird er nach deiner Freigabe gemergt, mit denselben
+Prüfungen wie jeder andere Merge. Der Plan wartet dann auf deine Entscheidung, statt mit „nichts zu tun“
+zu enden. Ein Tag, der nur auf einen solchen Merge folgen würde, wird mitgeplant und entfällt wieder,
+wenn nichts gemergt wird. Die Bewertung folgt den Regeln des Skills `dependabot-pr`: Risikoklasse (grün, gelb,
 rot; unter 1.0 zählt die erste Stelle ungleich null als Major), Release-Notes aus dem offiziellen
 Repository, in Dependabot-PRs nur Manifest-, Lock-, Workflow- und Dockerfiles, SHA-Pins von Actions,
 zusammengehörige Abhängigkeiten nur gemeinsam, Majors gegen die tatsächliche Nutzung im Code. Das kostet

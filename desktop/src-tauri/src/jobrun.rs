@@ -325,6 +325,7 @@ pub fn plan_summary(plans: &[Plan]) -> String {
         (sum(&|p| p.count(Action::Rebase)), "Rebase", "Rebases"),
         (sum(&|p| p.tag.is_some() as usize), "Tag", "Tags"),
         (sum(&|p| p.branches.len() + p.local_branches.len()), "Branch löschen", "Branches löschen"),
+        (sum(&|p| p.prs.iter().filter(|pr| pr.optional).count()), "PR zur Wahl", "PRs zur Wahl"),
     ]
     .into_iter()
     .filter(|(n, ..)| *n > 0)
@@ -409,7 +410,7 @@ fn care_run(ctx: &Ctx, job: &mut Job, i: usize) -> Result<()> {
         let result = execute(plan, &item, state);
         let (outcome, text) = match result {
             Ok(Done::Ok(text)) => (ItemOutcome::Done, text),
-            Ok(Done::Skipped(text) | Done::Pending(text)) => (ItemOutcome::Skipped, text),
+            Ok(Done::Skipped(text) | Done::Pending(text) | Done::Nothing(text)) => (ItemOutcome::Skipped, text),
             Err(e) if ctx.runner.is_cancelled() => (ItemOutcome::Cancelled, format!("abgebrochen ({e:#})")),
             Err(e) => (ItemOutcome::Failed, format!("{e:#}")),
         };
@@ -545,6 +546,12 @@ fn release(ctx: &Ctx, job: &mut Job, i: usize) -> Result<()> {
             Ok(Done::Pending(text)) => {
                 ctx.warn(format!("  {text}"));
                 job.steps[i].set(StepState::Waiting, text, now());
+                return Ok(());
+            }
+            Ok(Done::Nothing(text)) => {
+                mark(ItemOutcome::Done, &text);
+                ctx.info(format!("  Tag {tag}: {text}"));
+                job.steps[i].set(StepState::NothingToDo, format!("kein Tag: {text}"), now());
                 return Ok(());
             }
             Ok(Done::Skipped(text)) => {

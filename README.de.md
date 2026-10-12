@@ -21,16 +21,12 @@ Die App hat drei Bereiche, umschaltbar in der Kopfleiste, und ihre Einstellungen
 
 ## Erste Schritte
 
-Eine frische Installation beginnt mit **Repositories auswählen**: Repositories aus deiner GitHub-Liste
-wählen (oder `owner/name` eingeben). Mehr ist nicht nötig: keine Website, kein SFTP-Zugang, kein
-Release. Ein lesender Statuscheck geht ohne Claude; ein Pflegeauftrag braucht Claude Code und die
-angemeldete GitHub-CLI, ein README-Auftrag darüber hinaus nur Git-Zugriff auf das Repository.
-
-Eine Installation mit Website (`.openreleasepilot/site.json`) bietet **Aus Website übernehmen** an: die
-Produkt-Repositories aus `site.json`, jedes einmal, mit lokaler Kopie, wo sie eindeutig ist, und auf
-Wunsch mit einer Release-Regel mit dem Tag-Präfix der Produkte. Widersprüchliche Tag-Präfixe oder
-Klon-Pfade zeigt die App an und übernimmt sie nicht; schon verwaltete Repositories bleiben, wie sie sind;
-`site.json` bleibt unverändert. Wiederholen fügt nichts doppelt hinzu.
+Die App beginnt mit **Repositories auswählen**: Sie listet die lokalen Git-Klone in deinem Repo-Ordner,
+deren Origin auf GitHub liegt, und du hakst an, um welche sie sich kümmern soll; die lokale Kopie trägt
+sie gleich mit ein. Mehr ist nicht nötig: keine Website, kein SFTP-Zugang, kein Release. Ein lesender
+Statuscheck geht ohne Claude; ein Pflegeauftrag braucht Claude Code und die angemeldete GitHub-CLI, ein
+README-Auftrag darüber hinaus nur Git-Zugriff auf das Repository. Das gilt genauso für eine
+Installation, die schon eine Website hat: Deren Produkte bestimmen nicht, was die App verwaltet.
 
 ## Verwaltete Repositories
 
@@ -239,8 +235,8 @@ Einstellungen, nicht im Website-Repository; welche Repositories die App verwalte
 
 ## Geändert gegenüber früheren Versionen
 
-- Die verwalteten Repositories sind eine eigene Liste der App. Produkt-Repositories aus `site.json`
-  erscheinen nicht mehr von selbst; **Aus Website übernehmen** nimmt sie einmalig auf. Startansicht ist
+- Die verwalteten Repositories sind eine eigene Liste der App, ausgewählt aus den lokalen Klonen.
+  Produkt-Repositories aus `site.json` erscheinen nicht mehr von selbst. Startansicht ist
   **Repositories**.
 - PR-Pflege, Aufräumen und Release sind getrennt wählbar; Mergen bedeutet keinen Patch-Tag mehr, und ein
   Tag braucht eine in der App eingerichtete Release-Regel (das `tagPrefix` aus `site.json` allein genügt
@@ -256,12 +252,18 @@ Einstellungen, nicht im Website-Repository; welche Repositories die App verwalte
 
 ## Repositories wählen
 
-Die App listet deine GitHub-Repositories über die angemeldete `gh`-CLI, auch private, und markiert
-jedes: schon verwaltet, lokaler Klon gefunden, Produkt der Website, Website-Repository. Ohne
-`gh`-Anmeldung zeigt sie die öffentlichen Repositories der Besitzer, die sie schon kennt.
+**Repositories auswählen** listet die Git-Klone direkt im Repo-Ordner, deren `origin` ein
+GitHub-Repository ist, mit ihrem Pfad, und markiert, was schon verwaltet wird, ein Produkt der Website
+oder das Repository der Website selbst ist. Klone eines Wikis fehlen (Wikis sind Inhaltsziele), und ein
+doppelt geklontes Repository steht nur einmal da, mit dem Ordner, der so heißt wie das Repository. Für
+eine Auswahl lässt sich auch ein anderer Ordner wählen.
+Aufgenommen wird ein Repository so, wie der Origin des Klons es nennt, mit dem Klon als lokaler Kopie;
+GitHubs Name und ID kommen dazu, wenn GitHub sich fragen lässt (ein privates Repository ohne
+`gh`-Anmeldung wird allein aus dem Origin aufgenommen). Für ein Repository ohne lokalen Klon
+`owner/name` eingeben; es muss auf GitHub existieren.
 
-- **Repo-Ordner** (Einrichtung): hier werden lokale Klone gesucht und angelegt; standardmäßig der
-  Elternordner des Website-Projekts oder `~/Documents/Code`.
+- **Repo-Ordner** (Einrichtung): hier sucht die Auswahl nach Klonen, und hier legt die App neue an;
+  standardmäßig der Elternordner des Website-Projekts oder `~/Documents/Code`.
 - **Website-Repo** (Einrichtung, optional): aus der Liste wählen; der Projektordner ergibt sich aus dem
   lokalen Klon. Gibt es keinen, klont die App das Repo in den Repo-Ordner.
 

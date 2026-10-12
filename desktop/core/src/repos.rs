@@ -17,8 +17,7 @@ use crate::site::Site;
 use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// How long facts count as current in the view. Never replaces the checks before a change.
 pub const FRESH_SECS: u64 = 300;
@@ -151,120 +150,6 @@ fn local_copy(path: &str, repo: &str) -> LocalCopy {
         Some(origin) if origin.eq_ignore_ascii_case(repo) => LocalCopy::Found { path },
         origin => LocalCopy::Foreign { path, origin },
     }
-}
-
-/// A product repository of the website that can be taken over into the managed list.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ImportCandidate {
-    pub key: String,
-    pub repo: String,
-    /// The products that name it.
-    pub products: Vec<String>,
-    /// The tag prefix the products agree on; `None` when they disagree.
-    pub tag_prefix: Option<String>,
-    pub prefix_conflict: Option<String>,
-    /// Absolute path of the clone the products name, if it is one of this repository.
-    pub local_path: Option<String>,
-    /// Why the products' clone is not taken.
-    pub local_note: Option<String>,
-    /// Already managed: the import leaves it as it is.
-    pub managed: bool,
-    /// Where an already managed repository differs from site.json; shown, never overwritten.
-    pub differences: Vec<String>,
-}
-
-/// The product repositories of site.json, each once, compared with the managed list.
-pub fn import_candidates(site: &Site, project: &Path, config: &Config) -> Vec<ImportCandidate> {
-    let mut candidates: Vec<ImportCandidate> = Vec::new();
-    let mut paths: Vec<Vec<PathBuf>> = Vec::new();
-    let mut prefixes: Vec<BTreeSet<String>> = Vec::new();
-    for product in site.products.iter().filter(|p| !p.repo.trim().is_empty()) {
-        let key = product.repo.trim().to_lowercase();
-        let index = match candidates.iter().position(|c| c.key == key) {
-            Some(i) => i,
-            None => {
-                candidates.push(ImportCandidate {
-                    key: key.clone(),
-                    repo: product.repo.trim().to_owned(),
-                    products: Vec::new(),
-                    tag_prefix: None,
-                    prefix_conflict: None,
-                    local_path: None,
-                    local_note: None,
-                    managed: false,
-                    differences: Vec::new(),
-                });
-                paths.push(Vec::new());
-                prefixes.push(BTreeSet::new());
-                candidates.len() - 1
-            }
-        };
-        candidates[index].products.push(product.name.clone());
-        prefixes[index].insert(product.tag_prefix.clone());
-        if let Some(path) = product.local_path.as_deref().filter(|p| !p.trim().is_empty()) {
-            let dir = project.join(path.trim());
-            let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
-            if !paths[index].contains(&dir) {
-                paths[index].push(dir);
-            }
-        }
-    }
-    for (i, candidate) in candidates.iter_mut().enumerate() {
-        if prefixes[i].len() == 1 {
-            candidate.tag_prefix = prefixes[i].iter().next().cloned();
-        } else {
-            let each: Vec<String> = prefixes[i].iter().map(|p| format!("„{p}“")).collect();
-            candidate.prefix_conflict = Some(format!("die Produkte nennen verschiedene Tag-Präfixe: {}", each.join(", ")));
-        }
-        match paths[i].as_slice() {
-            [] => {}
-            [dir] => match local_copy(&dir.display().to_string(), &candidate.repo) {
-                LocalCopy::Found { path } => candidate.local_path = Some(path),
-                LocalCopy::Missing { path } => candidate.local_note = Some(format!("lokale Kopie fehlt: {path}")),
-                LocalCopy::Foreign { path, .. } => candidate.local_note = Some(format!("{path} ist keine Kopie dieses Repositorys")),
-                LocalCopy::NotConfigured => {}
-            },
-            many => {
-                let list: Vec<String> = many.iter().map(|d| d.display().to_string()).collect();
-                candidate.local_note = Some(format!("die Produkte nennen verschiedene lokale Kopien: {}", list.join(", ")));
-            }
-        }
-        if let Some(managed) = config.repository(&candidate.key) {
-            candidate.managed = true;
-            let rule = managed.release.as_ref().map(|r| r.tag_prefix.as_str());
-            if let (Some(rule), Some(prefix)) = (rule, &candidate.tag_prefix) {
-                if rule != prefix {
-                    candidate.differences.push(format!("Release-Regel „{rule}“, site.json „{prefix}“"));
-                }
-            }
-            if let Some(path) = &candidate.local_path {
-                let current = std::fs::canonicalize(expand_home(managed.local_path.trim())).ok();
-                if current.as_deref() != Some(Path::new(path)) {
-                    candidate.differences.push(format!("lokale Kopie: verwaltet „{}“, site.json {path}", managed.local_path));
-                }
-            }
-        }
-    }
-    candidates
-}
-
-/// Adds the chosen candidates that are not managed yet; a release rule only where the user asked
-/// for it and the products agree on the prefix. Returns the repositories added. Repeating the
-/// import adds nothing twice and changes nothing that is already managed.
-pub fn import(config: &mut Config, candidates: &[ImportCandidate], keys: &[String], release_for: &[String]) -> Vec<String> {
-    let mut added = Vec::new();
-    for candidate in candidates.iter().filter(|c| keys.contains(&c.key)) {
-        let release = match &candidate.tag_prefix {
-            Some(prefix) if release_for.contains(&candidate.key) => Some(ReleaseRule { tag_prefix: prefix.clone(), publishes_release: false }),
-            _ => None,
-        };
-        let repo = ManagedRepo { local_path: candidate.local_path.clone().unwrap_or_default(), release, ..ManagedRepo::new(&candidate.repo) };
-        if config.add_repository(repo) {
-            added.push(candidate.repo.clone());
-        }
-    }
-    added
 }
 
 // MARK: Facts
@@ -865,36 +750,6 @@ mod tests {
         assert!(caps.tag.is_some() && caps.care.is_none(), "no release rule, no tag; care still possible");
         config.repositories[1].enabled = false;
         assert_eq!(capabilities(&targets(&config, None, None)[1], None, Some(true)).care.as_deref(), Some("deaktiviert"));
-    }
-
-    #[test]
-    fn importing_from_a_website_is_repeatable_and_overwrites_nothing() {
-        let mut a = product("a", "o/app", "v");
-        a["localPath"] = json!("../one");
-        let mut b = product("b", "o/app", "");
-        b["localPath"] = json!("../two");
-        let site = site(json!([a, b, product("c", "o/lib", "v"), product("d", "O/Lib", "v")]));
-        let mut config = Config::default();
-        let candidates = import_candidates(&site, Path::new("/nowhere/site"), &config);
-        assert_eq!(candidates.len(), 2);
-        let app = &candidates[0];
-        assert!(app.tag_prefix.is_none() && app.prefix_conflict.is_some(), "no prefix is guessed");
-        assert!(app.local_note.as_deref().unwrap().contains("verschiedene lokale Kopien"));
-        assert_eq!(candidates[1].products, ["C", "D"]);
-        assert_eq!(candidates[1].tag_prefix.as_deref(), Some("v"));
-
-        let keys = vec!["o/app".to_owned(), "o/lib".to_owned()];
-        let added = import(&mut config, &candidates, &keys, &keys);
-        assert_eq!(added, ["o/app", "o/lib"]);
-        assert_eq!(config.repositories[0].release, None, "conflicting prefixes: no release rule");
-        assert_eq!(config.repositories[1].release.as_ref().map(|r| r.tag_prefix.as_str()), Some("v"));
-
-        config.repositories[1].release = Some(ReleaseRule { tag_prefix: "".into(), publishes_release: true });
-        let again = import_candidates(&site, Path::new("/nowhere/site"), &config);
-        assert!(again.iter().all(|c| c.managed));
-        assert_eq!(again[1].differences.len(), 1, "{:?}", again[1].differences);
-        assert!(import(&mut config, &again, &keys, &keys).is_empty(), "nothing twice");
-        assert_eq!(config.repositories[1].release.as_ref().map(|r| r.tag_prefix.as_str()), Some(""), "nothing overwritten");
     }
 
     fn runs(list: Value) -> Value {

@@ -21,16 +21,12 @@ The app has three areas, switched in the toolbar, and its settings under **Einri
 
 ## Getting started
 
-A fresh installation starts with **Repositories auswählen**: pick repositories from your GitHub list (or
-type `owner/name`). Nothing else is needed: no website, no SFTP access, no release. A read-only status
-check works without Claude; a care job needs Claude Code and the signed-in GitHub CLI, a README job
-additionally only Git access to the repository.
-
-An installation that already has a website (`.openreleasepilot/site.json`) offers **Aus Website
-übernehmen**: the product repositories of `site.json`, each once, with their local clone where it is
-unambiguous and, if you tick it, a release rule with the products' tag prefix. Conflicting tag prefixes
-or clone paths are shown and not taken over; repositories that are managed already stay as they are;
-`site.json` is not changed. Repeating the import adds nothing twice.
+The app starts with **Repositories auswählen**: it lists the local Git clones in your repo folder
+whose origin is on GitHub, and you tick the ones it should look after; their local clone is filled in
+right away. Nothing else is needed: no website, no SFTP access, no release. A read-only status check
+works without Claude; a care job needs Claude Code and the signed-in GitHub CLI, a README job
+additionally only Git access to the repository. The same applies to an installation that already has a
+website: its products do not decide what the app manages.
 
 ## Managed repositories
 
@@ -228,8 +224,8 @@ repository; it does not change which repositories the app manages.
 
 ## Changed from earlier versions
 
-- The managed repositories are the app's own list. Product repositories of `site.json` no longer appear
-  by themselves; **Aus Website übernehmen** takes them over once. The start view is **Repositories**.
+- The managed repositories are the app's own list, chosen from the local clones. Product repositories of
+  `site.json` no longer appear by themselves. The start view is **Repositories**.
 - Pull request care, cleanup and release are chosen separately; merging no longer implies a patch tag,
   and a tag needs a release rule set up in the app (the `tagPrefix` of `site.json` alone is not enough).
 - Care runs as stored jobs in **Läufe**: the plan is approved there and survives a restart.
@@ -241,12 +237,17 @@ repository; it does not change which repositories the app manages.
 
 ## Choosing repositories
 
-The app lists your GitHub repositories through the signed-in `gh` CLI, private ones included, and marks
-each one: managed already, local clone found, product of the website, website repository. Without a
-`gh` login it falls back to the public repositories of the owners it already knows.
+**Repositories auswählen** lists the Git clones directly inside the repo folder whose `origin` is a
+GitHub repository, with their path, and marks those that are managed already, a product of the website,
+or the website's own repository. Clones of a wiki are left out (wikis are content targets), and a
+repository cloned twice is listed once, with the folder named like it. Another folder can be picked for
+one selection. A repository is taken
+as its clone's origin names it, with the clone as its local copy; GitHub's name and id are added when
+GitHub can be asked (a private repository without `gh` login is added from its origin alone). For a
+repository without a local clone, type `owner/name`; it must exist on GitHub.
 
-- **Repo folder** (Settings): where local clones are searched and created; by default the parent of the
-  website project or `~/Documents/Code`.
+- **Repo folder** (Settings): where the selection looks for clones and where new clones are made; by
+  default the parent of the website project or `~/Documents/Code`.
 - **Website repository** (Settings, optional): pick it from the list; the project folder follows from its
   local clone. If there is none, the app clones it into the repo folder.
 

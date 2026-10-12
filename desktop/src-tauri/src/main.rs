@@ -284,8 +284,6 @@ struct View {
     jobs: Vec<JobSummary>,
     job_running: Option<String>,
     jobs_unreadable: Vec<String>,
-    /// Product repositories of the website that are not managed yet.
-    importable: Vec<String>,
     /// Keys of the managed repositories that feed the website; `None` without a website.
     website_sources: Option<Vec<String>>,
     /// Whether gh is signed in, once known.
@@ -399,10 +397,6 @@ fn get_view(app: AppHandle) -> View {
     // Reads .git/config of the clones: outside the lock.
     let (site, config) = with_model(&app, |m| (m.site.clone(), m.config.clone()));
     let targets = repo_targets(&config, &site);
-    let importable: Vec<String> = match (&site, config.project_dir.trim().is_empty()) {
-        (Ok(site), false) => repos::import_candidates(site, &expand_home(&config.project_dir), &config).into_iter().filter(|c| !c.managed).map(|c| c.repo).collect(),
-        _ => Vec::new(),
-    };
     let now = steps::now();
     with_model(&app, |m| {
         let open_job = |pred: &dyn Fn(&Job) -> bool| {
@@ -469,7 +463,6 @@ fn get_view(app: AppHandle) -> View {
             jobs: m.jobs.iter().map(|j| summary(j, m.job_running.as_deref() == Some(j.id.as_str()))).collect(),
             job_running: m.job_running.clone(),
             jobs_unreadable: m.jobs_unreadable.clone(),
-            importable,
             website_sources: website_sources(&m.config, &m.site),
             signed_in: github::signed_in(),
             fresh_secs: repos::FRESH_SECS,
@@ -926,30 +919,88 @@ fn held_by_job(m: &Model, key: &str) -> Option<String> {
     m.jobs.iter().find(|j| j.open() && j.repos.iter().any(|r| r == key)).map(|j| j.id.clone())
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalRepo {
+    /// `owner/name` as the clone's origin names it.
+    repo: String,
+    path: String,
+    /// Further clones of the same repository.
+    others: Vec<String>,
+    managed: bool,
+    /// A product of the website, or the website's own repository.
+    on_site: bool,
+    is_website: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalRepoList {
+    /// The folder that was looked at, as displayed.
+    folder: String,
+    repos: Vec<LocalRepo>,
+}
+
+/// The GitHub clones in a folder (the repo folder unless `dir` names another): the selection the
+/// app offers. Reads only the clones' `.git/config`.
+#[tauri::command]
+async fn list_local_repos(app: AppHandle, dir: Option<String>) -> LocalRepoList {
+    let (site, config) = with_model(&app, |m| (m.site.clone().ok(), m.config.clone()));
+    blocking(move || {
+        let folder = match dir.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+            Some(dir) => expand_home(dir),
+            None => config.workspace(),
+        };
+        let website = if config.project_dir.is_empty() { None } else { localrepo::origin_repo(&expand_home(&config.project_dir)) };
+        let repos = localrepo::github_clones(&folder)
+            .into_iter()
+            .map(|clone| LocalRepo {
+                managed: config.repository(&clone.repo).is_some(),
+                on_site: site.iter().flat_map(|s| s.products.iter()).any(|p| p.repo.trim().eq_ignore_ascii_case(&clone.repo)),
+                is_website: website.as_ref().is_some_and(|w| w.eq_ignore_ascii_case(&clone.repo)),
+                path: clone.path.display().to_string(),
+                others: clone.others.iter().map(|p| p.display().to_string()).collect(),
+                repo: clone.repo,
+            })
+            .collect();
+        LocalRepoList { folder: abbreviate_home(&folder), repos }
+    })
+    .await
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AddRepo {
     repo: String,
+    /// The local clone it was picked from; empty for a name typed in.
     #[serde(default)]
     local_path: String,
 }
 
-/// Adds repositories to the managed list, each checked on GitHub first (name and id as GitHub
-/// reports them); one already managed is left as it is. Returns the ones added.
+/// Adds repositories to the managed list; one already managed is left as it is. A name typed in
+/// must exist on GitHub; a local clone counts by its origin, and GitHub's name and id are taken when
+/// GitHub can be asked (a private one without `gh` login cannot). Returns the ones added.
 #[tauri::command]
 async fn add_repositories(app: AppHandle, repos: Vec<AddRepo>) -> Result<Vec<String>, String> {
     blocking(move || {
         let mut found = Vec::new();
         for entry in &repos {
-            let info = github::repo_info(entry.repo.trim()).map_err(|e| format!("{e:#}"))?;
-            found.push((info, entry.local_path.trim().to_owned()));
+            let local = entry.local_path.trim();
+            let origin = if local.is_empty() { None } else { localrepo::origin_repo(&expand_home(local)) };
+            if !local.is_empty() && !origin.as_deref().is_some_and(|o| o.eq_ignore_ascii_case(entry.repo.trim())) {
+                return Err(format!("{local} ist keine Kopie von {}", entry.repo.trim()));
+            }
+            match (github::repo_info(entry.repo.trim()), origin) {
+                (Ok(info), _) => found.push((info.full_name, Some(info.id), local.to_owned())),
+                (Err(_), Some(origin)) => found.push((origin, None, local.to_owned())),
+                (Err(e), None) => return Err(format!("{e:#}")),
+            }
         }
         let mut added = Vec::new();
         save_config(&app, |config| {
-            for (info, local_path) in found {
-                let repo = ManagedRepo { github_id: Some(info.id), local_path, ..ManagedRepo::new(&info.full_name) };
-                if config.add_repository(repo) {
-                    added.push(info.full_name.clone());
+            for (repo, github_id, local_path) in found {
+                if config.add_repository(ManagedRepo { github_id, local_path, ..ManagedRepo::new(&repo) }) {
+                    added.push(repo);
                 }
             }
             Ok(())
@@ -1009,30 +1060,6 @@ fn remove_repository(app: AppHandle, key: String) -> Result<(), String> {
     with_model(&app, |m| m.repo_status.remove(&key));
     changed(&app);
     Ok(())
-}
-
-/// The website's product repositories, compared with the managed list.
-#[tauri::command]
-fn import_candidates(app: AppHandle) -> Result<Vec<repos::ImportCandidate>, String> {
-    let (site, config) = with_model(&app, |m| (m.site.clone(), m.config.clone()));
-    let site = site.map_err(|e| format!("Website nicht lesbar: {e}"))?;
-    Ok(repos::import_candidates(&site, &expand_home(&config.project_dir), &config))
-}
-
-/// Takes the chosen product repositories into the managed list; a release rule only where asked
-/// for. Repeating it adds nothing twice and overwrites nothing.
-#[tauri::command]
-fn import_repositories(app: AppHandle, keys: Vec<String>, release_for: Vec<String>) -> Result<Vec<String>, String> {
-    let (site, project) = with_model(&app, |m| (m.site.clone(), m.config.project_dir.clone()));
-    let site = site.map_err(|e| format!("Website nicht lesbar: {e}"))?;
-    let mut added = Vec::new();
-    save_config(&app, |config| {
-        let candidates = repos::import_candidates(&site, &expand_home(&project), config);
-        added = repos::import(config, &candidates, &keys, &release_for);
-        Ok(())
-    })?;
-    refresh_status(&app, &added.iter().map(|r| r.to_lowercase()).collect::<Vec<_>>());
-    Ok(added)
 }
 
 // MARK: Content targets
@@ -1419,8 +1446,7 @@ fn main() {
             add_repositories,
             update_repository,
             remove_repository,
-            import_candidates,
-            import_repositories,
+            list_local_repos,
             save_target,
             remove_target,
             start_job,

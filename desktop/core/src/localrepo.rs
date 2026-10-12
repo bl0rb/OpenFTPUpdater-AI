@@ -37,6 +37,49 @@ pub fn origin_repo(dir: &Path) -> Option<String> {
     None
 }
 
+/// A repository with clones in a folder.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalClone {
+    /// `owner/name` as the origin names it.
+    pub repo: String,
+    /// The clone to use: the folder named like the repository, else the first by name.
+    pub path: PathBuf,
+    /// Further clones of the same repository.
+    pub others: Vec<PathBuf>,
+}
+
+/// The GitHub repositories with clones directly inside `dir`, each once, sorted by name. Folders
+/// without a GitHub origin and clones of a wiki (`owner/name.wiki`) are left out.
+pub fn github_clones(dir: &Path) -> Vec<LocalClone> {
+    let Ok(entries) = fs::read_dir(dir) else { return Vec::new() };
+    let mut found: Vec<(String, PathBuf)> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .filter_map(|p| origin_repo(&p).map(|repo| (repo, p)))
+        .filter(|(repo, _)| !repo.to_lowercase().ends_with(".wiki"))
+        .collect();
+    found.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()).then(a.1.cmp(&b.1)));
+    let mut clones: Vec<LocalClone> = Vec::new();
+    for (repo, path) in found {
+        match clones.last_mut().filter(|c| c.repo.eq_ignore_ascii_case(&repo)) {
+            Some(clone) => clone.others.push(path),
+            None => clones.push(LocalClone { repo, path, others: Vec::new() }),
+        }
+    }
+    for clone in &mut clones {
+        let name = clone.repo.rsplit('/').next().unwrap_or_default().to_lowercase();
+        let named = |p: &PathBuf| p.file_name().is_some_and(|f| f.to_string_lossy().to_lowercase() == name);
+        if !named(&clone.path) {
+            if let Some(i) = clone.others.iter().position(named) {
+                std::mem::swap(&mut clone.path, &mut clone.others[i]);
+                clone.others.sort();
+            }
+        }
+    }
+    clones
+}
+
 /// All GitHub clones directly inside `dir`, keyed by lowercase `owner/name`.
 pub fn clones_in(dir: &Path) -> HashMap<String, PathBuf> {
     let mut clones = HashMap::new();
@@ -82,6 +125,35 @@ mod tests {
         assert_eq!(github_repo_from_url("git@github.com:bl0rb/ClaudeKeyZapper.git").as_deref(), Some("bl0rb/ClaudeKeyZapper"));
         assert_eq!(github_repo_from_url("https://github.com/bl0rb/Weave/").as_deref(), Some("bl0rb/Weave"));
         assert_eq!(github_repo_from_url("https://gitlab.com/a/b.git"), None);
+    }
+
+    #[test]
+    fn lists_each_github_repository_of_a_folder_once() {
+        let dir = std::env::temp_dir().join(format!("orp-local-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        for (name, url) in [
+            ("zeta", Some("git@github.com:o/Zeta.git")),
+            ("alpha", Some("https://github.com/o/alpha")),
+            ("garden-copy", Some("https://github.com/o/Garden.git")),
+            ("Garden", Some("https://github.com/o/Garden.git")),
+            ("app-wiki", Some("https://github.com/o/app.wiki.git")),
+            ("other", Some("https://gitlab.com/o/x.git")),
+            ("plain", None),
+        ] {
+            let git = dir.join(name).join(".git");
+            fs::create_dir_all(&git).unwrap();
+            let config = url.map(|u| format!("[core]\n\tbare = false\n[remote \"origin\"]\n\turl = {u}\n")).unwrap_or_default();
+            fs::write(git.join("config"), config).unwrap();
+        }
+        fs::write(dir.join("file.txt"), "").unwrap();
+        let clones = github_clones(&dir);
+        let repos: Vec<&str> = clones.iter().map(|c| c.repo.as_str()).collect();
+        assert_eq!(repos, ["o/alpha", "o/Garden", "o/Zeta"], "GitHub origins only, no wiki, each once, sorted, case kept");
+        assert!(clones[1].path.ends_with("Garden"), "the folder named like the repository: {:?}", clones[1]);
+        assert_eq!(clones[1].others.len(), 1);
+        assert!(clones[1].others[0].ends_with("garden-copy"));
+        assert!(github_clones(&dir.join("missing")).is_empty());
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

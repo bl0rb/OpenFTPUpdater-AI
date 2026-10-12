@@ -709,9 +709,7 @@ function renderRepos() {
       reading && button('Lesen abbrechen', () => call('cancel_repo_refresh'), { id: 'repos-cancel-read' }),
       repos.length > 0 && button(reading ? 'Wird gelesen …' : 'Status aktualisieren', () => call('refresh_repos', { keys: [] }),
         { id: 'repos-refresh', iconName: 'refresh', disabled: reading, title: 'Liest den Stand aller Repositories auf GitHub: nur lesend, ohne Claude' }),
-      button('Hinzufügen …', addReposDialog, { id: 'repos-add', iconName: 'plus', title: 'Repositories in die Verwaltung aufnehmen' }),
-      view.importable.length > 0 && button(`Aus Website übernehmen (${view.importable.length}) …`, importDialog,
-        { id: 'repos-import', title: `Produkt-Repositories der Website: ${view.importable.join(', ')}` }),
+      button('Hinzufügen …', addReposDialog, { id: 'repos-add', iconName: 'plus', title: 'Lokale Repositories in die Verwaltung aufnehmen' }),
       listing && repos.length > 0 && button(chosen.length ? `Pflegen (${chosen.length}) …` : 'Pflegen …', () => jobDialog(chosen.map((r) => r.key)),
         { id: 'repos-care', iconName: 'branch', cls: chosen.length ? 'primary' : null, disabled: !chosen.length || !!view.running,
           title: chosen.length ? 'Pflegeauftrag für die ausgewählten Repositories' : 'Erst Repositories auswählen (Häkchen auf den Karten)' }),
@@ -725,9 +723,7 @@ function renderRepos() {
       body = h('div', { class: 'empty' },
         h('h2', null, 'Repositories auswählen'),
         h('p', { class: 'muted' }, 'Wähle die Repositories, um die sich die App kümmern soll. Eine Website, ein SFTP-Zugang oder ein Release sind dafür nicht nötig.'),
-        h('div', { class: 'line' },
-          button('Repositories auswählen …', addReposDialog, { cls: 'primary', iconName: 'plus' }),
-          view.importable.length > 0 && button(`Aus Website übernehmen (${view.importable.length}) …`, importDialog)));
+        h('div', { class: 'line' }, button('Repositories auswählen …', addReposDialog, { cls: 'primary', iconName: 'plus' })));
     } else {
       const repo = repoKey && repos.find((r) => r.key === repoKey);
       if (!repo) repoKey = null;
@@ -1626,78 +1622,87 @@ function repoPicker({ include = () => true, onPick, multi = false, picked = new 
 
 // MARK: Adding repositories
 
-/** Picks repositories from the user's GitHub list (or by name) and adds them to the managed list. */
+/** Picks repositories from the local clones in the repo folder (or another folder), or by name for
+ *  one without a clone, and adds them to the managed list. */
 function addReposDialog() {
-  const picked = new Set();
-  const s = { manual: '', error: '', busy: false };
+  const picked = new Map();
+  const s = { dir: '', data: null, error: '', query: '', manual: '', busy: false };
+  const list = h('div', { class: 'repo-list', role: 'listbox', 'aria-multiselectable': 'true' });
   let render = () => {};
-  const picker = repoPicker({ multi: true, picked, locked: (r) => (r.managed ? 'wird schon verwaltet' : null), onPick: () => render() });
+  const count = () => picked.size + s.manual.split(/[\s,]+/).filter(Boolean).length;
+  const updateButton = () => {
+    const b = document.getElementById('add-confirm');
+    if (b) { b.disabled = s.busy || !count(); b.textContent = count() ? `Aufnehmen (${count()})` : 'Aufnehmen'; }
+  };
+  const tag = (text, cls = '') => h('span', { class: `badge ${cls}` }, text);
+  const renderList = () => {
+    if (!s.data) { list.replaceChildren(h('div', { class: 'note' }, 'Lokale Repositories werden gesucht …')); return; }
+    const repos = s.data.repos.filter((r) => !s.query || r.repo.toLowerCase().includes(s.query) || r.path.toLowerCase().includes(s.query));
+    list.replaceChildren(...(repos.length ? repos.map((r) => {
+      const on = picked.has(r.repo);
+      return h('button', {
+        type: 'button', role: 'option', 'aria-selected': String(on), class: `repo-row ${on ? 'picked' : ''}`, disabled: r.managed,
+        title: r.managed ? 'wird schon verwaltet' : null,
+        onclick: () => { on ? picked.delete(r.repo) : picked.set(r.repo, r.path); renderList(); updateButton(); },
+      },
+        h('div', { class: 'repo-head' },
+          h('input', { type: 'checkbox', checked: on || r.managed, disabled: r.managed, tabindex: '-1', 'aria-hidden': 'true' }),
+          h('strong', null, r.repo),
+          r.managed && tag('verwaltet', 'green'),
+          r.isWebsite && tag('Website', 'accent'),
+          r.onSite && tag('Produkt der Website')),
+        h('div', { class: 'muted small mono' }, r.path),
+        r.others.length > 0 && h('div', { class: 'muted small' }, `Weitere Klone: ${r.others.join(', ')} (in der Verwaltung änderbar)`));
+    }) : [h('div', { class: 'note' }, s.data.repos.length ? 'Keine passenden Repositories.' : 'In diesem Ordner liegt kein Git-Klon mit GitHub-Origin.')]));
+  };
+  const load = async () => {
+    s.data = null;
+    renderList();
+    s.data = await invoke('list_local_repos', { dir: s.dir || null });
+    renderList();
+    render();
+  };
+  const search = h('input', { type: 'search', placeholder: 'Filtern …', spellcheck: 'false', autocomplete: 'off',
+    oninput: (e) => { s.query = e.target.value.trim().toLowerCase(); renderList(); } });
   openDialog('Repositories auswählen', (close, rerender) => {
     render = rerender;
-    const manual = s.manual.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
-    const count = picked.size + manual.length;
+    const free = s.data?.repos.filter((r) => !r.managed) ?? [];
     return {
       body: [
         h('h2', null, 'Repositories auswählen'),
-        h('p', { class: 'note', style: 'margin:0' }, 'Die App pflegt nur, was du hier aufnimmst. Nichts wird geklont oder geändert; lokale Klone im Repo-Ordner werden erkannt und eingetragen.'),
-        picker,
-        h('div', { class: 'field-col' }, h('label', { for: 'add-manual' }, 'Oder owner/name eingeben (mehrere durch Leerzeichen getrennt)'),
+        h('p', { class: 'note', style: 'margin:0' }, 'Die lokalen Git-Klone mit GitHub-Origin; die lokale Kopie wird gleich mit eingetragen. Nichts wird geklont oder geändert. Die App pflegt nur, was du hier aufnimmst.'),
+        h('div', { class: 'line' },
+          h('span', { class: 'spacer muted small' }, s.data ? `Ordner: ${s.data.folder} · ${s.data.repos.length} Repositories` : ''),
+          free.length > 0 && button(free.every((r) => picked.has(r.repo)) ? 'Keine' : 'Alle', () => {
+            if (free.every((r) => picked.has(r.repo))) for (const r of free) picked.delete(r.repo);
+            else for (const r of free) picked.set(r.repo, r.path);
+            renderList(); render();
+          }),
+          button('Anderer Ordner …', async () => { const p = await call('pick_folder'); if (p) { s.dir = p; picked.clear(); load(); } }),
+          button('Neu einlesen', load, { iconName: 'refresh', iconOnly: true })),
+        h('div', { class: 'repo-picker' }, search, list),
+        h('div', { class: 'field-col' }, h('label', { for: 'add-manual' }, 'Ohne lokale Kopie: owner/name eingeben (mehrere durch Leerzeichen getrennt)'),
           h('input', { type: 'text', id: 'add-manual', value: s.manual, spellcheck: 'false', autocomplete: 'off', placeholder: 'owner/name',
-            oninput: (e) => { s.manual = e.target.value; const b = document.getElementById('add-confirm'); if (b) b.disabled = s.busy || !(picked.size + e.target.value.trim().length); } })),
+            oninput: (e) => { s.manual = e.target.value; updateButton(); } }),
+          h('div', { class: 'note' }, 'Status und PR-Pflege gehen auch ohne Klon; der Name muss auf GitHub existieren.')),
         s.error && h('div', { class: 'note error-text' }, s.error),
       ],
       actions: [
         button('Abbrechen', close),
-        button(s.busy ? 'Wird geprüft …' : count ? `Aufnehmen (${count})` : 'Aufnehmen', async () => {
-          const local = new Map((repoCache?.repos ?? []).map((r) => [r.fullName, r.localPath ?? '']));
-          const names = [...picked, ...s.manual.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean)];
+        button(s.busy ? 'Wird aufgenommen …' : count() ? `Aufnehmen (${count()})` : 'Aufnehmen', async () => {
+          const entries = [...picked].map(([repo, localPath]) => ({ repo, localPath }))
+            .concat(s.manual.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean).map((repo) => ({ repo, localPath: '' })));
           s.busy = true; s.error = ''; render();
           try {
-            const added = await invoke('add_repositories', { repos: names.map((repo) => ({ repo, localPath: local.get(repo) ?? '' })) });
-            repoCache = null;
+            await invoke('add_repositories', { repos: entries });
             close();
-            if (added.length && area !== 'repos') showArea('repos');
+            if (area !== 'repos') showArea('repos');
           } catch (error) { s.error = String(error); s.busy = false; render(); }
-        }, { id: 'add-confirm', cls: 'primary', disabled: s.busy || !count }),
+        }, { id: 'add-confirm', cls: 'primary', disabled: s.busy || !count() }),
       ],
     };
   });
-}
-
-/** Takes product repositories of the website into the managed list; shows conflicts, overwrites nothing. */
-async function importDialog() {
-  let candidates;
-  try { candidates = await invoke('import_candidates'); } catch (error) { showAlert(String(error)); return; }
-  const keys = new Set(candidates.filter((c) => !c.managed).map((c) => c.key));
-  const release = new Set();
-  const s = { error: '' };
-  openDialog('Aus Website übernehmen', (close, render) => ({
-    body: [
-      h('h2', null, 'Produkt-Repositories der Website übernehmen'),
-      h('p', { class: 'note', style: 'margin:0' }, 'Übernommen werden Repository, lokale Kopie (wenn eindeutig) und auf Wunsch die Release-Regel. site.json bleibt unverändert; schon verwaltete Repositories bleiben, wie sie sind. Wiederholen fügt nichts doppelt hinzu.'),
-      h('div', { class: 'items' }, candidates.map((c) => h('div', { class: 'item import-item' },
-        h('label', { class: 'check-line' },
-          h('input', { type: 'checkbox', checked: keys.has(c.key), disabled: c.managed, onchange: (e) => { e.target.checked ? keys.add(c.key) : keys.delete(c.key); render(); } }),
-          h('strong', { class: 'mono' }, c.repo), c.managed && badge('green', 'schon verwaltet'), h('span', { class: 'muted small' }, c.products.join(', '))),
-        !c.managed && (c.tagPrefix != null
-          ? h('label', { class: 'check-line indent' },
-            h('input', { type: 'checkbox', checked: release.has(c.key), disabled: !keys.has(c.key), onchange: (e) => { e.target.checked ? release.add(c.key) : release.delete(c.key); } }),
-            `Release-Regel: Patch-Tags ${c.tagPrefix}x.y.z erlauben`)
-          : h('div', { class: 'note orange indent' }, `Keine Release-Regel: ${c.prefixConflict}`)),
-        h('div', { class: 'note indent' }, c.localPath ? `Lokale Kopie: ${c.localPath}` : c.localNote ? `Lokale Kopie nicht übernommen: ${c.localNote}` : 'Keine lokale Kopie in site.json'),
-        c.differences.length > 0 && h('div', { class: 'note orange indent' }, `Abweichend von site.json (bleibt so): ${c.differences.join('; ')}`)))),
-      s.error && h('div', { class: 'note error-text' }, s.error),
-    ],
-    actions: [
-      button('Abbrechen', close),
-      button(`Übernehmen (${keys.size})`, async () => {
-        try {
-          await invoke('import_repositories', { keys: [...keys], releaseFor: [...release].filter((k) => keys.has(k)) });
-          close();
-        } catch (error) { s.error = String(error); render(); }
-      }, { cls: 'primary', disabled: !keys.size }),
-    ],
-  }));
+  load();
 }
 
 // MARK: Content target dialog
@@ -1882,7 +1887,7 @@ function settingsDialog() {
             : view.signedIn ? 'über die GitHub-CLI (gh) angemeldet; die App nutzt ihren Token, Claude nie' : 'wird beim ersten Lesen geprüft (GitHub-CLI gh)')),
           row('Repo-Ordner', h('div', { class: 'line' }, text('workspaceDir', { placeholder: `${view.workspaceDisplay} (automatisch)` }),
             button('Auswählen …', async () => { const p = await call('pick_folder'); if (p) { s.workspaceDir = p; repoCache = null; render(); } })), 's-workspace'),
-          h('div', { class: 'note' }, 'Hier sucht die App lokale Klone und legt neue an. Git nutzt deine eigenen Zugangsdaten.')),
+          h('div', { class: 'note' }, 'Aus diesem Ordner bietet „Repositories auswählen“ die lokalen Klone an; neue Klone legt die App hier an. Git nutzt deine eigenen Zugangsdaten.')),
         h('fieldset', null, h('legend', null, 'Ausführungsregeln für Aufträge'),
           row('Claude-Modell', modelSelect(s.claudeModel, view.site?.claude?.model, (model) => { s.claudeModel = model; }, 's-claude-model'), 's-claude-model'),
           row('Kostengrenze je Claude-Lauf', text('budget', { placeholder: 'USD, leer = keine', inputmode: 'decimal' }), 's-budget'),

@@ -3,7 +3,7 @@
 
 use crate::{changed, load_site, with_model, Check, ClaudeRun, ItemOutcome, LogLine, Model, RepoItem, RepoReport, Status, Step, UploadResult};
 use anyhow::{anyhow, bail, Context, Result};
-use openreleasepilot_core::claude::{self, Event, Outdated};
+use openreleasepilot_core::claude::{self, Event, Outdated, ProductRelease, ReleaseCheck};
 use openreleasepilot_core::config::{AuthKind, Config};
 use openreleasepilot_core::paths::expand_home;
 use openreleasepilot_core::sftp::{self, ConnectError, Connection};
@@ -261,8 +261,7 @@ pub fn start_with(app: &AppHandle, jobs: impl FnOnce(&mut Model) -> Result<Vec<J
         let all = jobs.len() > 1;
         for job in jobs {
             if let (true, Job::Update(instructions)) = (all, &job) {
-                let nothing_to_do = with_model(&app, |m| m.outdated.as_ref().is_some_and(|o| o.is_empty())) && instructions.trim().is_empty();
-                if nothing_to_do {
+                if with_model(&app, |m| ReleaseCheck::nothing_to_do(m.outdated.as_ref(), instructions)) {
                     continue;
                 }
             }
@@ -383,9 +382,10 @@ fn connect(ctx: &Ctx) -> Result<Connection> {
 }
 
 /// Looks up the newest release of every selected product; products the user turned off are skipped.
-fn find_outdated(ctx: &Ctx, site: &Site, mut on_check: impl FnMut(Check)) -> Vec<Outdated> {
+/// A failed lookup lands in `unknown`, never among the current ones.
+fn find_outdated(ctx: &Ctx, site: &Site, mut on_check: impl FnMut(Check)) -> ReleaseCheck {
     let config = ctx.config();
-    let mut outdated = Vec::new();
+    let mut check = ReleaseCheck::default();
     for product in &site.products {
         let label = format!("Release {}", product.name);
         if !config.product_enabled(&product.id) {
@@ -393,28 +393,43 @@ fn find_outdated(ctx: &Ctx, site: &Site, mut on_check: impl FnMut(Check)) -> Vec
             on_check(Check { label, status: Status::Idle, detail: "nicht ausgewählt".into() });
             continue;
         }
-        let latest = github::latest_tag(&product.repo);
-        if let Ok(tag) = &latest {
-            with_model(&ctx.app, |m| m.latest_tags.insert(product.id.clone(), tag.clone()));
-        }
-        match latest {
-            Ok(tag) if github::is_newer(&tag, &product.documented) => {
+        match ProductRelease::classify(product, github::latest_release(&product.repo)) {
+            ProductRelease::Newer(tag) => {
+                with_model(&ctx.app, |m| m.latest_tags.insert(product.id.clone(), tag.clone()));
                 let o = Outdated::new(product, tag);
                 ctx.warn(format!("{}: dokumentiert {}, neuestes Release {}", product.name, o.documented, o.latest_version()));
                 on_check(Check { label, status: Status::Warning, detail: format!("{} → {}", o.documented, o.latest_version()) });
-                outdated.push(o);
+                check.outdated.push(o);
             }
-            Ok(tag) => {
+            ProductRelease::Current(tag) => {
+                with_model(&ctx.app, |m| m.latest_tags.insert(product.id.clone(), tag.clone()));
                 ctx.ok(format!("{}: {} ist aktuell", product.name, product.documented));
                 on_check(Check { label, status: Status::Ok, detail: format!("{} aktuell", tag.trim_start_matches('v')) });
             }
-            Err(e) => {
-                ctx.warn(format!("{}: {e:#}", product.name));
-                on_check(Check { label, status: Status::Warning, detail: format!("{e:#}") });
+            ProductRelease::NoRelease => {
+                ctx.info(format!("{}: noch kein veröffentlichtes Release", product.name));
+                on_check(Check { label, status: Status::Idle, detail: "noch kein veröffentlichtes Release".into() });
+            }
+            ProductRelease::Unknown(why) => {
+                ctx.warn(format!("{}: Release-Stand unbekannt: {why}", product.name));
+                on_check(Check { label, status: Status::Warning, detail: format!("unbekannt: {why}") });
+                check.unknown.push(format!("{}: {why}", product.name));
             }
         }
     }
-    outdated
+    check
+}
+
+/// Stops when the release state of a selected product is unknown: an update (and the upload after
+/// it) must not rest on a lookup that failed.
+fn require_complete(check: &ReleaseCheck) -> Result<()> {
+    if !check.complete() {
+        bail!(
+            "Release-Stand unklar ({}). Update gestoppt, damit nichts auf unvollständiger Grundlage geändert oder veröffentlicht wird; später erneut versuchen.",
+            check.unknown.join("; ")
+        );
+    }
+    Ok(())
 }
 
 // MARK: Precheck
@@ -478,8 +493,8 @@ fn precheck(ctx: &Ctx) -> Result<(Status, String)> {
     publish(&checks);
     ctx.runner.check()?;
 
-    let outdated = find_outdated(ctx, &site, |check| checks.push(check));
-    with_model(&ctx.app, |m| m.outdated = Some(outdated.clone()));
+    let release_check = find_outdated(ctx, &site, |check| checks.push(check));
+    with_model(&ctx.app, |m| m.outdated = Some(release_check.clone()));
     publish(&checks);
     ctx.runner.check()?;
 
@@ -520,15 +535,22 @@ fn precheck(ctx: &Ctx) -> Result<(Status, String)> {
 
     let worst = checks.iter().map(|c| c.status).max().unwrap_or(Status::Ok).max(Status::Ok);
     let problems = checks.iter().filter(|c| c.status >= Status::Warning && !c.label.starts_with("Release ")).count();
-    let mut summary = if outdated.is_empty() {
-        if site.products.iter().all(|p| config.product_enabled(&p.id)) { "Alle Produkte auf dem dokumentierten Stand" } else { "Alle ausgewählten Produkte auf dem dokumentierten Stand" }
-            .to_owned()
-    } else {
+    let outdated = &release_check.outdated;
+    let mut summary = if !outdated.is_empty() {
         format!(
             "Neue Releases: {}",
             outdated.iter().map(|o| format!("{} {} → {}", o.name, o.documented, o.latest_version())).collect::<Vec<_>>().join(", ")
         )
+    } else if !release_check.complete() {
+        format!("Release-Stand unklar für {} Produkt(e)", release_check.unknown.len())
+    } else if site.products.iter().all(|p| config.product_enabled(&p.id)) {
+        "Alle Produkte auf dem dokumentierten Stand".to_owned()
+    } else {
+        "Alle ausgewählten Produkte auf dem dokumentierten Stand".to_owned()
     };
+    if !outdated.is_empty() && !release_check.complete() {
+        summary.push_str(&format!(" · Release-Stand unklar für {} Produkt(e)", release_check.unknown.len()));
+    }
     if problems > 0 {
         summary.push_str(&format!(" · {problems} Hinweis(e)"));
     }
@@ -686,8 +708,10 @@ fn update(ctx: &Ctx, instructions: &str) -> Result<(Status, String)> {
     prepare_tree(ctx, &project)?;
 
     ctx.info("Neueste Releases abfragen …");
-    let outdated = find_outdated(ctx, &site, |_| {});
-    with_model(&ctx.app, |m| m.outdated = Some(outdated.clone()));
+    let release_check = find_outdated(ctx, &site, |_| {});
+    with_model(&ctx.app, |m| m.outdated = Some(release_check.clone()));
+    require_complete(&release_check)?;
+    let outdated = release_check.outdated;
     let config = ctx.config();
     let skipped: Vec<String> = site.products.iter().filter(|p| !config.product_enabled(&p.id)).map(|p| p.name.clone()).collect();
     if outdated.is_empty() && instructions.trim().is_empty() {
@@ -1144,7 +1168,10 @@ fn repos_run(ctx: &Ctx, set: &repocare::PlanSet) -> Result<(Status, String)> {
             if ctx.runner.is_cancelled() {
                 not_run(ctx, &mut reports[i].items, &mut tally, label);
             } else {
-                record(ctx, &mut reports[i].items, &mut tally, None, label, "", repocare::sync_local(plan));
+                {
+                    let result = repocare::sync_local(plan, &mut states[i]);
+                    record(ctx, &mut reports[i].items, &mut tally, None, label, "", result);
+                }
             }
         }
         for branch in &plan.local_branches {

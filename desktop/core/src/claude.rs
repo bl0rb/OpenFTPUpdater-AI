@@ -75,6 +75,51 @@ impl Outdated {
     }
 }
 
+/// What the release lookup says about one product.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProductRelease {
+    /// The newest release (tag) is newer than the documented version.
+    Newer(String),
+    Current(String),
+    /// The repository has no published release yet.
+    NoRelease,
+    /// The lookup failed: newer or not is unknown.
+    Unknown(String),
+}
+
+impl ProductRelease {
+    pub fn classify(product: &Product, latest: anyhow::Result<Option<String>>) -> Self {
+        match latest {
+            Ok(Some(tag)) if crate::github::is_newer(&tag, &product.documented) => ProductRelease::Newer(tag),
+            Ok(Some(tag)) => ProductRelease::Current(tag),
+            Ok(None) => ProductRelease::NoRelease,
+            Err(e) => ProductRelease::Unknown(format!("{e:#}")),
+        }
+    }
+}
+
+/// The release lookup of the selected products. A failed lookup is not "current": as long as
+/// `unknown` is not empty, nothing may be updated or published on its basis.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseCheck {
+    pub outdated: Vec<Outdated>,
+    /// `Name: why` of each product whose newest release could not be read.
+    pub unknown: Vec<String>,
+}
+
+impl ReleaseCheck {
+    pub fn complete(&self) -> bool {
+        self.unknown.is_empty()
+    }
+
+    /// Update can be left out of a run of all steps: the last lookup was complete, found nothing
+    /// new, and there is no instruction for Claude. An unknown state never counts as nothing to do.
+    pub fn nothing_to_do(check: Option<&ReleaseCheck>, instructions: &str) -> bool {
+        check.is_some_and(|c| c.complete() && c.outdated.is_empty()) && instructions.trim().is_empty()
+    }
+}
+
 /// `skipped`: names of the products the user turned off; Claude must leave them alone.
 pub fn task_prompt(site: &Site, task: &Task, outdated: &[Outdated], skipped: &[String], instructions: &str) -> String {
     let mut text = if task.skill.is_empty() {
@@ -480,6 +525,21 @@ mod tests {
         let current = "Current version: 2.1.296\nChecking for updates to latest version...\nClaude Code is up to date (2.1.296)\n";
         assert_eq!(update_note(current), "Claude Code ist aktuell (2.1.296)");
         assert_eq!(update_note("Error: network\n\n"), "Error: network");
+    }
+
+    #[test]
+    fn an_unknown_release_is_never_up_to_date() {
+        let product: Product = serde_json::from_str(r#"{"id":"a","name":"Alpha","repo":"o/a","documented":"1.2.0"}"#).unwrap();
+        assert_eq!(ProductRelease::classify(&product, Ok(Some("v1.3.0".into()))), ProductRelease::Newer("v1.3.0".into()));
+        assert_eq!(ProductRelease::classify(&product, Ok(Some("1.2.0".into()))), ProductRelease::Current("1.2.0".into()));
+        assert_eq!(ProductRelease::classify(&product, Ok(None)), ProductRelease::NoRelease, "no release is an answer, not an error");
+        assert!(matches!(ProductRelease::classify(&product, Err(anyhow::anyhow!("GitHub nicht erreichbar"))), ProductRelease::Unknown(why) if why.contains("erreichbar")));
+
+        let unknown = ReleaseCheck { outdated: Vec::new(), unknown: vec!["Alpha: GitHub nicht erreichbar".into()] };
+        assert!(!ReleaseCheck::nothing_to_do(Some(&unknown), ""), "an empty list after a failed lookup is not 'all current'");
+        assert!(ReleaseCheck::nothing_to_do(Some(&ReleaseCheck::default()), ""));
+        assert!(!ReleaseCheck::nothing_to_do(Some(&ReleaseCheck::default()), "Text ändern"));
+        assert!(!ReleaseCheck::nothing_to_do(None, ""), "never looked");
     }
 
     #[test]

@@ -441,6 +441,8 @@ function tabKey(e) {
 function precheckResult() {
   if (!view.checks.length) return [];
   const stale = view.steps.precheck.stale;
+  const unknown = view.releaseUnknown.length > 0 && !stale
+    && h('div', { class: 'note orange' }, `Release-Stand unklar: ${view.releaseUnknown.join('; ')}. Update und „Alle Schritte“ stoppen, bis der Stand bekannt ist.`);
   const outdated = view.outdated?.length
     ? h('div', { class: 'facts' }, h('span', null, h('strong', null, 'Neue Releases: '),
       view.outdated.map((o) => `${o.name} ${o.documented} → ${o.latestTag.replace(/^v/, '')}`).join(', ')))
@@ -448,6 +450,7 @@ function precheckResult() {
   return [
     stale && h('div', { class: 'note orange' }, 'Dieses Ergebnis stammt von vor dem letzten Update oder Upload (z. B. Remote-Stand und Releases). Precheck erneut starten für den aktuellen Stand.'),
     outdated && !stale ? outdated : null,
+    unknown,
     h('div', { class: `checks ${stale ? 'stale' : ''}` }, view.checks.map((c) => [
     h('span', { class: `status-dot ${c.status}` }), h('span', { class: 'label' }, c.label), h('span', { class: 'detail-text selectable' }, c.detail),
   ]))];

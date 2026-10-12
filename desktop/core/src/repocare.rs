@@ -518,6 +518,8 @@ pub struct RunState {
     pub expected_head: Option<String>,
     /// The default branch moved without this run.
     pub foreign: Option<String>,
+    /// The local clone was brought up to date (`sync_local`) in this run.
+    pub local_synced: bool,
 }
 
 impl RunState {
@@ -731,12 +733,21 @@ pub fn tag(plan: &Plan, state: &RunState, runner: &Runner, wait: &CiWait, progre
         CiState::NoChecks => return Ok(Done::Skipped(format!("keine CI-Checks für {commit} gefunden; ohne grüne CI kein automatischer Tag"))),
         CiState::Unknown => return Ok(Done::Skipped(format!("CI von {commit} unklar ({}); kein Tag", ci.detail))),
     }
-    // Waiting may take long: look again right before writing.
+    // Waiting may take long: look again right before writing. A newer tag or a moved base makes the
+    // planned version wrong even when the default branch stayed where it was.
     if head(plan)? != target {
         return Ok(Done::Skipped(format!("{} hat sich während des Wartens bewegt; kein Tag", plan.default_branch)));
     }
     if get(&format!("repos/{}/git/ref/tags/{}", plan.repo, encode_ref(tag)))?.is_some() {
         return Ok(Done::Skipped(format!("{tag} gibt es inzwischen")));
+    }
+    if let Some(why) = release_line_changed(plan, last, tag)? {
+        return Ok(Done::Skipped(format!("{why} (nach dem Warten auf die CI)")));
+    }
+    match repos::commits_since(&plan.repo, last, &target) {
+        Ok(0) => return Ok(Done::Skipped(format!("{} unverändert seit {last} (nach dem Warten auf die CI)", plan.default_branch))),
+        Err(e) => return Ok(Done::Skipped(format!("Änderungen seit {last} {e:#} (nach dem Warten auf die CI); kein Tag"))),
+        Ok(_) => {}
     }
     let body = json!({ "ref": format!("refs/tags/{tag}"), "sha": target });
     match send("POST", &format!("repos/{}/git/refs", plan.repo), Some(&body)) {
@@ -831,7 +842,7 @@ pub fn delete_branch(plan: &Plan, branch: &Branch, state: &RunState) -> Result<D
             return Ok(Done::Skipped(format!("offener PR #{} {what}", pr["number"].as_u64().unwrap_or(0))));
         }
     }
-    if let Some(why) = proof_gone(plan, branch, state, None)? {
+    if let Some(why) = proof_gone(plan, branch, state, false)? {
         return Ok(Done::Skipped(why));
     }
     match send("DELETE", &format!("repos/{}/git/refs/heads/{name}", plan.repo), None) {
@@ -847,22 +858,26 @@ pub fn delete_branch(plan: &Plan, branch: &Branch, state: &RunState) -> Result<D
 }
 
 /// Updates the clone's view of GitHub (`git fetch --prune origin`), as the preview announced.
-pub fn sync_local(plan: &Plan) -> Result<Done> {
+pub fn sync_local(plan: &Plan, state: &mut RunState) -> Result<Done> {
     let dir = Path::new(plan.clone.as_deref().context("keine lokale Kopie")?);
     if let Some(why) = foreign_clone(plan, dir) {
         return Ok(Done::Skipped(why));
     }
     output("git", &["fetch", "--prune", "--quiet", "origin"], dir).context("git fetch --prune in der lokalen Kopie")?;
+    state.local_synced = true;
     Ok(Done::Ok("git fetch --prune origin".into()))
 }
 
 /// Deletes a planned branch of the local clone after checking it again: the clone still belongs to
-/// the repository, the branch is not the default branch, not checked out in any worktree, still on
-/// the same commit, and the proof still holds.
+/// the repository, an announced update of the clone succeeded, the branch is not the default branch,
+/// not checked out in any worktree, still on the same commit, and the proof still holds on GitHub.
 pub fn delete_local_branch(plan: &Plan, branch: &Branch, state: &RunState) -> Result<Done> {
     let dir = Path::new(plan.clone.as_deref().context("keine lokale Kopie")?);
     if let Some(why) = foreign_clone(plan, dir) {
         return Ok(Done::Skipped(why));
+    }
+    if plan.local_sync.is_some() && !state.local_synced {
+        return Ok(Done::Skipped("die lokale Kopie wurde nicht abgeglichen; ohne aktuellen Stand wird nichts gelöscht".into()));
     }
     if branch.name == plan.default_branch {
         return Ok(Done::Skipped("ist der Default-Branch".into()));
@@ -875,7 +890,7 @@ pub fn delete_local_branch(plan: &Plan, branch: &Branch, state: &RunState) -> Re
         Ok(sha) if sha.trim() != branch.sha => return Ok(Done::Skipped("hat seit der Vorschau neue Commits".into())),
         Ok(_) => {}
     }
-    if let Some(why) = proof_gone(plan, branch, state, Some(dir))? {
+    if let Some(why) = proof_gone(plan, branch, state, true)? {
         return Ok(Done::Skipped(why));
     }
     // -D, because a squash-merged branch is not an ancestor; the checks above proved it merged.
@@ -890,8 +905,9 @@ fn foreign_clone(plan: &Plan, dir: &Path) -> Option<String> {
     }
 }
 
-/// Why the branch's proof no longer holds; `dir` checks containment in the clone instead of on GitHub.
-fn proof_gone(plan: &Plan, branch: &Branch, state: &RunState, dir: Option<&Path>) -> Result<Option<String>> {
+/// Why the branch's proof no longer holds, judged by GitHub's current state. A local branch is
+/// compared by its commit: the clone's `origin/<default>` may be older than GitHub.
+fn proof_gone(plan: &Plan, branch: &Branch, state: &RunState, local: bool) -> Result<Option<String>> {
     Ok(match branch.proof {
         Proof::AfterMerge(number) => (!state.merged.contains(&number)).then(|| format!("PR #{number} wurde nicht gemergt")),
         Proof::MergedPr(number) => {
@@ -900,14 +916,9 @@ fn proof_gone(plan: &Plan, branch: &Branch, state: &RunState, dir: Option<&Path>
             (!holds).then(|| format!("PR #{number} belegt den Merge nicht mehr"))
         }
         Proof::Contained => {
-            let holds = match dir {
-                Some(dir) => {
-                    let base = format!("refs/remotes/origin/{}", plan.default_branch);
-                    output("git", &["merge-base", "--is-ancestor", &branch.sha, &base], dir).is_ok()
-                }
-                None => contained(&plan.repo, &plan.default_branch, &branch.name)?,
-            };
-            (!holds).then(|| format!("nicht mehr vollständig in {} enthalten", plan.default_branch))
+            let head = if local { &branch.sha } else { &branch.name };
+            let holds = contained(&plan.repo, &plan.default_branch, head)?;
+            (!holds).then(|| format!("nicht mehr vollständig in {} auf GitHub enthalten", plan.default_branch))
         }
     })
 }
@@ -1009,7 +1020,8 @@ fn merged_heads(repo: &str) -> Result<HashMap<String, u64>> {
         .collect())
 }
 
-/// Every commit of `branch` is in `base`.
+/// Every commit of `branch` (a branch name or a commit) is in `base` on GitHub; a commit GitHub
+/// does not know is not contained.
 fn contained(repo: &str, base: &str, branch: &str) -> Result<bool> {
     let compare = get(&format!("repos/{repo}/compare/{}...{}", encode_ref(base), encode_ref(branch)))?;
     Ok(compare.is_some_and(|c| matches!(c["status"].as_str(), Some("identical" | "behind"))))
@@ -1410,6 +1422,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir.with_extension("wt"));
     }
 
+    /// GitHub's answer whether `sha` is contained in `main`; `None` for a commit GitHub does not know.
+    fn on_github(sha: &str, status: Option<&str>) -> (String, Option<Value>) {
+        (format!("repos/o/app/compare/main...{sha}"), status.map(|s| json!({ "status": s })))
+    }
+
     #[test]
     fn local_branches_go_only_while_the_proof_holds() {
         let dir = clone("delete");
@@ -1417,7 +1434,7 @@ mod tests {
         let state = RunState::new(&plan);
         let sha = |name: &str| output("git", &["rev-parse", name], &dir).unwrap();
         let branch = |name: &str, sha: String| Branch { name: name.into(), sha, reason: String::new(), proof: Proof::Contained };
-        mock::install([]);
+        mock::install([on_github(&sha("merged"), Some("behind")), on_github(&sha("open"), Some("ahead"))]);
         let busy = branch("busy", sha("busy"));
         assert!(matches!(delete_local_branch(&plan, &busy, &state).unwrap(), Done::Skipped(t) if t.contains("Worktree")));
         let open = branch("open", sha("open"));
@@ -1432,6 +1449,58 @@ mod tests {
         assert!(matches!(delete_local_branch(&plan, &merged, &state).unwrap(), Done::Skipped(t) if t.contains("schon gelöscht")), "a repeat does nothing");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(dir.with_extension("wt"));
+    }
+
+    #[test]
+    fn a_stale_local_view_of_github_deletes_nothing() {
+        let dir = clone("stale");
+        let sha = output("git", &["rev-parse", "merged"], &dir).unwrap();
+        let merged = Branch { name: "merged".into(), sha: sha.clone(), reason: String::new(), proof: Proof::Contained };
+        let plan = Plan { clone: Some(dir.display().to_string()), ..plan() };
+        let state = RunState::new(&plan);
+        let skipped = |plan: &Plan, state: &RunState, why: &str| match delete_local_branch(plan, &merged, state).unwrap() {
+            Done::Skipped(text) => assert!(text.contains(why), "{text}"),
+            Done::Ok(text) => panic!("deleted: {text}"),
+        };
+        // The clone's origin/main contains the branch, but main on GitHub was rewritten without it.
+        mock::install([on_github(&sha, Some("diverged"))]);
+        skipped(&plan, &state, "auf GitHub");
+        mock::install([on_github(&sha, None)]);
+        skipped(&plan, &state, "auf GitHub");
+
+        // The preview announced an update of the clone; it did not happen, so nothing goes.
+        let announced = Plan { local_sync: Some("origin/main steht lokal auf a, auf GitHub auf b".into()), ..plan.clone() };
+        mock::install([on_github(&sha, Some("behind"))]);
+        skipped(&announced, &state, "nicht abgeglichen");
+        let synced = RunState { local_synced: true, ..RunState::new(&announced) };
+        assert!(matches!(delete_local_branch(&announced, &merged, &synced).unwrap(), Done::Ok(_)));
+        assert!(mock::writes().is_empty(), "local deletes never write to GitHub");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(dir.with_extension("wt"));
+    }
+
+    #[test]
+    fn the_release_line_is_checked_again_after_waiting_for_ci() {
+        let plan = tag_plan();
+        let state = RunState { expected_head: Some("m2".into()), ..RunState::default() };
+        let runner = Runner::default();
+        let skipped = |why: &str| match tag(&plan, &state, &runner, &quick(), &|_| {}).unwrap() {
+            Done::Skipped(text) => assert!(text.contains(why) && text.contains("nach dem Warten"), "{text}"),
+            Done::Ok(text) => panic!("tagged: {text}"),
+        };
+        let mut world = tag_world("m2");
+        world.extend(green("m2"));
+
+        // While the CI ran, someone released 1.0.5: 1.0.1 would go below it.
+        mock::install(world.clone());
+        mock::sequence("repos/o/app/tags?per_page=100&page=1", vec![Some(json!([{ "name": "1.0.0" }])), Some(json!([{ "name": "1.0.0" }, { "name": "1.0.5" }]))]);
+        skipped("inzwischen gibt es 1.0.5");
+
+        // 1.0.0 was moved to another commit while the CI ran: the base is no longer an ancestor.
+        mock::install(world);
+        mock::sequence("repos/o/app/compare/1.0.0...m2", vec![Some(json!({ "status": "ahead", "ahead_by": 2 })), Some(json!({ "status": "diverged" }))]);
+        skipped("divergiert");
+        assert!(mock::writes().is_empty());
     }
 
     #[test]

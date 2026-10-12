@@ -5,7 +5,7 @@ mod steps;
 
 use steps::{Job, NewProductInput};
 
-use openreleasepilot_core::claude::{Outcome, Outdated};
+use openreleasepilot_core::claude::{Outcome, Outdated, ReleaseCheck};
 use openreleasepilot_core::config::{self, AuthKind, Config};
 use openreleasepilot_core::update::{self, ReleaseInfo};
 use openreleasepilot_core::{github, localrepo, manifest, repocare, repos};
@@ -133,7 +133,7 @@ pub struct Model {
     pub runner: Option<Arc<Runner>>,
     pub checks: Vec<Check>,
     /// `None` until a precheck has looked at the releases.
-    pub outdated: Option<Vec<Outdated>>,
+    pub outdated: Option<ReleaseCheck>,
     /// Product id → newest release tag, as last looked up.
     pub latest_tags: BTreeMap<String, String>,
     /// Claude runs of the last Update or New product, one per task.
@@ -269,6 +269,8 @@ struct View {
     running: Option<Step>,
     checks: Vec<Check>,
     outdated: Option<Vec<Outdated>>,
+    /// Products whose newest release the last lookup could not read.
+    release_unknown: Vec<String>,
     products: Vec<steps::ProductView>,
     tasks: Vec<steps::ResolvedTask>,
     claude_runs: Vec<ClaudeRun>,
@@ -329,7 +331,8 @@ fn get_view(app: AppHandle) -> View {
         steps: m.steps.clone(),
         running: m.running,
         checks: m.checks.clone(),
-        outdated: m.outdated.clone(),
+        outdated: m.outdated.as_ref().map(|c| c.outdated.clone()),
+        release_unknown: m.outdated.as_ref().map(|c| c.unknown.clone()).unwrap_or_default(),
         products: m.site.as_ref().map(|site| steps::resolve_products(site, &m.config, &m.latest_tags)).unwrap_or_default(),
         tasks: m.site.as_ref().map(|site| steps::resolve_tasks(site, &m.config)).unwrap_or_default(),
         claude_runs: m.claude_runs.clone(),

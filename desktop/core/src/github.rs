@@ -137,11 +137,6 @@ pub fn latest_release(repo: &str) -> Result<Option<String>> {
     }
 }
 
-/// Like `latest_release`, but a missing release is an error.
-pub fn latest_tag(repo: &str) -> Result<String> {
-    latest_release(repo)?.context("kein veröffentlichtes Release")
-}
-
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepoInfo {
@@ -240,6 +235,8 @@ pub(crate) mod mock {
     pub struct Mock {
         /// GET path → body; `None` answers 404.
         pub gets: HashMap<String, Option<Value>>,
+        /// GET path → answers in order, the last one repeated; for state that changes while the code waits.
+        pub sequences: HashMap<String, std::collections::VecDeque<Option<Value>>>,
         /// `METHOD path` → status and body; unlisted writes succeed.
         pub replies: HashMap<String, (u16, Value)>,
         /// `METHOD path` of every write, with its body.
@@ -258,6 +255,10 @@ pub(crate) mod mock {
         MOCK.with(|m| m.borrow_mut().as_mut().expect("mock installed").gets.insert(path.to_owned(), body));
     }
 
+    pub fn sequence(path: &str, answers: Vec<Option<Value>>) {
+        MOCK.with(|m| m.borrow_mut().as_mut().expect("mock installed").sequences.insert(path.to_owned(), answers.into()));
+    }
+
     pub fn reply(write: &str, status: u16, body: Value) {
         MOCK.with(|m| m.borrow_mut().as_mut().expect("mock installed").replies.insert(write.to_owned(), (status, body)));
     }
@@ -268,8 +269,12 @@ pub(crate) mod mock {
 
     pub(super) fn get(path: &str) -> Option<Result<Option<Value>>> {
         MOCK.with(|m| {
-            let m = m.borrow();
-            let mock = m.as_ref()?;
+            let mut m = m.borrow_mut();
+            let mock = m.as_mut()?;
+            if let Some(answers) = mock.sequences.get_mut(path) {
+                let answer = if answers.len() > 1 { answers.pop_front() } else { answers.front().cloned() };
+                return Some(answer.ok_or_else(|| anyhow!("leere Folge für {path}")));
+            }
             Some(mock.gets.get(path).cloned().ok_or_else(|| anyhow!("unerwartete Abfrage {path}")))
         })
     }

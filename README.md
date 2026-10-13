@@ -69,6 +69,47 @@ that base (only where it is an ancestor of the head, otherwise "nicht bestimmbar
 clone, every open pull request with target branch, author, CI and mergeability, the content targets the
 repository feeds with what each was last brought to, and the management settings.
 
+## Security check
+
+**Sicherheit prüfen** (in the overview for all or the selected repositories, or in a repository's
+**Sicherheit** section) reads GitHub only: no Claude, no cost, no write, about 10 to 20 requests per
+repository. It is separate from the health state above and runs only on request. The result is shown
+worst first; what is fine or could not be read is folded away.
+
+| Check | Finding when |
+|---|---|
+| **Direct pushes to the default branch** | neither a ruleset nor classic branch protection requires pull requests (critical); classic protection exempts admins (hint) |
+| **Force push and deletion** | force pushes are allowed (critical) or the branch can be deleted (important) |
+| **Required checks before merge** | no required status checks (hint) |
+| **Secret scanning**, **push protection** | switched off (important); open secret scanning alerts (critical) |
+| **Dependabot alerts**, **security updates** | alerts off (important), open alerts (critical for high/critical, else important), security updates off (hint) |
+| **Code scanning (CodeQL)** | not set up (hint), open alerts by severity |
+| **Workflow token rights** | `GITHUB_TOKEN` may write by default or workflows may approve pull requests (important) |
+| **Private vulnerability reporting**, **SECURITY.md** | public repositories only: off or missing (hint) |
+| **Deploy keys with write access** | any (hint) |
+
+Many settings are only visible to admins and to a signed-in `gh`; what cannot be read is shown as
+**Nicht prüfbar**, never as fine. Where possible a finding offers a fix, for an admin of a repository
+that is not archived: **Beheben …** lists them with exactly what changes on GitHub and what it can
+break; you tick which to carry out (fixes with a warning start unticked). Each fix only adds protection,
+nothing is loosened or removed:
+
+- **Nur noch über Pull Requests** / **Force-Push und Löschen verbieten**: creates or extends the
+  repository ruleset `OpenReleasePilot: Default-Branch` for the default branch (pull requests without a
+  required review, so you can still merge your own; no force push, no deletion; also for admins). A rule
+  of the same type that is already there stays as it is. For the website's own repository the app warns
+  that its upload push would then be refused. Private repositories need GitHub Pro, Team or Enterprise
+  for rulesets.
+- **Secret scanning**, **push protection**, **Dependabot alerts** and **security updates**, **CodeQL
+  default setup**, **private vulnerability reporting**: switched on.
+- **Workflow token read-only**: default `GITHUB_TOKEN` rights to read, workflows may not approve pull
+  requests; the app lists the workflows without their own `permissions:` that would lose write access.
+
+Not while an open job holds the repository. Whatever GitHub refuses (missing licence, missing `gh`
+scope such as `admin:repo_hook` for Dependabot) is reported per fix; the repository is checked again
+afterwards. Leaked secrets, open alerts, required checks and deploy keys are left to you, with a link to
+the right GitHub page.
+
 ## Care jobs
 
 Select repositories on their cards (or open one) and choose **Pflegen …**. A job is made of the

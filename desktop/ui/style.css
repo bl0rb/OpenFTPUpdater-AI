@@ -472,3 +472,8 @@ legend { font-weight: 600; padding: 0 4px; }
 .item-reason.orange { color: var(--orange); }
 .runs-list { display: flex; flex-direction: column; gap: 14px; }
 @media (max-width: 700px) { .fact-grid { grid-template-columns: minmax(0, 1fr); } .fact-grid .label { margin-top: 4px; } }
+
+/* Security check in the repository detail: findings first, the rest folded away. */
+.sec-more > summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+.sec-more[open] > summary { margin-bottom: 8px; }
+.sec-choices { display: flex; flex-direction: column; gap: 12px; }

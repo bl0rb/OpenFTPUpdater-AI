@@ -70,6 +70,47 @@ Commits seit dieser Basis (nur wenn sie ein Vorfahr von HEAD ist, sonst „nicht
 Release-Regel, lokale Kopie, jeden offenen Pull Request mit Zielbranch, Autor, CI und Mergebarkeit, die
 zugeordneten Inhaltsziele mit ihrem zuletzt erreichten Stand und die Verwaltung.
 
+## Sicherheitsprüfung
+
+**Sicherheit prüfen** (in der Übersicht für alle oder die ausgewählten Repositories, oder im Abschnitt
+**Sicherheit** eines Repositorys) liest nur GitHub: kein Claude, keine Kosten, kein Schreiben, etwa 10
+bis 20 Anfragen je Repository. Sie ist vom Zustand oben getrennt und läuft nur auf Wunsch. Das Ergebnis
+steht mit dem Schlimmsten zuerst; was in Ordnung oder nicht lesbar ist, ist eingeklappt.
+
+| Prüfung | Befund, wenn |
+|---|---|
+| **Direkte Pushes auf den Default-Branch** | weder ein Ruleset noch der klassische Branch-Schutz Pull Requests verlangt (kritisch); der klassische Schutz Admins ausnimmt (Hinweis) |
+| **Force-Push und Löschen** | Force-Pushes erlaubt sind (kritisch) oder der Branch gelöscht werden kann (wichtig) |
+| **Pflicht-Checks vor dem Merge** | keine Status-Checks verlangt werden (Hinweis) |
+| **Secret Scanning**, **Push Protection** | aus (wichtig); offene Secret-Alerts (kritisch) |
+| **Dependabot-Alerts**, **Sicherheitsupdates** | Alerts aus (wichtig), offene Alerts (kritisch bei hoch/kritisch, sonst wichtig), Sicherheitsupdates aus (Hinweis) |
+| **Code Scanning (CodeQL)** | nicht eingerichtet (Hinweis), offene Alerts nach Schwere |
+| **Rechte des Workflow-Tokens** | der `GITHUB_TOKEN` standardmäßig schreiben darf oder Workflows PRs freigeben dürfen (wichtig) |
+| **Private Meldung von Sicherheitslücken**, **SECURITY.md** | nur öffentliche Repositories: aus oder fehlt (Hinweis) |
+| **Deploy-Keys mit Schreibrecht** | es welche gibt (Hinweis) |
+
+Viele Einstellungen sieht nur ein Admin mit angemeldetem `gh`; was nicht lesbar ist, heißt
+**Nicht prüfbar**, nie „in Ordnung“. Wo möglich bietet ein Befund eine Behebung an, für Admins eines
+nicht archivierten Repositorys: **Beheben …** zeigt sie mit genau dem, was sich auf GitHub ändert und was
+es brechen kann; du wählst, was ausgeführt wird (Behebungen mit Warnung sind zunächst abgewählt). Jede
+fügt nur Schutz hinzu, nichts wird gelockert oder entfernt:
+
+- **Nur noch über Pull Requests** / **Force-Push und Löschen verbieten**: legt das Repository-Ruleset
+  `OpenReleasePilot: Default-Branch` für den Default-Branch an oder ergänzt es (Pull Requests ohne
+  Pflicht-Review, damit du eigene weiter mergen kannst; kein Force-Push, kein Löschen; auch für Admins).
+  Eine Regel desselben Typs, die schon da ist, bleibt wie sie ist. Beim Repository der Website warnt die
+  App, dass der Push ihres Uploads dann abgelehnt wird. Private Repositories brauchen für Rulesets GitHub
+  Pro, Team oder Enterprise.
+- **Secret Scanning**, **Push Protection**, **Dependabot-Alerts** und **-Sicherheitsupdates**,
+  **CodeQL-Default-Setup**, **private Meldung von Sicherheitslücken**: eingeschaltet.
+- **Workflow-Token nur lesend**: Standardrechte des `GITHUB_TOKEN` auf Lesen, Workflows dürfen keine PRs
+  freigeben; die App nennt die Workflows ohne eigene `permissions:`, die dadurch Schreibrechte verlieren.
+
+Nicht, solange ein offener Auftrag das Repository hält. Was GitHub ablehnt (fehlende Lizenz, fehlender
+`gh`-Scope wie `admin:repo_hook` für Dependabot), steht je Behebung im Ergebnis; danach wird das
+Repository neu geprüft. Geleakte Secrets, offene Alerts, Pflicht-Checks und Deploy-Keys bleiben bei dir,
+mit Link auf die passende GitHub-Seite.
+
 ## Pflegeaufträge
 
 Repositories auf ihren Karten auswählen (oder eines öffnen) und **Pflegen …** wählen. Ein Auftrag

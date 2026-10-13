@@ -73,6 +73,7 @@ const ICONS = {
   branch: '<circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="7" r="2"/><path d="M6 7v10M18 9c0 5-6 4-11 8"/>',
   back: '<path d="M19 12H5M11 6l-6 6 6 6"/>',
   check: '<path d="M5 12l5 5 9-10"/>',
+  shield: '<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/>',
 };
 
 function icon(name) {
@@ -693,6 +694,7 @@ function renderRepos() {
   keepFocus(() => {
     const repos = view.repositories;
     const reading = repos.some((r) => r.loading || r.detailsLoading);
+    const securing = repos.some((r) => r.securityLoading);
     const chosen = repos.filter((r) => selection.has(r.key));
     const careable = repos.filter((r) => !r.capabilities.care && !r.job);
     const listing = !repoKey;
@@ -706,9 +708,13 @@ function renderRepos() {
         }), 'Alle'),
       h('span', { class: 'muted small' }, repos.length ? `${repos.length} verwaltet${chosen.length ? `, ${chosen.length} ausgewählt` : ''}` : ''),
       h('span', { class: 'spacer' }),
-      reading && button('Lesen abbrechen', () => call('cancel_repo_refresh'), { id: 'repos-cancel-read' }),
+      (reading || securing) && button('Lesen abbrechen', () => call('cancel_repo_refresh'), { id: 'repos-cancel-read' }),
       repos.length > 0 && button(reading ? 'Wird gelesen …' : 'Status aktualisieren', () => call('refresh_repos', { keys: [] }),
         { id: 'repos-refresh', iconName: 'refresh', disabled: reading, title: 'Liest den Stand aller Repositories auf GitHub: nur lesend, ohne Claude' }),
+      listing && repos.length > 0 && button(securing ? 'Wird geprüft …' : chosen.length ? `Sicherheit prüfen (${chosen.length})` : 'Sicherheit prüfen',
+        () => call('check_security', { keys: chosen.map((r) => r.key) }),
+        { id: 'repos-security', iconName: 'shield', disabled: securing,
+          title: `Prüft ${chosen.length ? 'die ausgewählten' : 'alle'} Repositories auf GitHub: Schutz des Default-Branches (direkte Pushes, Force-Push), Secret- und Abhängigkeits-Scanning, offene Alerts, Workflow-Rechte. Nur lesend, ohne Claude.` }),
       button('Hinzufügen …', addReposDialog, { id: 'repos-add', iconName: 'plus', title: 'Lokale Repositories in die Verwaltung aufnehmen' }),
       listing && repos.length > 0 && button(chosen.length ? `Pflegen (${chosen.length}) …` : 'Pflegen …', () => jobDialog(chosen.map((r) => r.key)),
         { id: 'repos-care', iconName: 'branch', cls: chosen.length ? 'primary' : null, disabled: !chosen.length || !!view.running,
@@ -855,7 +861,7 @@ function repoCard(r) {
       healthChip(r)),
     h('span', { class: 'repo-card-reason' }, r.enabled ? mainReason(r) : 'deaktiviert: wird gelesen, aber nicht gepflegt'),
     h('span', { class: 'repo-card-meta' }, (r.facts ? [prSummary(r), ciSummary(r), releaseSummary(r)] : []).concat(LOCAL_TEXT[r.local.state], checkedSummary(r))
-      .filter(Boolean).map((text) => h('span', null, text))),
+      .filter(Boolean).map((text) => h('span', null, text)), securitySummary(r)),
     h('span', { class: 'repo-card-rel' }, relations(r)));
 }
 
@@ -887,6 +893,7 @@ function repoDetail(r) {
       button('Auftrag ansehen', () => openJob(r.job.id), { cls: 'link' })),
     findings(r),
     h('section', { class: 'panel section' }, h('h3', null, 'Status'), statusFacts(r, branch)),
+    h('section', { class: 'panel section', id: 'repo-security-section' }, securitySection(r)),
     h('section', { class: 'panel section' }, prSection(r, branch)),
     h('section', { class: 'panel section' }, contentSection(r)),
     h('section', { class: 'panel section' }, manageSection(r)));
@@ -990,6 +997,126 @@ function prItem(pr, detail, branch) {
       pr.intoDefault ? `Ziel ${pr.base}` : `Ziel ${pr.base}, nicht ${branch}: kommt nicht in den Pflegeplan`,
       !detail && 'CI und Mergebarkeit noch nicht gelesen',
     ].filter(Boolean).join(' · ')));
+}
+
+// MARK: Repositories: security
+
+const SEC_LEVEL = {
+  high: ['red', 'Kritisch'], medium: ['orange', 'Wichtig'], low: ['', 'Hinweis'], unknown: ['', 'Nicht prüfbar'], ok: ['green', 'In Ordnung'],
+};
+const FINDING_LEVELS = ['high', 'medium', 'low'];
+
+/** One line on the card: what the last security check found. */
+function securitySummary(r) {
+  if (r.securityLoading && !r.security) return h('span', null, 'Sicherheit wird geprüft …');
+  if (!r.security) return null;
+  const [high, medium, low] = FINDING_LEVELS.map((level) => r.security.checks.filter((c) => c.level === level).length);
+  const parts = [high && `${high} kritisch`, medium && `${medium} wichtig`, low && `${low} Hinweis${low === 1 ? '' : 'e'}`].filter(Boolean);
+  return h('span', { class: high ? 'red' : medium ? 'orange' : parts.length ? null : 'green', title: 'Ergebnis der letzten Sicherheitsprüfung' },
+    `Sicherheit: ${parts.length ? parts.join(', ') : 'kein Befund'}`);
+}
+
+/** The fixes the report offers, each once (with the first check that offers it). */
+function securityOffers(report) {
+  const offers = new Map();
+  for (const c of report?.checks ?? []) if (c.fix && !offers.has(c.fix.fix)) offers.set(c.fix.fix, { ...c.fix, check: c });
+  return [...offers.values()];
+}
+
+function securityItem(r, c) {
+  const [cls, text] = SEC_LEVEL[c.level];
+  const locked = r.job ? 'gehört zu einem offenen Auftrag' : null;
+  return h('div', { class: 'item' },
+    h('div', { class: 'item-line' },
+      badge(cls, text), h('strong', { class: 'item-title', title: c.title }, c.title), h('span', { class: 'spacer' }),
+      c.fix && button(`${c.fix.label} …`, () => securityFixDialog(r, c.fix.fix), {
+        cls: 'link', disabled: !!locked, title: locked ? `Nicht möglich: ${locked}` : c.fix.effect, id: domId('sec-fix', `${r.key}-${c.id}`),
+      }),
+      c.url && button('Auf GitHub', () => call('open_url', { url: c.url }), { cls: 'link', title: 'Einstellung oder Alerts auf GitHub öffnen' })),
+    h('div', { class: 'item-reason selectable' }, c.detail));
+}
+
+function securitySection(r) {
+  const report = r.security;
+  const offers = securityOffers(report);
+  const locked = r.job ? 'gehört zu einem offenen Auftrag' : null;
+  const head = h('div', { class: 'section-head wrap' }, h('h3', null, 'Sicherheit'),
+    report && h('span', { class: 'muted small' }, `geprüft ${ago(report.checkedAt)}`),
+    h('span', { class: 'spacer' }),
+    offers.length > 0 && button(`Beheben (${offers.length}) …`, () => securityFixDialog(r), {
+      id: 'repo-security-fix', iconName: 'shield', cls: 'primary', disabled: !!locked,
+      title: locked ? `Nicht möglich: ${locked}` : 'Einstellungen auf GitHub ändern; du wählst, welche',
+    }),
+    button(r.securityLoading ? 'Wird geprüft …' : report ? 'Neu prüfen' : 'Sicherheit prüfen', () => call('check_security', { keys: [r.key] }),
+      { id: 'repo-security-check', iconName: report ? 'refresh' : 'shield', disabled: r.securityLoading, title: 'Nur lesend, ohne Claude' }));
+  if (!report) {
+    return [head,
+      h('div', { class: 'note' }, r.securityLoading ? 'Schutzregeln, Einstellungen und Alerts werden gelesen …'
+        : 'Noch nicht geprüft. Die Prüfung liest auf GitHub, wie der Default-Branch geschützt ist (direkte Pushes, Force-Push, Löschen, Pflicht-Checks), ob Secret Scanning, Push Protection, Dependabot und Code Scanning an sind, offene Alerts und die Rechte des Workflow-Tokens. Nur lesend, ohne Claude.'),
+      r.securityError && h('div', { class: 'note error-text' }, `Prüfung fehlgeschlagen: ${r.securityError}`)].filter(Boolean);
+  }
+  const findings = report.checks.filter((c) => FINDING_LEVELS.includes(c.level));
+  const rest = report.checks.filter((c) => !FINDING_LEVELS.includes(c.level));
+  const okCount = rest.filter((c) => c.level === 'ok').length;
+  const unknownCount = rest.length - okCount;
+  return [head,
+    r.securityError && h('div', { class: 'note orange' }, `Letzte Prüfung fehlgeschlagen, gezeigt wird die ältere: ${r.securityError}`),
+    report.archived ? h('div', { class: 'note' }, 'Archiviert: Einstellungen lassen sich nicht ändern.')
+      : report.admin !== true && h('div', { class: 'note orange' },
+        report.admin == null ? 'Ohne gh-Anmeldung ist vieles nicht lesbar, und nichts lässt sich in der App beheben (gh auth login).'
+          : 'Ohne Admin-Rechte sind manche Einstellungen nicht lesbar, und nichts lässt sich in der App beheben.'),
+    findings.length ? h('div', { class: 'items' }, findings.map((c) => securityItem(r, c))) : h('div', { class: 'note green' }, 'Kein Befund.'),
+    rest.length > 0 && h('details', { class: 'sec-more' },
+      h('summary', null, [okCount && `${okCount} in Ordnung`, unknownCount && `${unknownCount} nicht prüfbar`].filter(Boolean).join(', ')),
+      h('div', { class: 'items' }, rest.map((c) => securityItem(r, c)))),
+  ].filter(Boolean);
+}
+
+/** Asks which fixes to carry out (`only`: just that one ticked), then shows what GitHub answered. */
+function securityFixDialog(r, only) {
+  const offers = securityOffers(r.security);
+  // Without `only`, what can break something stays unticked until you tick it.
+  const picked = new Set(offers.filter((o) => (only ? o.fix === only : !o.warning)).map((o) => o.fix));
+  const s = { busy: false, error: '', results: null };
+  const name = (fix) => offers.find((o) => o.fix === fix)?.label ?? fix;
+  openDialog('Sicherheit verbessern', (close, render) => {
+    if (s.results) {
+      const failed = s.results.filter((x) => !x.ok).length;
+      return {
+        body: [
+          h('h2', null, failed ? `${s.results.length - failed} von ${s.results.length} geändert` : 'Geändert'),
+          h('div', { class: 'items' }, s.results.map((x) => h('div', { class: 'item' },
+            h('div', { class: 'item-line' }, badge(x.ok ? 'green' : 'red', x.ok ? 'Erledigt' : 'Abgelehnt'), h('strong', null, name(x.fix))),
+            h('div', { class: 'item-reason selectable' }, x.text)))),
+          h('div', { class: 'note' }, 'Die Sicherheit des Repositorys wird jetzt neu geprüft.'),
+        ],
+        actions: [button('Schließen', close, { cls: 'primary' })],
+      };
+    }
+    return {
+      body: [
+        h('h2', null, `${r.repo}: Sicherheit verbessern`),
+        h('div', { class: 'note' }, 'Jeder Punkt ändert eine Einstellung auf GitHub. Er fügt Schutz hinzu, entfernt nichts und lässt sich in den Einstellungen des Repositorys auf GitHub wieder zurücknehmen.'),
+        h('div', { class: 'sec-choices' }, offers.map((o) => h('label', { class: 'check-line top' },
+          h('input', { type: 'checkbox', checked: picked.has(o.fix), disabled: s.busy, onchange: (e) => { e.target.checked ? picked.add(o.fix) : picked.delete(o.fix); render(); } }),
+          h('span', null,
+            h('strong', null, o.label), ' ', h('span', { class: 'muted small' }, `· ${o.check.title}`),
+            h('div', { class: 'note' }, o.effect),
+            o.warning && h('div', { class: 'note orange' }, o.warning))))),
+        s.error && h('div', { class: 'note error-text' }, s.error),
+      ],
+      actions: [
+        button('Abbrechen', close, { disabled: s.busy }),
+        button(s.busy ? 'Wird geändert …' : picked.size > 1 ? `${picked.size} Änderungen ausführen` : 'Auf GitHub ändern', async () => {
+          s.busy = true; s.error = ''; render();
+          try {
+            s.results = await invoke('fix_security', { key: r.key, fixes: [...picked] });
+          } catch (error) { s.error = String(error); }
+          s.busy = false; render();
+        }, { cls: 'primary', iconName: 'shield', disabled: s.busy || !picked.size }),
+      ],
+    };
+  });
 }
 
 // MARK: Repositories: content targets

@@ -11,7 +11,7 @@ use openreleasepilot_core::config::{self, AuthKind, Config, ManagedRepo, Release
 use openreleasepilot_core::content::{self, ContentTarget, TargetState};
 use openreleasepilot_core::jobs::{self, Job, JobOptions};
 use openreleasepilot_core::update::{self, ReleaseInfo};
-use openreleasepilot_core::{github, localrepo, manifest, repos};
+use openreleasepilot_core::{github, localrepo, manifest, repos, security};
 use openreleasepilot_core::paths::{self, abbreviate_home, expand_home};
 use openreleasepilot_core::secrets;
 use openreleasepilot_core::sftp::{self, ConnectError};
@@ -91,6 +91,12 @@ pub struct RepoStatus {
     pub details: Option<repos::Details>,
     pub details_loading: bool,
     pub details_token: u64,
+    /// The last security check; read only on request.
+    pub security: Option<security::Report>,
+    pub security_loading: bool,
+    /// The last security check failed; `security`, if any, is from before.
+    pub security_error: Option<String>,
+    pub security_token: u64,
 }
 
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
@@ -314,6 +320,9 @@ struct RepoView {
     error: Option<String>,
     details: Option<repos::Details>,
     details_loading: bool,
+    security: Option<security::Report>,
+    security_loading: bool,
+    security_error: Option<String>,
     /// The open job that holds it, if any.
     job: Option<JobRef>,
     /// Ids of the content targets it feeds.
@@ -437,6 +446,9 @@ fn get_view(app: AppHandle) -> View {
                         loading: status.is_some_and(|s| s.loading),
                         error: status.and_then(|s| s.error.clone()),
                         details_loading: status.is_some_and(|s| s.details_loading),
+                        security: status.and_then(|s| s.security.clone()),
+                        security_loading: status.is_some_and(|s| s.security_loading),
+                        security_error: status.and_then(|s| s.security_error.clone()),
                         job: open_job(&|j| j.repos.contains(&key)),
                         targets: m.config.content_targets.iter().filter(|t| t.sources.contains(&key)).map(|t| t.id.clone()).collect(),
                         facts,
@@ -879,6 +891,10 @@ fn cancel_repo_refresh(app: AppHandle) {
                 status.details_token = next_token();
                 status.details_loading = false;
             }
+            if status.security_loading {
+                status.security_token = next_token();
+                status.security_loading = false;
+            }
         }
     });
     changed(&app);
@@ -910,6 +926,82 @@ fn load_repo_details(app: AppHandle, key: String) -> Result<(), String> {
         changed(&app);
     });
     Ok(())
+}
+
+// MARK: Security
+
+/// The security check of the repositories (all when `keys` is empty), four at a time, each stored
+/// as soon as it arrives. Read only and without Claude.
+fn check_security_of(app: &AppHandle, keys: &[String]) {
+    let (site, config) = with_model(app, |m| (m.site.clone(), m.config.clone()));
+    let targets: Vec<repos::RepoTarget> = repo_targets(&config, &site).into_iter().filter(|t| keys.is_empty() || keys.contains(&t.key)).collect();
+    if targets.is_empty() {
+        return;
+    }
+    let jobs: VecDeque<(repos::RepoTarget, u64)> = with_model(app, |m| {
+        targets
+            .into_iter()
+            .map(|target| {
+                let token = next_token();
+                let status = m.repo_status.entry(target.key.clone()).or_default();
+                status.security_token = token;
+                status.security_loading = true;
+                (target, token)
+            })
+            .collect()
+    });
+    changed(app);
+    let app = app.clone();
+    std::thread::spawn(move || {
+        github::token();
+        let queue = Mutex::new(jobs);
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| loop {
+                    let Some((target, token)) = queue.lock().unwrap_or_else(|e| e.into_inner()).pop_front() else { break };
+                    if !with_model(&app, |m| m.repo_status.get(&target.key).is_some_and(|s| s.security_token == token)) {
+                        continue;
+                    }
+                    let report = security::check_repo(&target.repo, target.website, steps::now());
+                    with_model(&app, |m| {
+                        let Some(status) = m.repo_status.get_mut(&target.key).filter(|s| s.security_token == token) else { return };
+                        status.security_loading = false;
+                        match report {
+                            Ok(report) => {
+                                status.security = Some(report);
+                                status.security_error = None;
+                            }
+                            // An older check is worth more than none; it shows its age.
+                            Err(e) => status.security_error = Some(format!("{e:#}")),
+                        }
+                    });
+                    changed(&app);
+                });
+            }
+        });
+    });
+}
+
+/// "Sicherheit prüfen": all repositories, or the given ones.
+#[tauri::command]
+fn check_security(app: AppHandle, keys: Vec<String>) {
+    check_security_of(&app, &keys);
+}
+
+/// Carries out fixes the user confirmed for one repository, then checks it again. Not while an
+/// open job holds it: a new rule could refuse a step the job's plan counts on.
+#[tauri::command]
+async fn fix_security(app: AppHandle, key: String, fixes: Vec<security::Fix>) -> Result<Vec<security::FixResult>, String> {
+    if fixes.is_empty() {
+        return Err("Nichts ausgewählt".into());
+    }
+    if let Some(job) = with_model(&app, |m| held_by_job(m, &key)) {
+        return Err(format!("Gehört zum offenen Auftrag {job}; erst abschließen oder beenden"));
+    }
+    let repo = with_model(&app, |m| m.config.repositories.iter().find(|r| r.key() == key).map(|r| r.repo.trim().to_owned())).ok_or("Repository wird nicht verwaltet")?;
+    let results = blocking(move || security::apply(&repo, &fixes)).await.map_err(|e| format!("{e:#}"))?;
+    check_security_of(&app, &[key]);
+    Ok(results)
 }
 
 // MARK: Managing repositories
@@ -1443,6 +1535,8 @@ fn main() {
             refresh_repos,
             cancel_repo_refresh,
             load_repo_details,
+            check_security,
+            fix_security,
             add_repositories,
             update_repository,
             remove_repository,

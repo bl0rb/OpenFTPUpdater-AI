@@ -67,6 +67,19 @@ pub(crate) fn get(path: &str) -> Result<Option<serde_json::Value>> {
     Ok(Some(serde_json::from_reader(response.into_reader()).context("Antwort von GitHub unlesbar")?))
 }
 
+/// HTTP status of a GET whose answer is only its status, e.g. 204 for "on" and 404 for "off".
+pub(crate) fn probe(path: &str) -> Result<u16> {
+    #[cfg(test)]
+    if let Some(answer) = mock::probe(path) {
+        return answer;
+    }
+    match request("GET", path).call() {
+        Ok(response) => Ok(response.status()),
+        Err(ureq::Error::Status(code, _)) => Ok(code),
+        Err(e) => Err(e).context("GitHub nicht erreichbar"),
+    }
+}
+
 /// A list endpoint read page by page; `complete` is false when `max_pages` cut it off.
 pub(crate) struct Listing {
     pub items: Vec<serde_json::Value>,
@@ -280,6 +293,19 @@ pub(crate) mod mock {
             }
             Some(mock.gets.get(path).cloned().ok_or_else(|| anyhow!("unerwartete Abfrage {path}")))
         })
+    }
+
+    /// A listed body answers 204, a listed `None` 404.
+    pub(super) fn probe(path: &str) -> Option<Result<u16>> {
+        MOCK.with(|m| {
+            let m = m.borrow();
+            let mock = m.as_ref()?;
+            Some(mock.gets.get(path).map(|body| if body.is_some() { 204 } else { 404 }).ok_or_else(|| anyhow!("unerwartete Abfrage {path}")))
+        })
+    }
+
+    pub fn written(write: &str) -> Option<Value> {
+        MOCK.with(|m| m.borrow().as_ref()?.writes.iter().find(|(w, _)| w == write).and_then(|(_, body)| body.clone()))
     }
 
     pub(super) fn send(method: &str, path: &str, body: Option<&Value>) -> Option<Result<(u16, Value)>> {

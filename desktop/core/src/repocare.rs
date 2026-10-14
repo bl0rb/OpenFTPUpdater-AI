@@ -57,6 +57,10 @@ pub struct Plan {
     pub review_cost: Option<f64>,
     /// Why there is no (complete) review; without a verdict a pull request stays open.
     pub review_note: Option<String>,
+    /// Claude's review did not run through (e.g. its login expired): the pull requests are not
+    /// judged at all, which is not "nothing to do".
+    #[serde(default)]
+    pub review_error: Option<String>,
     /// Newest release tag `x.y.z` before the run.
     pub last_tag: Option<String>,
     /// Next patch version, if the default branch moved since `last_tag` (or will by the merges).

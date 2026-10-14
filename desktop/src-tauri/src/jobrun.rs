@@ -265,8 +265,13 @@ fn care_scan(ctx: &Ctx, job: &mut Job, i: usize) -> Result<()> {
                 Ok(()) => {}
                 Err(e) if ctx.runner.is_cancelled() => return Err(e),
                 Err(e) => {
-                    ctx.warn(format!("  Claude-Prüfung fehlgeschlagen: {e:#}"));
-                    plan.review_note = Some(format!("Claude-Prüfung fehlgeschlagen ({e:#}); alle PRs bleiben offen."));
+                    let why = format!("{e:#}");
+                    ctx.warn(format!("  Claude-Prüfung fehlgeschlagen: {why}"));
+                    if let Some(hint) = claude_login_hint(&why) {
+                        ctx.warn(format!("  {hint}"));
+                    }
+                    plan.review_note = Some(format!("Claude-Prüfung fehlgeschlagen ({why}); alle PRs bleiben offen und unbewertet."));
+                    plan.review_error = Some(why);
                     repocare::apply_review(plan, &[]);
                 }
             }
@@ -305,15 +310,50 @@ fn care_scan(ctx: &Ctx, job: &mut Job, i: usize) -> Result<()> {
     let all_unreadable = unreadable == set.plans.len();
     job.plan = Some(set);
     let note = if unreadable > 0 { format!("; {unreadable} Repository/ies nicht lesbar") } else { String::new() };
-    let step = &mut job.steps[i];
-    if all_unreadable {
-        step.set(StepState::Failed, "Kein Repository lesbar; Details im Plan", now());
-    } else if job.items.is_empty() {
-        step.set(StepState::NothingToDo, format!("Nichts zu tun{note}"), now());
-    } else {
-        step.set(StepState::NeedsApproval, format!("Plan: {summary}{note}"), now());
-    }
+    let unreviewed = unreviewed(&set_plans(job));
+    let (state, detail) = scan_result(all_unreadable, job.items.is_empty(), &summary, &note, &unreviewed);
+    job.steps[i].set(state, detail, now());
     Ok(())
+}
+
+fn set_plans(job: &Job) -> Vec<Plan> {
+    job.plan.as_ref().map(|s| s.plans.clone()).unwrap_or_default()
+}
+
+/// The repositories whose pull requests Claude could not judge, with the first reason.
+fn unreviewed(plans: &[Plan]) -> Option<(Vec<String>, String)> {
+    let failed: Vec<&Plan> = plans.iter().filter(|p| p.review_error.is_some()).collect();
+    let first = failed.first()?.review_error.clone()?;
+    Some((failed.iter().map(|p| p.name.clone()).collect(), first))
+}
+
+/// What a failed Claude call needs from the user, when its message says so.
+fn claude_login_hint(why: &str) -> Option<&'static str> {
+    let lower = why.to_lowercase();
+    ["authenticat", "oauth", "log in", "login", "401", "invalid api key"]
+        .iter()
+        .any(|s| lower.contains(s))
+        .then_some("Claude Code ist nicht (mehr) angemeldet: im Terminal claude starten und /login ausführen, danach „Neu prüfen“.")
+}
+
+/// The care step after the preview. Pull requests Claude could not judge are open work, never
+/// "nothing to do": with nothing else planned the step is blocked until a new review.
+fn scan_result(all_unreadable: bool, no_items: bool, summary: &str, note: &str, unreviewed: &Option<(Vec<String>, String)>) -> (StepState, String) {
+    let missing = unreviewed.as_ref().map(|(names, why)| {
+        let hint = claude_login_hint(why).map(|h| format!(" {h}")).unwrap_or_else(|| " Danach „Neu prüfen“.".to_owned());
+        format!("Claude-Prüfung fehlgeschlagen ({}): PRs nicht bewertet – {why}.{hint}", names.join(", "))
+    });
+    if all_unreadable {
+        (StepState::Failed, "Kein Repository lesbar; Details im Plan".to_owned())
+    } else if let (true, Some(missing)) = (no_items, &missing) {
+        (StepState::Blocked, missing.clone())
+    } else if no_items {
+        (StepState::NothingToDo, format!("Nichts zu tun{note}"))
+    } else if let Some(missing) = missing {
+        (StepState::NeedsApproval, format!("Plan: {summary}{note}. {missing}"))
+    } else {
+        (StepState::NeedsApproval, format!("Plan: {summary}{note}"))
+    }
 }
 
 /// `3 PRs mergen, 1 Tag, 5 Branches löschen`, or `nichts zu tun`.
@@ -437,7 +477,14 @@ fn care_run(ctx: &Ctx, job: &mut Job, i: usize) -> Result<()> {
         job.steps[i].set(StepState::Cancelled, "abgebrochen; Erledigtes bleibt", now());
         return Ok(());
     }
-    let (state, summary) = jobs::care_result(&job.items);
+    let (mut state, mut summary) = jobs::care_result(&job.items);
+    // Carried out what was planned, but pull requests Claude could not judge are still open work.
+    if let Some((names, _)) = unreviewed(&set_plans(job)) {
+        if matches!(state, StepState::Done | StepState::NothingToDo) {
+            state = StepState::Partial;
+        }
+        summary = format!("{summary} · PRs von {} nicht bewertet (Claude-Prüfung fehlgeschlagen)", names.join(", "));
+    }
     job.steps[i].set(state, summary, now());
     crate::refresh_status(&ctx.app, &job.repos);
     Ok(())
@@ -910,4 +957,35 @@ fn website_publish(ctx: &Ctx, job: &mut Job, i: usize) -> Result<()> {
     let state = if verified == Status::Error { StepState::Partial } else { StepState::Done };
     job.steps[i].set(state, format!("{upload_summary} · Live-Seite: {verify_summary}"), now());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn failed(why: &str) -> Option<(Vec<String>, String)> {
+        Some((vec!["Weave".to_owned()], why.to_owned()))
+    }
+
+    #[test]
+    fn an_unjudged_pull_request_is_not_nothing_to_do() {
+        let expired = failed("Failed to authenticate: OAuth session expired and could not be refreshed");
+        let (state, detail) = scan_result(false, true, "nichts zu tun", "", &expired);
+        assert_eq!(state, StepState::Blocked);
+        assert!(detail.contains("Weave") && detail.contains("/login"), "{detail}");
+        let (state, detail) = scan_result(false, false, "2 Branches löschen", "", &expired);
+        assert_eq!(state, StepState::NeedsApproval, "the rest of the plan can still be approved");
+        assert!(detail.contains("nicht bewertet"), "{detail}");
+        assert_eq!(scan_result(false, true, "nichts zu tun", "", &None).0, StepState::NothingToDo);
+        assert_eq!(scan_result(true, true, "", "", &expired).0, StepState::Failed);
+    }
+
+    #[test]
+    fn only_a_login_problem_asks_for_a_login() {
+        assert!(claude_login_hint("Failed to authenticate: OAuth session expired").is_some());
+        assert!(claude_login_hint("API Error: 401 unauthorized").is_some());
+        assert!(claude_login_hint("Claude hat keine strukturierte Antwort geliefert").is_none());
+        let (_, detail) = scan_result(false, true, "", "", &failed("Budget überschritten"));
+        assert!(detail.ends_with("Danach „Neu prüfen“."), "{detail}");
+    }
 }

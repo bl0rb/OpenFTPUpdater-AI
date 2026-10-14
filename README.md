@@ -293,7 +293,7 @@ repository; it does not change which repositories the app manages.
   instead of counting as "nothing new".
 - From 0.3.0: a tag needs CI that positively passed for exactly the tagged commit; repositories without CI
   get no automatic tag.
-- After 0.3.4: "Einrichtung" is now **Einstellungen**, "Läufe" is **Aufträge**, and the website steps are
+- From 0.3.5: "Einrichtung" is now **Einstellungen**, "Läufe" is **Aufträge**, and the website steps are
   Prüfen, Inhalte aktualisieren, Veröffentlichen and Live-Seite prüfen. "Verbindung testen" (test
   connection) no longer saves anything; only "Sichern" (save) applies the settings, including a server
   key confirmed while testing. An invalid cost limit (0, negative, not an amount) is refused instead of
@@ -332,7 +332,7 @@ not signed, so macOS blocks it on the first open; allow it once under **System S
 Security → Open Anyway**, or install it in the terminal:
 
 ```bash
-sudo installer -pkg OpenReleasePilot-0.3.4.pkg -target /
+sudo installer -pkg OpenReleasePilot-0.3.5.pkg -target /
 ```
 
 The same package can be distributed through Microsoft Intune as a "macOS app (PKG)"; then turn off

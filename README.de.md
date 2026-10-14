@@ -309,7 +309,7 @@ Einstellungen, nicht im Website-Repository; welche Repositories die App verwalte
   „nichts Neues“ zu gelten.
 - Seit 0.3.0: Ein Tag braucht eine CI, die für genau den getaggten Commit erfolgreich war; Repositories
   ohne CI bekommen keinen automatischen Tag.
-- Nach 0.3.4: „Einrichtung“ heißt **Einstellungen**, „Läufe“ heißt **Aufträge**, die Website-Schritte
+- Seit 0.3.5: „Einrichtung“ heißt **Einstellungen**, „Läufe“ heißt **Aufträge**, die Website-Schritte
   heißen Prüfen, Inhalte aktualisieren, Veröffentlichen und Live-Seite prüfen. „Verbindung testen“
   speichert nichts mehr; erst „Sichern“ übernimmt die Einstellungen, auch einen dabei bestätigten
   Server-Schlüssel. Eine ungültige Kostengrenze (0, negativ, kein Betrag) wird abgelehnt, statt die
@@ -349,7 +349,7 @@ Es ist nicht signiert, macOS blockiert es deshalb beim ersten Öffnen; einmal un
 Datenschutz & Sicherheit → Dennoch öffnen** erlauben oder im Terminal installieren:
 
 ```bash
-sudo installer -pkg OpenReleasePilot-0.3.4.pkg -target /
+sudo installer -pkg OpenReleasePilot-0.3.5.pkg -target /
 ```
 
 Dasselbe Paket lässt sich über Microsoft Intune als „macOS-App (PKG)“ verteilen; dann in den

@@ -150,6 +150,12 @@ pub fn latest_release(repo: &str) -> Result<Option<String>> {
     }
 }
 
+/// Whether `tag` has a release that `latest_release` can report: published, no pre-release.
+pub fn has_published_release(repo: &str, tag: &str) -> Result<bool> {
+    let Some(json) = get(&format!("repos/{repo}/releases/tags/{}", encode_ref(tag)))? else { return Ok(false) };
+    Ok(json["draft"].as_bool() != Some(true) && json["prerelease"].as_bool() != Some(true))
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepoInfo {
@@ -335,6 +341,21 @@ mod tests {
         assert!(!super::is_repo_name("nudgit"));
         assert!(!super::is_repo_name("a/b/c"));
         assert!(!super::is_repo_name("a b/c"));
+    }
+
+    #[test]
+    fn only_a_published_full_release_counts() {
+        use serde_json::json;
+        super::mock::install([
+            ("repos/o/app/releases/tags/v1.0.0".to_owned(), Some(json!({ "draft": false, "prerelease": false }))),
+            ("repos/o/app/releases/tags/v1.1.0".to_owned(), Some(json!({ "draft": false, "prerelease": true }))),
+            ("repos/o/app/releases/tags/v1.2.0".to_owned(), Some(json!({ "draft": true, "prerelease": false }))),
+            ("repos/o/app/releases/tags/v1.3.0".to_owned(), None),
+        ]);
+        assert!(super::has_published_release("o/app", "v1.0.0").unwrap());
+        assert!(!super::has_published_release("o/app", "v1.1.0").unwrap(), "pre-release");
+        assert!(!super::has_published_release("o/app", "v1.2.0").unwrap(), "draft");
+        assert!(!super::has_published_release("o/app", "v1.3.0").unwrap(), "only the tag");
     }
 
     #[test]

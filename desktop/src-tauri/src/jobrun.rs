@@ -488,7 +488,7 @@ fn execute(plan: &Plan, item: &CareItem, state: &mut RunState) -> Result<Done> {
 // MARK: Release
 
 /// The planned tag once the CI of exactly its commit passed, then (if the release rule says the
-/// repository publishes releases) the wait for that release.
+/// repository publishes releases, or a later step builds on the newest release) the wait for that release.
 fn release(ctx: &Ctx, job: &mut Job, i: usize) -> Result<()> {
     let key = job.steps[i].subject.clone();
     let config = ctx.config();
@@ -571,9 +571,16 @@ fn release(ctx: &Ctx, job: &mut Job, i: usize) -> Result<()> {
         job.steps[i].set(StepState::Failed, format!("Commit von {tag} unbekannt"), now());
         return Ok(());
     };
+    let readers = release_readers(job, i);
     if !rule.publishes_release {
-        job.steps[i].set(StepState::Done, format!("Tag {tag} gesetzt; laut Release-Regel veröffentlicht das Repository kein GitHub-Release"), now());
-        return Ok(());
+        if readers.is_empty() {
+            job.steps[i].set(StepState::Done, format!("Tag {tag} gesetzt; laut Release-Regel veröffentlicht das Repository kein GitHub-Release"), now());
+            return Ok(());
+        }
+        ctx.warn(format!(
+            "  Laut Release-Regel kein GitHub-Release, aber {} beschreibt das neueste Release: warte trotzdem auf {tag}",
+            readers.join(", ")
+        ));
     }
     let progress = |text: &str| ctx.info(format!("  {text}"));
     match repocare::wait_for_release(&managed.repo, &tag, &commit, &ctx.runner, &CiWait::default(), &progress)? {
@@ -591,6 +598,47 @@ fn release(ctx: &Ctx, job: &mut Job, i: usize) -> Result<()> {
         ReleaseWait::Pending(why) => job.steps[i].set(StepState::Waiting, format!("Tag {tag} gesetzt; {why}. Release-Workflow prüfen, dann erneut prüfen"), now()),
     }
     Ok(())
+}
+
+/// Later steps of this job that wait for release step `i` and build on the newest GitHub release:
+/// the website, docs and wiki with the basis "neuestes Release".
+fn release_readers(job: &Job, i: usize) -> Vec<String> {
+    let id = &job.steps[i].id;
+    job.steps
+        .iter()
+        .filter(|s| s.after.contains(id))
+        .filter(|s| s.kind == StepKind::Website || (matches!(s.kind, StepKind::Docs | StepKind::Wiki) && s.basis == Some(Basis::Release)))
+        .map(|s| s.label.clone())
+        .collect()
+}
+
+/// Tags this job set (in the release steps step `i` waits for) that GitHub does not report as a
+/// published release yet. Building on the newest release now would describe the previous one.
+fn unreleased_tags(ctx: &Ctx, job: &Job, i: usize) -> Result<Vec<String>> {
+    let config = ctx.config();
+    let mut missing = Vec::new();
+    for step in job.steps[i].after.iter().filter_map(|id| job.step(id)).filter(|s| s.kind == StepKind::Release) {
+        let (Some(tag), Some(managed)) = (&step.tag, config.repository(&step.subject)) else { continue };
+        if !github::has_published_release(&managed.repo, tag)? {
+            missing.push(format!("{} {tag}", managed.repo));
+        }
+    }
+    Ok(missing)
+}
+
+/// Stops step `i` before it builds on an older release than the one this job tagged.
+fn blocked_by_unreleased(ctx: &Ctx, job: &mut Job, i: usize) -> Result<bool> {
+    let missing = unreleased_tags(ctx, job, i)?;
+    if missing.is_empty() {
+        return Ok(false);
+    }
+    let why = format!(
+        "Noch kein veröffentlichtes GitHub-Release für {}; sonst würde das vorige Release beschrieben. Release abwarten (Release-Regel „mit GitHub-Release“), dann neu vorbereiten",
+        missing.join(", ")
+    );
+    ctx.warn(why.clone());
+    job.steps[i].set(StepState::Blocked, why, now());
+    Ok(true)
 }
 
 // MARK: Content targets
@@ -613,6 +661,9 @@ fn content_prepare(ctx: &Ctx, job: &mut Job, i: usize) -> Result<()> {
     let managed: Vec<String> = config.repositories.iter().map(|r| r.key()).collect();
     content::validate(&target, &managed).map_err(|why| anyhow!("{}: {why}", target.name))?;
     let basis = job.steps[i].basis.unwrap_or(target.basis);
+    if basis == Basis::Release && blocked_by_unreleased(ctx, job, i)? {
+        return Ok(());
+    }
     ctx.info(format!("Quellen festhalten ({}):", if basis == Basis::Release { "neuestes Release" } else { "aktueller Stand" }));
     let mut sources = Vec::new();
     for key in &target.sources {
@@ -830,6 +881,9 @@ fn record_pull_request(ctx: &Ctx, job: &mut Job, i: usize, target: &content::Con
 /// The website's update for the products of this job's repositories: Claude, build, a local commit.
 /// Ends with that commit as the proposal.
 fn website_prepare(ctx: &Ctx, job: &mut Job, i: usize) -> Result<()> {
+    if blocked_by_unreleased(ctx, job, i)? {
+        return Ok(());
+    }
     let project = ctx.project()?;
     let before = git::head(&project).unwrap_or_default();
     let update = steps::update_site(ctx, &job.options.instructions, Some(&job.repos))?;

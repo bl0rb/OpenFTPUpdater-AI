@@ -410,7 +410,8 @@ fn care_run(ctx: &Ctx, job: &mut Job, i: usize) -> Result<()> {
         let result = execute(plan, &item, state);
         let (outcome, text) = match result {
             Ok(Done::Ok(text)) => (ItemOutcome::Done, text),
-            Ok(Done::Skipped(text) | Done::Pending(text) | Done::Nothing(text)) => (ItemOutcome::Skipped, text),
+            Ok(Done::Nothing(text)) => (ItemOutcome::AlreadyDone, text),
+            Ok(Done::Skipped(text) | Done::Pending(text)) => (ItemOutcome::Skipped, text),
             Err(e) if ctx.runner.is_cancelled() => (ItemOutcome::Cancelled, format!("abgebrochen ({e:#})")),
             Err(e) => (ItemOutcome::Failed, format!("{e:#}")),
         };
@@ -420,7 +421,7 @@ fn care_run(ctx: &Ctx, job: &mut Job, i: usize) -> Result<()> {
         let context = if item.context.is_empty() { String::new() } else { format!("{} – ", item.context) };
         ctx.log(
             match outcome {
-                ItemOutcome::Done => "ok",
+                ItemOutcome::Done | ItemOutcome::AlreadyDone => "ok",
                 ItemOutcome::Failed => "error",
                 _ => "warn",
             },
@@ -436,37 +437,7 @@ fn care_run(ctx: &Ctx, job: &mut Job, i: usize) -> Result<()> {
         job.steps[i].set(StepState::Cancelled, "abgebrochen; Erledigtes bleibt", now());
         return Ok(());
     }
-    let counted: Vec<&CareItem> = job.items.iter().filter(|i| i.kind != ItemKind::Tag && i.outcome != Some(ItemOutcome::Excluded)).collect();
-    let count = |o: ItemOutcome| counted.iter().filter(|i| i.outcome == Some(o)).count();
-    let (done, skipped, failed) = (count(ItemOutcome::Done), count(ItemOutcome::Skipped), count(ItemOutcome::Failed));
-    let mut parts = Vec::new();
-    for (kind, one, many) in [
-        (ItemKind::Merge, "PR gemergt", "PRs gemergt"),
-        (ItemKind::Close, "PR geschlossen", "PRs geschlossen"),
-        (ItemKind::Rebase, "Rebase angestoßen", "Rebases angestoßen"),
-        (ItemKind::Branch, "Branch gelöscht", "Branches gelöscht"),
-        (ItemKind::LocalBranch, "lokaler Branch gelöscht", "lokale Branches gelöscht"),
-    ] {
-        let n = counted.iter().filter(|i| i.kind == kind && i.outcome == Some(ItemOutcome::Done)).count();
-        if n > 0 {
-            parts.push(format!("{n} {}", if n == 1 { one } else { many }));
-        }
-    }
-    for (n, what) in [(skipped, "übersprungen"), (failed, "fehlgeschlagen")] {
-        if n > 0 {
-            parts.push(format!("{n} {what}"));
-        }
-    }
-    let summary = if parts.is_empty() { "nichts ausgeführt".to_owned() } else { parts.join(", ") };
-    let state = if counted.is_empty() {
-        StepState::NothingToDo
-    } else if failed > 0 && done == 0 {
-        StepState::Failed
-    } else if failed + skipped > 0 {
-        StepState::Partial
-    } else {
-        StepState::Done
-    };
+    let (state, summary) = jobs::care_result(&job.items);
     job.steps[i].set(state, summary, now());
     crate::refresh_status(&ctx.app, &job.repos);
     Ok(())
@@ -937,6 +908,6 @@ fn website_publish(ctx: &Ctx, job: &mut Job, i: usize) -> Result<()> {
     save(ctx, job)?;
     let (verified, verify_summary) = steps::verify(ctx)?;
     let state = if verified == Status::Error { StepState::Partial } else { StepState::Done };
-    job.steps[i].set(state, format!("{upload_summary} · Verify: {verify_summary}"), now());
+    job.steps[i].set(state, format!("{upload_summary} · Live-Seite: {verify_summary}"), now());
     Ok(())
 }

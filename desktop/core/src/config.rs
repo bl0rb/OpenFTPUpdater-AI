@@ -207,9 +207,34 @@ pub fn save(config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// The cost limit as typed: empty = none; otherwise a finite positive amount, with a decimal point
+/// or comma. Anything else is an error, so a typo never removes the limit.
+pub fn parse_budget(text: &str) -> Result<Option<f64>, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    match text.replace(',', ".").parse::<f64>() {
+        Ok(amount) if amount.is_finite() && amount > 0.0 => Ok(Some(amount)),
+        _ => Err(format!("Kostengrenze „{text}“: bitte einen Betrag größer als 0 eingeben, z. B. 1,50, oder das Feld leeren")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_empty_budget_removes_the_limit() {
+        assert_eq!(parse_budget(""), Ok(None));
+        assert_eq!(parse_budget("  "), Ok(None));
+        assert_eq!(parse_budget("1,50"), Ok(Some(1.5)));
+        assert_eq!(parse_budget("1.50"), Ok(Some(1.5)));
+        assert_eq!(parse_budget(" 2 "), Ok(Some(2.0)));
+        for bad in ["-5", "0", "0,00", "abc", "1.000,50", "inf", "NaN", "1,5,0"] {
+            assert!(parse_budget(bad).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn a_repository_is_managed_once() {

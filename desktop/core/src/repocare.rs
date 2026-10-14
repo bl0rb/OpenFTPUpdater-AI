@@ -891,7 +891,11 @@ pub fn delete_branch(plan: &Plan, branch: &Branch, state: &RunState) -> Result<D
     }
     let path = format!("repos/{}/branches/{}", plan.repo, encode_ref(&branch.name));
     let Some(current) = get(&path)? else {
-        return Ok(Done::Skipped("war schon gelöscht".into()));
+        // A 404 for the branch means it is gone only while the repository itself is still readable.
+        if get(&format!("repos/{}", plan.repo))?.is_none() {
+            return Ok(Done::Skipped("Repository nicht lesbar; ob der Branch noch besteht, ist unklar".into()));
+        }
+        return Ok(Done::Nothing("war schon gelöscht".into()));
     };
     if current["commit"]["sha"].as_str() != Some(branch.sha.as_str()) {
         return Ok(Done::Skipped("hat seit der Vorschau neue Commits".into()));
@@ -955,7 +959,13 @@ pub fn delete_local_branch(plan: &Plan, branch: &Branch, state: &RunState) -> Re
         return Ok(Done::Skipped("ist in einem Worktree ausgecheckt".into()));
     }
     match output("git", &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{}", branch.name)], dir) {
-        Err(_) => return Ok(Done::Skipped("war schon gelöscht".into())),
+        Err(_) => {
+            // rev-parse fails for a missing branch and for a broken clone alike; for-each-ref tells them apart.
+            return Ok(match output("git", &["for-each-ref", "--format=%(refname)", &format!("refs/heads/{}", branch.name)], dir) {
+                Ok(refs) if refs.trim().is_empty() => Done::Nothing("war schon gelöscht".into()),
+                _ => Done::Skipped("lokaler Branch nicht lesbar".into()),
+            });
+        }
         Ok(sha) if sha.trim() != branch.sha => return Ok(Done::Skipped("hat seit der Vorschau neue Commits".into())),
         Ok(_) => {}
     }
@@ -1456,6 +1466,13 @@ mod tests {
         gone[4].1 = Some(json!({ "status": "diverged" }));
         mock::install(gone);
         skipped(&branch(Proof::Contained), &state, "nicht mehr vollständig");
+        let mut deleted = world("f1", false, json!([]));
+        deleted[0].1 = None;
+        mock::install(deleted.clone());
+        assert!(matches!(delete_branch(&plan, &branch(Proof::Contained), &state).unwrap(), Done::Nothing(t) if t.contains("schon gelöscht")), "the goal is reached");
+        deleted[1].1 = None;
+        mock::install(deleted);
+        skipped(&branch(Proof::Contained), &state, "unklar");
         assert!(mock::writes().is_empty());
 
         mock::install(world("f1", false, json!([])));
@@ -1548,7 +1565,7 @@ mod tests {
         assert!(matches!(delete_local_branch(&other, &merged, &state).unwrap(), Done::Skipped(t) if t.contains("gehört nicht mehr")));
         assert!(matches!(delete_local_branch(&plan, &merged, &state).unwrap(), Done::Ok(_)));
         assert!(output("git", &["rev-parse", "--verify", "--quiet", "refs/heads/merged"], &dir).is_err());
-        assert!(matches!(delete_local_branch(&plan, &merged, &state).unwrap(), Done::Skipped(t) if t.contains("schon gelöscht")), "a repeat does nothing");
+        assert!(matches!(delete_local_branch(&plan, &merged, &state).unwrap(), Done::Nothing(t) if t.contains("schon gelöscht")), "a repeat does nothing");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(dir.with_extension("wt"));
     }

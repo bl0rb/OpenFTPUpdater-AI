@@ -11,13 +11,13 @@ weitere Dokumentation oder ein GitHub-Wiki aktuell und aktualisiert und veröffe
 als letzten Schritt eine statische Website. Alles, was auf GitHub, in einem Wiki oder auf einer Website
 etwas ändert, zeigt die App vorher als konkreten Vorschlag und führt es erst nach deiner Freigabe aus.
 
-Die App hat drei Bereiche, umschaltbar in der Kopfleiste, und ihre Einstellungen unter **Einrichtung**:
+Die App hat drei Bereiche, umschaltbar in der Kopfleiste, und ihre Einstellungen unter **Einstellungen**:
 
 | Bereich | Wofür |
 |---|---|
 | **Repositories** (Startansicht) | die verwalteten Repositories mit ihrem Zustand, offene Aufträge und die Entscheidungen, auf die sie warten; Repositories auswählen und einen Pflegeauftrag starten |
-| **Läufe** | jeder Pflegeauftrag: Schritte, Pläne, Vorschläge mit Diff, Ergebnisse und Log; laufende, wartende und bisherige |
-| **Website** (nur mit Website) | die vier Schritte der Website, Precheck, Update, Upload, Verify, wie bisher |
+| **Aufträge** | jeder Pflegeauftrag: Schritte, Pläne, Vorschläge mit Diff, Ergebnisse und Log; laufende, wartende und bisherige |
+| **Website** (nur mit Website) | die vier Schritte der Website: Prüfen, Inhalte aktualisieren, Veröffentlichen, Live-Seite prüfen |
 
 ## Erste Schritte
 
@@ -65,10 +65,17 @@ Request blockiert das Repository nicht. Archivierte Repositories und solche ohne
 lesbar, aber die Pflege ist gesperrt. Zustand eines Repositorys und Fortschritt eines Auftrags stehen
 getrennt: Ein Repository kann Aufmerksamkeit brauchen, während ein Auftrag schon daran arbeitet.
 
-Die Detailansicht zeigt Default-Branch und HEAD-Commit, die CI mit ihrem Commit, Release und Tag, die
-Commits seit dieser Basis (nur wenn sie ein Vorfahr von HEAD ist, sonst „nicht bestimmbar“),
-Release-Regel, lokale Kopie, jeden offenen Pull Request mit Zielbranch, Autor, CI und Mergebarkeit, die
-zugeordneten Inhaltsziele mit ihrem zuletzt erreichten Stand und die Verwaltung.
+Über den Karten filtern eine Namenssuche und die Zustände „Aufmerksamkeit“, „Blockiert“ und
+„Unbekannt“ die Übersicht; „Alle Treffer“ wählt nur sichtbare Repositories aus, und eine Auswahl
+außerhalb des Filters bleibt erhalten und wird als ausgeblendet gezählt.
+
+Die Detailansicht betrifft nur dieses Repository: oben CI, Release und Datenstand in einer Zeile und ein
+offener Auftrag als Hinweis mit Link, danach Befunde, die Pull Requests mit Zielbranch, Autor, CI und
+Mergebarkeit, die zugeordneten Inhaltsziele mit ihrem zuletzt erreichten Stand und die
+Sicherheitsprüfung (mit kritischen oder wichtigen Befunden vor den Pull Requests). Aufklappbar folgen
+**Technische Details** (Default-Branch und HEAD-Commit, CI mit ihrem Commit, Release und Tag, Commits seit
+dieser Basis, nur wenn sie ein Vorfahr von HEAD ist, sonst „nicht bestimmbar“, Release-Regel, lokale
+Kopie) und die **Verwaltung**.
 
 ## Sicherheitsprüfung
 
@@ -248,36 +255,42 @@ Auftrag den HEAD des Default-Branches fest und lässt das Ziel nicht mangels neu
 ## Website (optional)
 
 Eine Website ist ein optionales Ziel, nicht die Wurzel der Konfiguration. Sie wird unter
-**Einrichtung → Website** eingerichtet (Projektordner mit `.openreleasepilot/site.json`, SFTP-Zugang) und
+**Einstellungen → Website und Veröffentlichung** eingerichtet (Projektordner mit `.openreleasepilot/site.json`, SFTP-Zugang) und
 bekommt einen eigenen Bereich mit den vier Schritten, einzeln oder nacheinander:
 
 | Schritt | Was passiert | Ändert etwas? |
 |---|---|---|
-| **Precheck** | Projektdatei, Werkzeuge (git, node, npm, claude, gh), sauberes Arbeitsverzeichnis und Remote-Stand, neuestes GitHub-Release jedes beobachteten Produkts gegen den dokumentierten Stand, SFTP-Anmeldung und Zielordner, Live-Seite, letzter Upload | nein |
-| **Update** | `git pull --ff-only`, dann läuft Claude Code headless im Projekt mit dem Skill des Projekts und der Liste veralteter Produkte (plus optionaler Zusatzanweisung), danach Build und Commit | Dateien im Projekt, ein Commit |
-| **Upload** | Frischer Build, `git push`, dann nur neue oder geänderte Dateien per SFTP; aus dem Build entfernte Dateien werden auf dem Server gelöscht | Server, Remote-Repository |
-| **Verify** | Lädt jede Datei des letzten Uploads von der Live-Seite und vergleicht SHA-256 mit dem Build | nein |
+| **Prüfen** | Projektdatei, Werkzeuge (git, node, npm, claude, gh), sauberes Arbeitsverzeichnis und Remote-Stand, neuestes GitHub-Release jedes beobachteten Produkts gegen den dokumentierten Stand, SFTP-Anmeldung und Zielordner, Live-Seite, letzter Upload | nein |
+| **Inhalte aktualisieren** | `git pull --ff-only`, dann läuft Claude Code headless im Projekt mit dem Skill des Projekts und der Liste veralteter Produkte (plus optionaler Zusatzanweisung), danach Build und Commit | Dateien im Projekt, ein Commit |
+| **Veröffentlichen** | Frischer Build, `git push`, dann nur neue oder geänderte Dateien per SFTP; aus dem Build entfernte Dateien werden auf dem Server gelöscht | Server, Remote-Repository |
+| **Live-Seite prüfen** | Lädt jede Datei des letzten Uploads von der Live-Seite und vergleicht SHA-256 mit dem Build | nein |
 
 ![Wann passiert was wo: Precheck, Update-Aufgaben in Claude Code mit ihren Skills, Build und Commit, Upload per SFTP, Verify gegen die Live-Seite](docs/diagrams/openreleasepilot-flow.de.png)
 
 <sub>Quelle der Grafik: [docs/diagrams/openreleasepilot-flow.de.html](docs/diagrams/openreleasepilot-flow.de.html) (auch als SVG).</sub>
 
-Schlägt eine Release-Abfrage fehl, ist der Stand unbekannt, nicht „aktuell“: Update hält an und damit
-auch **Alle Schritte** vor dem Upload, statt auf unvollständiger Grundlage zu veröffentlichen.
+**Aktualisieren und veröffentlichen** führt alle vier Schritte nacheinander aus, bis zur Live-Seite, und
+hält beim ersten Fehler an. Schlägt eine Release-Abfrage fehl, ist der Stand unbekannt, nicht „aktuell“:
+„Inhalte aktualisieren“ hält an und damit auch der gesamte Ablauf vor dem Veröffentlichen, statt auf
+unvollständiger Grundlage zu veröffentlichen.
 
 Als letzter Schritt eines Pflegeauftrags läuft dieselbe Aktualisierung für die Produkte der Repositories
 des Auftrags (die Produktauswahl der Website gilt zusätzlich), und mehrere Repositories, die eine Website
 speisen, werden gemeinsam in einem Schritt aktualisiert, nach ihren Releases. Der entstandene lokale
-Commit ist der Vorschlag, mit Diff; nach der Freigabe pusht die App, lädt hoch und prüft. Verwerfen lässt
-den Commit unveröffentlicht im Website-Projekt stehen.
+Commit ist der Vorschlag: Die Freigabeansicht nennt zuerst die betroffenen Produkte mit ihrer
+Versionsänderung, Claudes Zusammenfassung und was Freigeben oder Verwerfen bewirkt, darunter die technische
+Änderungsvorschau mit Diff (über 300 KiB gekürzt, mit dem `git show`-Befehl für die vollständige Ansicht).
+Nach der Freigabe pusht die App, lädt hoch und prüft. Verwerfen lässt den Commit unveröffentlicht im
+Website-Projekt stehen.
 
-**Neues Produkt** (Knopf im Bereich Website): eines deiner GitHub-Repositories wählen, Claude Code nimmt es
-mit dem `addProductSkill` des Projekts auf (Produktseite, Listen, Icon, Ablaufgrafik, Eintrag in
-`site.json`), danach baut und committet die App. Live geht es mit Upload.
+**Produkt zur Website hinzufügen** (Knopf im Bereich Website): eines deiner GitHub-Repositories wählen;
+„Produktseite erstellen“ lässt Claude Code es mit dem `addProductSkill` des Projekts aufnehmen
+(Produktseite, Listen, Icon, Ablaufgrafik, Eintrag in `site.json`), danach baut und committet die App.
+Live geht es mit „Veröffentlichen“.
 
-Der Bereich Website listet die Produkte aus `site.json` mit je einer Checkbox. Precheck und Update
-kümmern sich nur um ausgewählte Produkte: Abgewählte fragt der Precheck nicht ab, und Claude bekommt sie
-beim Update als „nicht ausgewählt, daran nichts ändern“ genannt. Die Auswahl merkt sich die App in ihren
+Der Bereich Website listet die Produkte aus `site.json` mit je einer Checkbox. „Prüfen“ und „Inhalte
+aktualisieren“ kümmern sich nur um ausgewählte Produkte: Abgewählte fragt „Prüfen“ nicht ab, und Claude
+bekommt sie als „nicht ausgewählt, daran nichts ändern“ genannt. Die Auswahl merkt sich die App in ihren
 Einstellungen, nicht im Website-Repository; welche Repositories die App verwaltet, ändert sie nicht.
 
 ## Geändert gegenüber früheren Versionen
@@ -288,14 +301,21 @@ Einstellungen, nicht im Website-Repository; welche Repositories die App verwalte
 - PR-Pflege, Aufräumen und Release sind getrennt wählbar; Mergen bedeutet keinen Patch-Tag mehr, und ein
   Tag braucht eine in der App eingerichtete Release-Regel (das `tagPrefix` aus `site.json` allein genügt
   nicht).
-- Die Pflege läuft als gespeicherter Auftrag in **Läufe**: Der Plan wird dort freigegeben und übersteht
+- Die Pflege läuft als gespeicherter Auftrag in **Aufträge** (bis 0.3.4 „Läufe“): Der Plan wird dort freigegeben und übersteht
   einen Neustart.
 - Lokale Branches löscht die App nur mit Bestätigung durch GitHub und nicht nach einem fehlgeschlagenen
   Abgleich der Kopie.
-- Eine fehlgeschlagene Release-Abfrage hält das Update der Website (und **Alle Schritte**) an, statt als
+- Eine fehlgeschlagene Release-Abfrage hält die Aktualisierung der Website (und **Aktualisieren und veröffentlichen**) an, statt als
   „nichts Neues“ zu gelten.
 - Seit 0.3.0: Ein Tag braucht eine CI, die für genau den getaggten Commit erfolgreich war; Repositories
   ohne CI bekommen keinen automatischen Tag.
+- Nach 0.3.4: „Einrichtung“ heißt **Einstellungen**, „Läufe“ heißt **Aufträge**, die Website-Schritte
+  heißen Prüfen, Inhalte aktualisieren, Veröffentlichen und Live-Seite prüfen. „Verbindung testen“
+  speichert nichts mehr; erst „Sichern“ übernimmt die Einstellungen, auch einen dabei bestätigten
+  Server-Schlüssel. Eine ungültige Kostengrenze (0, negativ, kein Betrag) wird abgelehnt, statt die
+  Grenze still zu entfernen; nur ein leeres Feld entfernt sie. Ein Branch, der beim Löschen schon fehlt,
+  gilt als erledigt und macht einen Auftrag nicht mehr „teilweise erfolgreich“. Ein abgeschlossener
+  Auftrag wird über „Auftragsverlauf löschen …“ mit Rückfrage entfernt.
 
 ## Repositories wählen
 
@@ -309,9 +329,9 @@ GitHubs Name und ID kommen dazu, wenn GitHub sich fragen lässt (ein privates Re
 `gh`-Anmeldung wird allein aus dem Origin aufgenommen). Für ein Repository ohne lokalen Klon
 `owner/name` eingeben; es muss auf GitHub existieren.
 
-- **Repo-Ordner** (Einrichtung): hier sucht die Auswahl nach Klonen, und hier legt die App neue an;
+- **Repo-Ordner** (Einstellungen): hier sucht die Auswahl nach Klonen, und hier legt die App neue an;
   standardmäßig der Elternordner des Website-Projekts oder `~/Documents/Code`.
-- **Website-Repo** (Einrichtung, optional): aus der Liste wählen; der Projektordner ergibt sich aus dem
+- **Website-Repo** (Einstellungen, optional): aus der Liste wählen; der Projektordner ergibt sich aus dem
   lokalen Klon. Gibt es keinen, klont die App das Repo in den Repo-Ordner.
 
 ## Installation
@@ -332,8 +352,8 @@ Datenschutz & Sicherheit → Dennoch öffnen** erlauben oder im Terminal install
 sudo installer -pkg OpenReleasePilot-0.3.4.pkg -target /
 ```
 
-Dasselbe Paket lässt sich über Microsoft Intune als „macOS-App (PKG)“ verteilen; dann in der
-Einrichtung „Beim Start nach neuen Versionen suchen“ abschalten.
+Dasselbe Paket lässt sich über Microsoft Intune als „macOS-App (PKG)“ verteilen; dann in den
+Einstellungen „Beim Start nach neuen Versionen suchen“ abschalten.
 
 Bis Version 0.1.3 hieß die App OpenFTPUpdater-AI. OpenReleasePilot ersetzt `OpenFTPUpdater-AI.app`
 nicht; die alte App nach dem Umstieg löschen (Einstellungen und Passwort werden übernommen, siehe unten).
@@ -435,8 +455,9 @@ Grafiken. Bei Anmeldung mit einem Claude-Abo sind die angezeigten Kosten ein rec
 die Läufe zählen stattdessen gegen die Nutzungsgrenzen des Abos.
 
 Pflegeaufträge nutzen das im Auftrag gewählte Modell (ein Inhaltsziel kann ein eigenes setzen), sonst
-die Vorgabe unter **Einrichtung → Ausführungsregeln**, sonst `claude.model` der Website, sonst den
-Standard von Claude Code; die Kostengrenze je Lauf ebenso.
+die Vorgabe unter **Einstellungen → Allgemein → Ausführungsregeln**, sonst `claude.model` der Website,
+sonst den Standard von Claude Code; die Kostengrenze je Lauf ebenso. Die Kostengrenze ist ein Betrag in
+USD größer als 0 (Komma oder Punkt); ein leeres Feld heißt: keine eigene Grenze der App.
 
 ## Was Claude darf
 
@@ -473,6 +494,8 @@ betroffen.
   einer Datei oder im Repository. SSH-Schlüssel werden ebenfalls unterstützt.
 - Der Server-Schlüssel wird einmal bestätigt (`SHA256:…`, vergleichen mit
   `ssh-keyscan -p 22 host | ssh-keygen -lf -`); ändert er sich später, bricht jede Verbindung ab.
+  „Verbindung testen“ in den Einstellungen prüft die Eingaben des Dialogs, ohne sie zu speichern; einen
+  dort bestätigten Schlüssel übernimmt erst „Sichern“.
 - Die App merkt sich je Ziel ein Manifest des letzten Uploads (Pfad, Größe, SHA-256) in ihrem
   Datenordner. Hochgeladen werden nur neue oder geänderte Dateien, Assets vor Seiten, jeweils unter
   einem temporären Namen und dann umbenannt, damit Besucher nie halbe Dateien bekommen. Gelöscht

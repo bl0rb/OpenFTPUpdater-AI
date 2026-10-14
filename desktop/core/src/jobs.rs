@@ -232,6 +232,9 @@ pub enum ItemOutcome {
     Cancelled,
     /// Left out by the user before approving.
     Excluded,
+    /// Not carried out because GitHub or the clone already is what it would make it (a branch that
+    /// was deleted already). The goal is reached; nothing is left to do.
+    AlreadyDone,
 }
 
 /// One action of the care plan and what became of it.
@@ -571,6 +574,48 @@ impl Job {
 
 // MARK: The care plan's items
 
+/// The care step's state and summary from what became of its items: what was done, what already
+/// was as planned (that needs no repeat), what was skipped or failed (that does).
+pub fn care_result(items: &[CareItem]) -> (StepState, String) {
+    let counted: Vec<&CareItem> = items.iter().filter(|i| i.kind != ItemKind::Tag && i.outcome != Some(ItemOutcome::Excluded)).collect();
+    let count = |o: ItemOutcome| counted.iter().filter(|i| i.outcome == Some(o)).count();
+    let (done, already, skipped, failed) =
+        (count(ItemOutcome::Done), count(ItemOutcome::AlreadyDone), count(ItemOutcome::Skipped), count(ItemOutcome::Failed));
+    let of = |kind: ItemKind, outcome: ItemOutcome| counted.iter().filter(|i| i.kind == kind && i.outcome == Some(outcome)).count();
+    let mut parts = Vec::new();
+    for (kind, one, many) in [
+        (ItemKind::Merge, "PR gemergt", "PRs gemergt"),
+        (ItemKind::Close, "PR geschlossen", "PRs geschlossen"),
+        (ItemKind::Rebase, "Rebase angestoßen", "Rebases angestoßen"),
+        (ItemKind::Branch, "Branch gelöscht", "Branches gelöscht"),
+        (ItemKind::LocalBranch, "lokaler Branch gelöscht", "lokale Branches gelöscht"),
+    ] {
+        let n = of(kind, ItemOutcome::Done);
+        if n > 0 {
+            parts.push(format!("{n} {}", if n == 1 { one } else { many }));
+        }
+    }
+    let gone = of(ItemKind::Branch, ItemOutcome::AlreadyDone) + of(ItemKind::LocalBranch, ItemOutcome::AlreadyDone);
+    for (n, what) in [(gone, "bereits gelöscht"), (already - gone, "bereits erledigt"), (skipped, "übersprungen"), (failed, "fehlgeschlagen")] {
+        if n > 0 {
+            parts.push(format!("{n} {what}"));
+        }
+    }
+    let summary = if parts.is_empty() { "nichts ausgeführt".to_owned() } else { parts.join(" · ") };
+    let state = if counted.is_empty() {
+        StepState::NothingToDo
+    } else if failed > 0 && done + already == 0 {
+        StepState::Failed
+    } else if failed + skipped > 0 {
+        StepState::Partial
+    } else if done == 0 {
+        StepState::NothingToDo
+    } else {
+        StepState::Done
+    };
+    (state, summary)
+}
+
 /// The actions of a reviewed plan, in the order the run carries them out: per repository the pull
 /// requests (close, merge, rebase), then the branches on GitHub, the clone's update and its branches.
 pub fn care_items(set: &PlanSet) -> Vec<CareItem> {
@@ -754,7 +799,7 @@ pub fn reject_step(job: &mut Job, step_id: &str, now: u64) -> Result<(), String>
 /// makes a new plan, as long as nothing of the old one was carried out.
 pub fn redo_step(job: &mut Job, step_id: &str, now: u64) -> Result<(), String> {
     if step_id == "care" {
-        if job.items.iter().any(|i| matches!(i.outcome, Some(ItemOutcome::Done | ItemOutcome::Skipped | ItemOutcome::Failed)) || i.writing) {
+        if job.items.iter().any(|i| matches!(i.outcome, Some(ItemOutcome::Done | ItemOutcome::AlreadyDone | ItemOutcome::Skipped | ItemOutcome::Failed)) || i.writing) {
             return Err("Vom Plan wurde schon etwas ausgeführt; für das Übrige einen neuen Auftrag starten".into());
         }
         let step = job.step_mut("care").ok_or("Auftrag ohne Pflegeschritt")?;
@@ -977,6 +1022,44 @@ mod tests {
             });
         }
         config
+    }
+
+    fn outcome(kind: ItemKind, outcome: ItemOutcome) -> CareItem {
+        CareItem {
+            id: format!("{kind:?}-{outcome:?}"),
+            repo: "o/app".into(),
+            kind,
+            reference: String::new(),
+            label: String::new(),
+            context: String::new(),
+            outcome: Some(outcome),
+            detail: String::new(),
+            writing: false,
+            commented: false,
+            optional: false,
+        }
+    }
+
+    #[test]
+    fn branches_deleted_already_need_no_repeat() {
+        use ItemKind::{Branch as B, Merge as M};
+        use ItemOutcome::{AlreadyDone, Done, Excluded, Failed, Skipped};
+        let items = [outcome(M, Done), outcome(M, Done), outcome(M, Done), outcome(B, Done), outcome(B, AlreadyDone), outcome(B, AlreadyDone)];
+        assert_eq!(care_result(&items), (StepState::Done, "3 PRs gemergt · 1 Branch gelöscht · 2 bereits gelöscht".to_owned()));
+        assert_eq!(care_result(&[outcome(B, AlreadyDone), outcome(M, Excluded)]).0, StepState::NothingToDo, "nothing left, nothing done");
+        let (state, summary) = care_result(&[outcome(M, Done), outcome(B, AlreadyDone), outcome(B, Skipped)]);
+        assert_eq!(state, StepState::Partial, "a safety stop still counts as open: {summary}");
+        assert_eq!(care_result(&[outcome(B, AlreadyDone), outcome(M, Failed)]).0, StepState::Partial);
+        assert_eq!(care_result(&[outcome(M, Failed)]).0, StepState::Failed);
+    }
+
+    #[test]
+    fn older_jobs_without_the_new_outcome_stay_readable() {
+        let item: CareItem = serde_json::from_value(serde_json::json!({
+            "id": "a", "repo": "o/app", "kind": "branch", "reference": "x", "label": "x", "context": "",
+            "outcome": "skipped", "detail": "war schon gelöscht", "writing": false, "commented": false, "optional": false,
+        })).unwrap();
+        assert_eq!(item.outcome, Some(ItemOutcome::Skipped));
     }
 
     fn all() -> JobOptions {

@@ -521,17 +521,21 @@ struct SettingsInput {
     /// Claude model for care jobs without a choice; empty = the website's, else Claude Code's default.
     #[serde(default)]
     claude_model: String,
-    /// Cost limit per Claude run of a care job; empty = none (or the website's).
+    /// Cost limit per Claude run of a care job, as typed; empty = none (or the website's).
     #[serde(default)]
-    max_budget_usd: Option<f64>,
+    max_budget_usd: String,
+    /// A server key the user confirmed in the dialog for a server not saved yet; saved with the rest.
+    #[serde(default)]
+    host_key: String,
 }
 
 fn yes() -> bool {
     true
 }
 
-fn apply_settings(app: &AppHandle, input: SettingsInput) -> Result<(), String> {
-    let mut next = with_model(app, |m| m.config.clone());
+/// The settings `input` makes of `current`, without saving anything or touching the keychain.
+fn settings_config(current: &Config, input: &SettingsInput) -> Result<Config, String> {
+    let mut next = current.clone();
     let previous_account = next.sftp.secret_account();
     let target_changed = next.sftp.host.trim() != input.host.trim() || next.sftp.port != input.port;
     next.project_dir = input.project_dir.trim().to_owned();
@@ -540,19 +544,27 @@ fn apply_settings(app: &AppHandle, input: SettingsInput) -> Result<(), String> {
     next.sftp.port = if input.port == 0 { 22 } else { input.port };
     next.sftp.user = input.user.trim().to_owned();
     next.sftp.remote_dir = input.remote_dir.trim().to_owned();
-    next.sftp.auth = input.auth;
+    next.sftp.auth = input.auth.clone();
     next.sftp.key_path = input.key_path.trim().to_owned();
     next.no_update_check = !input.update_check;
     next.claude_model = input.claude_model.trim().to_owned();
-    next.max_budget_usd = input.max_budget_usd.filter(|b| *b > 0.0);
+    next.max_budget_usd = config::parse_budget(&input.max_budget_usd)?;
     if target_changed {
         // Another server needs its own confirmed host key.
         next.sftp.host_key.clear();
+    }
+    if !input.host_key.trim().is_empty() {
+        next.sftp.host_key = input.host_key.trim().to_owned();
     }
     if next.sftp.secret_account() != previous_account && next.sftp.secret_saved && input.secret.is_empty() {
         // The keychain entry belongs to the old user/host; ask for the password again.
         next.sftp.secret_saved = false;
     }
+    Ok(next)
+}
+
+fn apply_settings(app: &AppHandle, input: SettingsInput) -> Result<(), String> {
+    let mut next = settings_config(&with_model(app, |m| m.config.clone()), &input)?;
     if !input.secret.is_empty() {
         secrets::set(&next.sftp, &input.secret).map_err(|e| format!("{e:#}"))?;
         next.sftp.secret_saved = true;
@@ -573,23 +585,35 @@ async fn save_settings(app: AppHandle, input: SettingsInput) -> Result<(), Strin
     blocking(move || apply_settings(&app, input)).await
 }
 
-/// Saves, then connects once and lists the target folder.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+enum ConnectionTest {
+    Connected { message: String },
+    /// The server is not trusted yet: the dialog shows its key; trusted, it goes along with the next test and save.
+    UnknownHostKey { fingerprint: String },
+}
+
+/// Connects once with the dialog's entries and lists the target folder. Saves nothing:
+/// only "Sichern" does.
 #[tauri::command]
-async fn test_connection(app: AppHandle, input: SettingsInput) -> Result<String, String> {
+async fn test_connection(app: AppHandle, input: SettingsInput) -> Result<ConnectionTest, String> {
     blocking(move || {
-        apply_settings(&app, input)?;
-        let sftp_config = with_model(&app, |m| m.config.sftp.clone());
-        let secret = secrets::get(&sftp_config);
+        let sftp_config = settings_config(&with_model(&app, |m| m.config.clone()), &input)?.sftp;
+        let secret = if !input.secret.is_empty() {
+            Some(input.secret.clone())
+        } else if sftp_config.secret_saved {
+            secrets::get(&sftp_config)
+        } else {
+            None
+        };
         match sftp::connect(&sftp_config, secret.as_deref()) {
             Ok(connection) => {
                 let names = connection.list_root().map_err(|e| format!("{e:#}"))?;
-                Ok(format!("Verbunden. Zielordner enthält {} Einträge{}", names.len(), steps::preview(&names)))
+                Ok(ConnectionTest::Connected {
+                    message: format!("Verbunden. Zielordner enthält {} Einträge{}", names.len(), steps::preview(&names)),
+                })
             }
-            Err(ConnectError::UnknownHostKey(fingerprint)) => {
-                with_model(&app, |m| m.pending_host_key = Some(fingerprint));
-                changed(&app);
-                Err("Bitte zuerst den Server-Schlüssel bestätigen, dann erneut testen.".into())
-            }
+            Err(ConnectError::UnknownHostKey(fingerprint)) => Ok(ConnectionTest::UnknownHostKey { fingerprint }),
             Err(e) => Err(e.to_string()),
         }
     })
@@ -1566,4 +1590,62 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running OpenReleasePilot");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input(changes: serde_json::Value) -> SettingsInput {
+        let mut base = serde_json::json!({
+            "projectDir": "~/site", "workspaceDir": "", "host": "h", "port": 22, "user": "u", "remoteDir": "/w",
+            "auth": "password", "keyPath": "", "secret": "", "updateCheck": true, "claudeModel": "", "maxBudgetUsd": "2",
+        });
+        base.as_object_mut().unwrap().extend(changes.as_object().unwrap().clone());
+        serde_json::from_value(base).unwrap()
+    }
+
+    fn saved() -> Config {
+        Config {
+            project_dir: "~/site".into(),
+            max_budget_usd: Some(2.0),
+            sftp: config::SftpConfig {
+                host: "h".into(),
+                user: "u".into(),
+                remote_dir: "/w".into(),
+                host_key: "SHA256:old".into(),
+                secret_saved: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn settings_are_built_without_changing_the_saved_ones() {
+        let current = saved();
+        let next = settings_config(&current, &input(serde_json::json!({ "projectDir": "~/other", "maxBudgetUsd": "1,50" }))).unwrap();
+        assert_eq!(next.project_dir, "~/other");
+        assert_eq!(next.max_budget_usd, Some(1.5));
+        assert_eq!(current.project_dir, "~/site", "the saved settings stay as they are");
+        assert_eq!(next.sftp.host_key, "SHA256:old", "same server, same key");
+    }
+
+    #[test]
+    fn an_invalid_budget_is_refused_instead_of_removing_the_limit() {
+        for bad in ["-5", "0", "viel"] {
+            assert!(settings_config(&saved(), &input(serde_json::json!({ "maxBudgetUsd": bad }))).is_err(), "{bad}");
+        }
+        let next = settings_config(&saved(), &input(serde_json::json!({ "maxBudgetUsd": "" }))).unwrap();
+        assert_eq!(next.max_budget_usd, None, "only an empty field removes it");
+    }
+
+    #[test]
+    fn another_server_needs_its_own_key() {
+        let next = settings_config(&saved(), &input(serde_json::json!({ "host": "other" }))).unwrap();
+        assert!(next.sftp.host_key.is_empty());
+        assert!(!next.sftp.secret_saved, "the stored password belongs to the old server");
+        let trusted = settings_config(&saved(), &input(serde_json::json!({ "host": "other", "hostKey": "SHA256:new" }))).unwrap();
+        assert_eq!(trusted.sftp.host_key, "SHA256:new", "a key confirmed in the dialog is kept");
+    }
 }

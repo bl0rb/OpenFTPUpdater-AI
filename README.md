@@ -11,13 +11,13 @@ or a GitHub wiki up to date, and, if you have one, updates and publishes a stati
 step. Everything that changes something on GitHub, in a wiki or on a website is first shown as a
 concrete proposal and only carried out after your approval.
 
-The app has three areas, switched in the toolbar, and its settings under **Einrichtung**:
+The app has three areas, switched in the toolbar, and its settings under **Einstellungen** (settings):
 
 | Area | What it is for |
 |---|---|
 | **Repositories** (start view) | the managed repositories with their health, open jobs and the decisions they wait for; select repositories and start a care job |
-| **Läufe** | every care job: its steps, plans, proposals with their diffs, results and log; running, waiting and earlier ones |
-| **Website** (only with a website) | the website's own four steps, Precheck, Update, Upload, Verify, as before |
+| **Aufträge** (jobs) | every care job: its steps, plans, proposals with their diffs, results and log; running, waiting and earlier ones |
+| **Website** (only with a website) | the website's own four steps: Prüfen (check), Inhalte aktualisieren (update content), Veröffentlichen (publish), Live-Seite prüfen (verify the live site) |
 
 ## Getting started
 
@@ -64,10 +64,17 @@ repository. Archived repositories and those without write access stay readable, 
 The health of a repository and the progress of a job are shown separately: a repository can need
 attention while a job is already working on it.
 
-The detail view shows default branch and head commit, CI with its commit, release and tag, commits since
-that base (only where it is an ancestor of the head, otherwise "nicht bestimmbar"), release rule, local
-clone, every open pull request with target branch, author, CI and mergeability, the content targets the
-repository feeds with what each was last brought to, and the management settings.
+Above the cards, a name search and the states "Aufmerksamkeit", "Blockiert" and "Unbekannt" filter the
+overview; "Alle Treffer" selects visible repositories only, and a selection outside the filter is kept
+and counted as hidden.
+
+The detail view concerns this repository only: at the top CI, release and data state in one line and an
+open job as a note with a link, then findings, the open pull requests with target branch, author, CI and
+mergeability, the content targets the repository feeds with what each was last brought to, and the
+security check (ahead of the pull requests when it has critical or important findings). Folded below
+are **Technische Details** (default branch and head commit, CI with its commit, release and tag, commits
+since that base, only where it is an ancestor of the head, otherwise "nicht bestimmbar", release rule,
+local clone) and the **Verwaltung** (management) settings.
 
 ## Security check
 
@@ -236,37 +243,42 @@ the default branch and does not skip the target for lack of a new version.
 
 ## Website (optional)
 
-A website is an optional target, not the configuration root. It is set up under **Einrichtung →
-Website** (project folder with `.openreleasepilot/site.json`, SFTP access) and gets its own area with
+A website is an optional target, not the configuration root. It is set up under **Einstellungen →
+Website und Veröffentlichung** (project folder with `.openreleasepilot/site.json`, SFTP access) and gets its own area with
 the four steps, run one by one or all in a row:
 
 | Step | What happens | Changes anything? |
 |---|---|---|
-| **Precheck** | Project file, tools (git, node, npm, claude, gh), clean working tree and remote state, latest GitHub release of every watched product against the documented one, SFTP login and target folder, live site, last upload | no |
-| **Update** | `git pull --ff-only`, then Claude Code runs headless in the project with the project's skill and the list of outdated products (plus optional extra instructions), then build and commit | files in the project, one commit |
-| **Upload** | Fresh build, `git push`, then only new or changed files via SFTP; files removed from the build are deleted on the server | server, remote repository |
-| **Verify** | Downloads every file of the last upload from the live site and compares SHA-256 with the build | no |
+| **Prüfen** (check) | Project file, tools (git, node, npm, claude, gh), clean working tree and remote state, latest GitHub release of every watched product against the documented one, SFTP login and target folder, live site, last upload | no |
+| **Inhalte aktualisieren** (update content) | `git pull --ff-only`, then Claude Code runs headless in the project with the project's skill and the list of outdated products (plus optional extra instructions), then build and commit | files in the project, one commit |
+| **Veröffentlichen** (publish) | Fresh build, `git push`, then only new or changed files via SFTP; files removed from the build are deleted on the server | server, remote repository |
+| **Live-Seite prüfen** (verify) | Downloads every file of the last upload from the live site and compares SHA-256 with the build | no |
 
 ![What happens when and where: Precheck, update tasks run by Claude Code with their skills, build and commit, upload via SFTP, verify against the live site](docs/diagrams/openreleasepilot-flow.png)
 
 <sub>Diagram source: [docs/diagrams/openreleasepilot-flow.html](docs/diagrams/openreleasepilot-flow.html) (also as SVG).</sub>
 
-If a release lookup fails, the state is unknown, not "current": Update stops, and with it **Alle
-Schritte** before Upload, instead of publishing on an incomplete basis.
+**Aktualisieren und veröffentlichen** (update and publish) runs all four steps in a row, up to the live
+site, and stops at the first error. If a release lookup fails, the state is unknown, not "current": the
+content update stops, and with it the whole run before publishing, instead of publishing on an incomplete
+basis.
 
 As the last step of a care job, the same update runs for the products of the job's repositories (the
 website's product selection applies, too), and several repositories feeding one website are updated
-together in one step, after their releases. The resulting local commit is the proposal, with its diff;
-after approval the app pushes, uploads and verifies. Rejecting leaves the commit unpublished in the
-website project.
+together in one step, after their releases. The resulting local commit is the proposal: the approval
+view first names the affected products with their version change, Claude's summary and what approving or
+rejecting does, then the technical preview with the diff (cut above 300 KiB, with the `git show` command
+for the full view). After approval the app pushes, uploads and verifies. Rejecting leaves the commit
+unpublished in the website project.
 
-**New product** (button in the Website area): pick one of your GitHub repositories, and Claude Code adds
-it to the site with the project's `addProductSkill` (product page, listings, icon, diagram, `site.json`
-entry), then the app builds and commits. It goes live with Upload.
+**Produkt zur Website hinzufügen** (add product to the website, button in the Website area): pick one of
+your GitHub repositories; "Produktseite erstellen" has Claude Code add it to the site with the project's
+`addProductSkill` (product page, listings, icon, diagram, `site.json` entry), then the app builds and
+commits. It goes live with "Veröffentlichen".
 
-The Website area lists the products from `site.json` with a checkbox each. Precheck and Update only
-handle selected products: Precheck does not look up the others, and Update names them to Claude as "not
-selected, leave unchanged". The selection is stored in the app's settings, not in the website
+The Website area lists the products from `site.json` with a checkbox each. The check and the content
+update only handle selected products: the check does not look up the others, and the update names them to
+Claude as "not selected, leave unchanged". The selection is stored in the app's settings, not in the website
 repository; it does not change which repositories the app manages.
 
 ## Changed from earlier versions
@@ -275,12 +287,19 @@ repository; it does not change which repositories the app manages.
   `site.json` no longer appear by themselves. The start view is **Repositories**.
 - Pull request care, cleanup and release are chosen separately; merging no longer implies a patch tag,
   and a tag needs a release rule set up in the app (the `tagPrefix` of `site.json` alone is not enough).
-- Care runs as stored jobs in **Läufe**: the plan is approved there and survives a restart.
+- Care runs as stored jobs in **Aufträge** ("Läufe" up to 0.3.4): the plan is approved there and survives a restart.
 - Local branches are only deleted with GitHub's confirmation, and not after a failed update of the clone.
-- A failed release lookup stops the website's Update (and **Alle Schritte**) instead of counting as
-  "nothing new".
+- A failed release lookup stops the website's content update (and **Aktualisieren und veröffentlichen**)
+  instead of counting as "nothing new".
 - From 0.3.0: a tag needs CI that positively passed for exactly the tagged commit; repositories without CI
   get no automatic tag.
+- After 0.3.4: "Einrichtung" is now **Einstellungen**, "Läufe" is **Aufträge**, and the website steps are
+  Prüfen, Inhalte aktualisieren, Veröffentlichen and Live-Seite prüfen. "Verbindung testen" (test
+  connection) no longer saves anything; only "Sichern" (save) applies the settings, including a server
+  key confirmed while testing. An invalid cost limit (0, negative, not an amount) is refused instead of
+  silently removing the limit; only an empty field removes it. A branch that is already gone when it is
+  to be deleted counts as done and no longer makes a job "partially successful". A finished job is removed
+  with "Auftragsverlauf löschen …" (delete job history) after a confirmation.
 
 ## Choosing repositories
 
@@ -419,8 +438,9 @@ diagrams. With a Claude subscription login, the cost shown per run is a notional
 count against the subscription's usage limits instead.
 
 Care jobs use the model chosen for the job (a content target can set its own), else the default under
-**Einrichtung → Ausführungsregeln**, else the website's `claude.model`, else Claude Code's default; the
-cost limit per run likewise.
+**Einstellungen → Allgemein → Ausführungsregeln**, else the website's `claude.model`, else Claude Code's
+default; the cost limit per run likewise. The cost limit is an amount in USD above 0 (comma or point); an
+empty field means no limit of the app's own.
 
 ## What Claude may do
 
@@ -455,7 +475,8 @@ cannot widen its own rights; adding products is not affected.
 - The password (or key passphrase) is stored in the system keychain, never in a file or repository.
   SSH keys are supported as well.
 - The server's host key is confirmed once (`SHA256:…`, compare with `ssh-keyscan -p 22 host | ssh-keygen -lf -`);
-  if it changes later, every connection stops.
+  if it changes later, every connection stops. "Verbindung testen" in the settings tests the dialog's
+  entries without saving them; a key confirmed there is only stored with "Sichern".
 - The app keeps a manifest of the last upload (path, size, SHA-256) per target in its data folder.
   It uploads only new or changed files, assets before pages, each to a temporary name and then
   renamed, so visitors never get half-written files. It deletes only files that it uploaded itself

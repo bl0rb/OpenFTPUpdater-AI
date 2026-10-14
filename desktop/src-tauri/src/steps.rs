@@ -483,13 +483,13 @@ fn precheck(ctx: &Ctx) -> Result<(Status, String)> {
             &mut checks,
             "Arbeitsverzeichnis",
             Status::Warning,
-            format!("{} offene Änderungen{}; vor Update und Upload committen oder mit git stash -u beiseitelegen", changes.len(), preview(&names)),
+            format!("{} offene Änderungen{}; vor dem Aktualisieren und Veröffentlichen committen oder mit git stash -u beiseitelegen", changes.len(), preview(&names)),
         );
     }
     if git::has_upstream(&project) {
         match git::fetch(&project).and_then(|_| git::ahead_behind(&project)) {
             Ok((0, 0)) => push(&mut checks, "Remote", Status::Ok, "auf dem Stand von origin".into()),
-            Ok((ahead, 0)) => push(&mut checks, "Remote", Status::Ok, format!("{ahead} Commit(s) noch nicht gepusht – Upload pusht sie")),
+            Ok((ahead, 0)) => push(&mut checks, "Remote", Status::Ok, format!("{ahead} Commit(s) noch nicht gepusht – Veröffentlichen pusht sie")),
             Ok((_, behind)) => push(&mut checks, "Remote", Status::Warning, format!("{behind} Commit(s) hinter origin – Update holt sie per pull")),
             Err(e) => push(&mut checks, "Remote", Status::Warning, format!("{e:#}")),
         }
@@ -591,7 +591,7 @@ pub(crate) fn dirty_tree(ctx: &Ctx, project: &std::path::Path, changes: &[String
     ctx.cmd(format!("  ansehen:        git -C \"{dir}\" diff"));
     ctx.cmd(format!("  übernehmen:     git -C \"{dir}\" add -A && git -C \"{dir}\" commit -m \"…\""));
     ctx.cmd(format!("  beiseitelegen:  git -C \"{dir}\" stash -u   (zurückholen mit git -C \"{dir}\" stash pop)"));
-    ctx.info(format!("  Danach {step} erneut starten."));
+    ctx.info(format!("  Danach „{step}“ erneut starten."));
     let names: Vec<String> = entries.iter().map(|(_, path)| path.to_string()).collect();
     let advice = if untracked_only { "committen, wenn sie dazugehören, sonst löschen" } else { "ansehen, dann committen oder mit git stash -u beiseitelegen" };
     anyhow!("{} nicht committete Änderung(en) im Projekt{}. {why} Empfehlung: {advice}; die Befehle stehen im Log.", entries.len(), preview(&names))
@@ -612,7 +612,7 @@ fn change_kind(code: &str) -> &'static str {
 fn prepare_tree(ctx: &Ctx, project: &std::path::Path) -> Result<()> {
     let changes = git::changes(project)?;
     if !changes.is_empty() {
-        return Err(dirty_tree(ctx, project, &changes, "Update", "Update startet nur auf einem sauberen Stand."));
+        return Err(dirty_tree(ctx, project, &changes, "Inhalte aktualisieren", "Aktualisiert wird nur auf einem sauberen Stand."));
     }
     if git::has_upstream(project) {
         ctx.cmd("$ git pull --ff-only");
@@ -806,7 +806,7 @@ fn add_product(ctx: &Ctx, input: &NewProductInput) -> Result<(Status, String)> {
     let latest_tag = github::latest_release(&info.full_name)?;
     match &latest_tag {
         Some(tag) => ctx.ok(format!("Neuestes Release: {tag}")),
-        None => ctx.warn("Noch kein veröffentlichtes Release: kein Versions-Badge, der Precheck beobachtet das Produkt erst nach dem ersten Release."),
+        None => ctx.warn("Noch kein veröffentlichtes Release: kein Versions-Badge, „Prüfen“ beobachtet das Produkt erst nach dem ersten Release."),
     }
     let local_path = match input.local_path.trim() {
         "" => None,
@@ -839,7 +839,7 @@ fn add_product(ctx: &Ctx, input: &NewProductInput) -> Result<(Status, String)> {
     if latest_tag.is_some() {
         let listed = ctx.site().map(|s| s.products.iter().any(|p| p.repo.eq_ignore_ascii_case(&info.full_name))).unwrap_or(false);
         if !listed {
-            ctx.warn("site.json enthält das Produkt nicht: Precheck und Update beobachten seine Releases nicht.");
+            ctx.warn("site.json enthält das Produkt nicht: „Prüfen“ und „Inhalte aktualisieren“ beobachten seine Releases nicht.");
         }
     }
     match build_and_commit(ctx, &site, &project, &format!("Neues Produkt: {name}"), &outcome.text)? {
@@ -859,7 +859,7 @@ pub(crate) fn upload(ctx: &Ctx) -> Result<(Status, String)> {
     }
     let changes = git::changes(&project)?;
     if !changes.is_empty() {
-        return Err(dirty_tree(ctx, &project, &changes, "Upload", "Hochgeladen wird nur ein committeter Stand."));
+        return Err(dirty_tree(ctx, &project, &changes, "Veröffentlichen", "Hochgeladen wird nur ein committeter Stand."));
     }
     let upstream = git::has_upstream(&project);
     let mut ahead = 0;

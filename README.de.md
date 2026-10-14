@@ -349,7 +349,7 @@ Es ist nicht signiert, macOS blockiert es deshalb beim ersten Öffnen; einmal un
 Datenschutz & Sicherheit → Dennoch öffnen** erlauben oder im Terminal installieren:
 
 ```bash
-sudo installer -pkg OpenReleasePilot-0.3.5.pkg -target /
+sudo installer -pkg OpenReleasePilot-0.3.6.pkg -target /
 ```
 
 Dasselbe Paket lässt sich über Microsoft Intune als „macOS-App (PKG)“ verteilen; dann in den

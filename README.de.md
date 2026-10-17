@@ -259,9 +259,11 @@ GitHub-Repositories. Die Startansicht zeigt je Dienst eine Karte: GitHub und jed
 Anmeldestatus, einem Quadrat je Repository und den Zahlen, die Aufmerksamkeit brauchen. Ein Klick
 schiebt die Karten zu einer Leiste zusammen und öffnet darunter die Übersicht dieses Dienstes.
 
-- **Anmeldung:** über die GitLab-CLI, `glab auth login --hostname <instanz>`. Die App fragt `glab` nach
-  dem Token der Instanz, speichert selbst keinen und gibt ihn nie an Claude Code. „Status aktualisieren“
-  fragt erneut, eine Anmeldung danach zählt also sofort.
+- **Anmeldung:** über die GitLab-CLI, `glab auth login --hostname <instanz>`, oder mit einem eigenen
+  Zugriffstoken (Scope `api`) unter **Einstellungen → Zugänge → Instanz mit Token hinzufügen**; dort auch
+  http für eine eigene Instanz ohne TLS. Ein eigenes Token liegt nach Wahl im Schlüsselbund oder in einer
+  nur für dich lesbaren Datei im Datenordner der App und geht vor dem von `glab`. Claude Code bekommt es nie.
+  „Status aktualisieren“ fragt erneut, eine Anmeldung danach zählt also sofort.
 - **Identität:** ein GitLab-Projekt heißt in der App `host/gruppe/…/projekt`, z. B.
   `gitlab.example.com/werk/tools/app`. Lokale Klone mit diesem Origin (HTTPS oder SSH) erscheinen unter
   „Repositories auswählen“; ohne Klon dort den Namen oder die Adresse des Projekts eingeben.
@@ -342,6 +344,9 @@ Einstellungen, nicht im Website-Repository; welche Repositories die App verwalte
   ohne CI bekommen keinen automatischen Tag.
 - Seit 0.4.0: GitLab-Projekte (gitlab.com und eigene Instanzen, Anmeldung über `glab`); die
   Startansicht zeigt je Dienst eine Karte. Siehe [GitLab](#gitlab).
+- Seit 0.4.1: Für GitHub und GitLab geht auch ein eigenes Token statt `gh` oder `glab`, abgelegt im
+  Schlüsselbund oder in der App (**Einstellungen → Zugänge**); eigene GitLab-Instanzen auch über http.
+  Der leere `gitlab.com`-Eintrag, den `glab` immer anlegt, zählt nicht mehr als Instanz.
 - Seit 0.3.5: „Einrichtung“ heißt **Einstellungen**, „Läufe“ heißt **Aufträge**, die Website-Schritte
   heißen Prüfen, Inhalte aktualisieren, Veröffentlichen und Live-Seite prüfen. „Verbindung testen“
   speichert nichts mehr; erst „Sichern“ übernimmt die Einstellungen, auch einen dabei bestätigten
@@ -382,7 +387,7 @@ Es ist nicht signiert, macOS blockiert es deshalb beim ersten Öffnen; einmal un
 Datenschutz & Sicherheit → Dennoch öffnen** erlauben oder im Terminal installieren:
 
 ```bash
-sudo installer -pkg OpenReleasePilot-0.4.0.pkg -target /
+sudo installer -pkg OpenReleasePilot-0.4.1.pkg -target /
 ```
 
 Dasselbe Paket lässt sich über Microsoft Intune als „macOS-App (PKG)“ verteilen; dann in den
@@ -409,7 +414,8 @@ gültige Signatur wird abgelehnt; danach die App neu starten. Beta-Versionen (`X
   [Claude Code](https://claude.com/claude-code), für Pflegeaufträge die angemeldete GitHub-CLI `gh` (sie
   hebt auch das GitHub-API-Limit von 60 auf 5000 Anfragen pro Stunde; das Token nutzt die App selbst und
   gibt es als `GITHUB_TOKEN` an den Build der Website, aber nie an Claude Code), für GitLab-Projekte die
-  angemeldete GitLab-CLI `glab` (`brew install glab`, dann `glab auth login --hostname <instanz>`)
+  angemeldete GitLab-CLI `glab` (`brew install glab`, dann `glab auth login --hostname <instanz>`). Statt
+  der CLIs geht je Dienst auch ein eigenes Token unter **Einstellungen → Zugänge**
 - Nur für eine Website: Node.js/npm (oder was ihr Build braucht) und ein SFTP-Zugang zum Webspace
 
 Die App startet aus dem Finder und fragt einmal die Login-Shell nach dem `PATH`, damit

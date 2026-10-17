@@ -248,9 +248,11 @@ repositories. The start view shows one card per service: GitHub and each GitLab 
 sign-in state, one square per repository and the counts that need you. A click slides the cards into a
 strip and opens that service's overview below.
 
-- **Sign-in:** through the GitLab CLI, `glab auth login --hostname <instance>`. The app asks `glab` for the
-  instance's token, stores none itself and never hands it to Claude Code. "Status aktualisieren" asks
-  again, so a sign-in in between counts at once.
+- **Sign-in:** through the GitLab CLI, `glab auth login --hostname <instance>`, or with an own access
+  token (scope `api`) under **Einstellungen → Zugänge → Instanz mit Token hinzufügen**, where http can be
+  chosen for a self-hosted instance without TLS. An own token lives, by choice, in the keychain or in a
+  file in the app's data folder readable by you only, and takes precedence over `glab`'s. Claude Code never
+  gets it. "Status aktualisieren" asks again, so a sign-in in between counts at once.
 - **Identity:** a GitLab project is `host/group/…/project` in the app, e.g.
   `gitlab.example.com/werk/tools/app`. Local clones with such an origin (HTTPS or SSH) appear under
   "Repositories auswählen"; without a clone, enter the project's name or address there.
@@ -325,6 +327,9 @@ repository; it does not change which repositories the app manages.
   get no automatic tag.
 - From 0.4.0: GitLab projects (gitlab.com and self-hosted instances, sign-in through `glab`); the start
   view shows one card per service. See [GitLab](#gitlab).
+- From 0.4.1: GitHub and GitLab also accept an own token instead of `gh` or `glab`, kept in the keychain
+  or in the app (**Einstellungen → Zugänge**); self-hosted GitLab instances also over http. The empty
+  `gitlab.com` entry `glab` always writes no longer counts as an instance.
 - From 0.3.5: "Einrichtung" is now **Einstellungen**, "Läufe" is **Aufträge**, and the website steps are
   Prüfen, Inhalte aktualisieren, Veröffentlichen and Live-Seite prüfen. "Verbindung testen" (test
   connection) no longer saves anything; only "Sichern" (save) applies the settings, including a server
@@ -364,7 +369,7 @@ not signed, so macOS blocks it on the first open; allow it once under **System S
 Security → Open Anyway**, or install it in the terminal:
 
 ```bash
-sudo installer -pkg OpenReleasePilot-0.4.0.pkg -target /
+sudo installer -pkg OpenReleasePilot-0.4.1.pkg -target /
 ```
 
 The same package can be distributed through Microsoft Intune as a "macOS app (PKG)"; then turn off
@@ -391,7 +396,8 @@ suchen** or when a beta is installed. Development builds do not check.
   signed in, the GitHub CLI `gh` signed in for care jobs (it also raises the GitHub API limit from 60 to
   5000 requests per hour; the token is used by the app, and handed to the website build as
   `GITHUB_TOKEN`, but never to Claude Code), and for GitLab projects the GitLab CLI `glab` signed in
-  (`brew install glab`, then `glab auth login --hostname <instance>`)
+  (`brew install glab`, then `glab auth login --hostname <instance>`). Instead of the CLIs, each service
+  also takes an own token under **Einstellungen → Zugänge**
 - Only for a website: Node.js/npm (or whatever its build needs) and an SFTP account for the web space
 
 The app starts from the Finder and asks the login shell for the user's `PATH` once, so tools

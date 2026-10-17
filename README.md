@@ -369,7 +369,7 @@ not signed, so macOS blocks it on the first open; allow it once under **System S
 Security → Open Anyway**, or install it in the terminal:
 
 ```bash
-sudo installer -pkg OpenReleasePilot-0.4.2.pkg -target /
+sudo installer -pkg OpenReleasePilot-0.4.3.pkg -target /
 ```
 
 The same package can be distributed through Microsoft Intune as a "macOS app (PKG)"; then turn off

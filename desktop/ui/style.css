@@ -599,3 +599,20 @@ legend { font-weight: 600; padding: 0 4px; }
   .forges, .forge-card, .forge-mark, .forge-mark svg, .forge-title strong, .forge-more { transition: none; }
   .repos-below.enter { animation: none; }
 }
+
+/* Own tokens in the settings: a box under the service's status, labels above the fields. */
+.token-form { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); }
+.token-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.token-field > input { width: 100%; }
+.token-host { display: flex; gap: 6px; min-width: 0; }
+.token-host select { flex: none; width: auto; }
+.token-host input { flex: 1; min-width: 0; }
+.token-choices { display: flex; flex-direction: column; gap: 6px; }
+.token-choice { display: flex; gap: 8px; align-items: flex-start; cursor: default; }
+.token-choice input { margin: 2px 0 0; flex: none; }
+.token-choice > span { display: flex; flex-direction: column; gap: 1px; }
+.token-line { min-height: var(--control-h); }
+.token-line button { flex: none; }
+.field-row.top { align-items: start; }
+.field-row.top > label { line-height: var(--control-h); }
+.token-host-status { display: flex; flex-direction: column; gap: 1px; min-width: 0; overflow-wrap: anywhere; }

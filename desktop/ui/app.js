@@ -710,13 +710,13 @@ function forges() {
   const cards = [
     { id: 'github', kind: 'github', name: 'GitHub', where: ['github.com', owners.slice(0, 2).join(', ') + (owners.length > 2 ? ` +${owners.length - 2}` : '')].filter(Boolean).join(' · '),
       repos: github, connected: view.signedIn !== false || view.config.githubTokenSaved,
-      login: view.config.githubTokenSaved ? 'über eigenes Token angemeldet' : view.signedIn === false ? 'gh nicht angemeldet' : view.signedIn ? 'über gh angemeldet' : 'Anmeldung wird geprüft' },
+      login: view.config.githubTokenSaved ? 'eigenes Token' : view.signedIn === false ? 'gh nicht angemeldet' : view.signedIn ? 'über gh angemeldet' : 'Anmeldung wird geprüft' },
   ];
   for (const h of view.gitlabHosts ?? []) {
     cards.push({
       id: `gitlab:${h.host}`, kind: 'gitlab', host: h.host, name: 'GitLab', where: h.host,
       repos: repos.filter((r) => forgeOf(r) === `gitlab:${h.host}`), connected: h.ownToken || h.signedIn === true || (h.signedIn == null && h.configured),
-      login: h.ownToken ? 'über eigenes Token angemeldet' : h.signedIn === true ? 'über glab angemeldet' : h.signedIn === false ? 'glab nicht angemeldet' : h.configured ? 'glab eingerichtet' : 'Anmeldung wird geprüft',
+      login: h.ownToken ? 'eigenes Token' : h.signedIn === true ? 'über glab angemeldet' : h.signedIn === false ? 'glab nicht angemeldet' : h.configured ? 'glab eingerichtet' : 'Anmeldung wird geprüft',
     });
   }
   // Without any instance: one card that explains how to connect one.
@@ -2538,57 +2538,76 @@ function settingsDialog() {
     if (await act('forget_forge_token', { forge: forgeArg })) await refresh();
     render();
   };
-  const tokForm = (kind) => h('div', { class: 'field-stack' },
-    kind === 'gitlab' && h('div', { class: 'field-row' }, h('label', { for: 's-tok-host' }, 'Instanz'),
-      h('div', { class: 'line' },
+  // The form is a box of its own under the service's status: labels above the fields, so it fits the narrow column.
+  const tokField = (label, id, control, hint) => h('div', { class: 'token-field' },
+    h('label', { class: 'field-label', for: id }, label), control, hint && h('div', { class: 'note' }, hint));
+  const tokStorage = (value, title, hint) => h('label', { class: 'token-choice' },
+    h('input', { type: 'radio', name: 's-tok-storage', value, checked: tok.storage === value, disabled: tok.busy, onchange: () => { tok.storage = value; } }),
+    h('span', null, h('span', null, title), h('span', { class: 'note' }, hint)));
+  const tokForm = (kind) => h('div', { class: 'token-form', role: 'group', 'aria-label': kind === 'github' ? 'Eigenes GitHub-Token' : 'GitLab-Instanz mit Token' },
+    kind === 'gitlab' && tokField('Instanz', 's-tok-host',
+      h('div', { class: 'token-host' },
+        h('select', { id: 's-tok-scheme', 'aria-label': 'Protokoll', disabled: tok.busy, onchange: (e) => { tok.scheme = e.target.value; render(); } },
+          h('option', { value: 'https', selected: tok.scheme === 'https' }, 'https://'),
+          h('option', { value: 'http', selected: tok.scheme === 'http' }, 'http://')),
         h('input', { id: 's-tok-host', type: 'text', value: tok.host, spellcheck: 'false', autocomplete: 'off', disabled: tok.busy || tok.lockHost,
-          placeholder: 'gitlab.example.com oder 192.168.1.5:8929', oninput: (e) => { tok.host = e.target.value; } }),
-        h('select', { id: 's-tok-scheme', 'aria-label': 'Verbindung', disabled: tok.busy, onchange: (e) => { tok.scheme = e.target.value; } },
-          h('option', { value: 'https', selected: tok.scheme === 'https' }, 'https'),
-          h('option', { value: 'http', selected: tok.scheme === 'http' }, 'http (ohne TLS, nur im eigenen Netz)')))),
-    h('div', { class: 'field-row' }, h('label', { for: 's-tok-token' }, 'Token'),
+          placeholder: 'gitlab.example.com', oninput: (e) => { tok.host = e.target.value; } })),
+      tok.scheme === 'http' ? 'http ohne TLS nur für eine Instanz im eigenen Netz: Token und Daten gehen unverschlüsselt.' : 'Mit Port, falls nötig, z. B. 192.168.1.5:8929.'),
+    tokField('Token', 's-tok-token',
       h('input', { id: 's-tok-token', type: 'password', value: tok.token, spellcheck: 'false', autocomplete: 'off', disabled: tok.busy,
-        oninput: (e) => { tok.token = e.target.value; } })),
-    h('div', { class: 'field-row' }, h('label', { for: 's-tok-storage' }, 'Ablage'),
-      h('select', { id: 's-tok-storage', disabled: tok.busy, onchange: (e) => { tok.storage = e.target.value; } },
-        h('option', { value: 'keychain', selected: tok.storage !== 'app' }, 'Schlüsselbund (empfohlen)'),
-        h('option', { value: 'app', selected: tok.storage === 'app' }, 'In der App (Datei im App-Ordner, nur für dich lesbar)'))),
-    h('div', { class: 'note' }, 'Im Schlüsselbund kann macOS beim ersten Zugriff nachfragen; in der App liegt das Token als Datei im Datenordner der App.'),
-    h('div', { class: 'note' }, kind === 'github'
-      ? 'Erstellen unter GitHub: Einstellungen → Developer settings → Personal access tokens; Scopes „repo“ und „workflow“.'
-      : 'Erstellen unter GitLab: Benutzereinstellungen → Zugriffstoken; Scope „api“.'),
+        oninput: (e) => { tok.token = e.target.value; }, onkeydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); tokSave(); } } }),
+      kind === 'github'
+        ? 'Anlegen auf GitHub unter Settings → Developer settings → Personal access tokens, Scopes „repo“ und „workflow“.'
+        : 'Anlegen in GitLab unter Benutzereinstellungen → Zugriffstoken, Scope „api“.'),
+    h('div', { class: 'token-field' }, h('span', { class: 'field-label' }, 'Ablage'),
+      h('div', { class: 'token-choices' },
+        tokStorage('keychain', 'Schlüsselbund (empfohlen)', 'macOS fragt beim ersten Zugriff eventuell nach.'),
+        tokStorage('app', 'In der App', 'Als Datei im Datenordner der App, nur für dich lesbar.'))),
     tok.error && h('div', { class: 'note error-text', role: 'alert' }, tok.error),
     h('div', { class: 'line' },
       button(tok.busy ? 'Wird geprüft …' : 'Prüfen und sichern', tokSave, { cls: 'primary', disabled: tok.busy, id: 's-tok-save' }),
       button('Abbrechen', tokClose, { disabled: tok.busy })));
+  // One line per account: what signs in, and what can be done about it.
+  const topRow = (label, control) => { const r = row(label, control); r.classList.add('top'); return r; };
+  const tokLine = (text, cls, ...actions) => h('div', { class: 'line token-line' }, h('span', { class: `spacer ${cls}` }, text), ...actions);
   const githubRow = () => {
     const open = tok.forge === 'github';
-    return row('GitHub', h('div', { class: 'field-stack' },
-      view.config.githubTokenSaved
-        ? h('div', { class: 'line' }, h('span', { class: 'muted spacer' }, `über eigenes Token angemeldet (${storageLabel(view.config.githubTokenStorage)})`),
-          !open && button('Token ersetzen …', () => tokOpen('github', '', 'https', view.config.githubTokenStorage)),
-          button('Token entfernen', () => tokForget({ kind: 'github' })))
-        : h('div', { class: 'line' },
-          h('span', { class: `spacer ${view.signedIn === false ? 'orange' : 'muted'}` }, view.signedIn === false
-            ? 'GitHub-CLI nicht angemeldet: im Terminal gh auth login, oder ein eigenes Token verwenden'
-            : view.signedIn ? 'über die GitHub-CLI (gh) angemeldet; die App nutzt ihren Token, Claude nie' : 'wird beim ersten Lesen geprüft (GitHub-CLI gh)'),
+    const own = view.config.githubTokenSaved;
+    return topRow('GitHub', h('div', { class: 'field-stack' },
+      own
+        ? tokLine(`Eigenes Token (${storageLabel(view.config.githubTokenStorage)})`, 'muted',
+          !open && button('Ersetzen …', () => tokOpen('github', '', 'https', view.config.githubTokenStorage)),
+          !open && button('Entfernen', () => tokForget({ kind: 'github' })))
+        : tokLine(view.signedIn === false ? 'Nicht angemeldet' : view.signedIn ? 'Über die GitHub-CLI (gh)' : 'Wird beim ersten Lesen geprüft',
+          view.signedIn === false ? 'orange' : 'muted',
           !open && button('Eigenes Token …', () => tokOpen('github'))),
+      !own && view.signedIn === false && !open && h('div', { class: 'note' }, 'Im Terminal gh auth login, oder ein eigenes Token eintragen.'),
       tok.ok?.kind === 'github' && h('div', { class: 'note ok-text' }, tok.ok.text),
       open && tokForm('github')));
   };
   const gitlabRow = () => {
     const hosts = view.gitlabHosts ?? [];
     const own = view.config.gitlabInstances ?? [];
-    return row('GitLab', h('div', { class: 'field-stack' },
-      hosts.length
-        ? hosts.map((g) => h('div', { class: 'line' },
-          h('span', { class: `spacer ${!g.ownToken && g.signedIn === false ? 'orange' : 'muted'}` }, `${g.host}: ${g.ownToken ? `über eigenes Token angemeldet (${storageLabel(g.ownStorage)})`
-            : g.signedIn === true ? 'über glab angemeldet' : g.signedIn === false ? `nicht angemeldet (glab auth login --hostname ${g.host}, oder ein eigenes Token)` : g.configured ? 'in glab eingerichtet' : 'wird beim ersten Lesen geprüft'}`),
-          g.ownToken && button('Token ersetzen …', () => tokOpen('gitlab', g.host, own.find((i) => i.host === g.host)?.scheme ?? 'https', own.find((i) => i.host === g.host)?.storage ?? g.ownStorage)),
-          g.ownToken && button('Token entfernen', () => tokForget({ kind: 'gitlab', host: g.host }))))
-        : h('div', { class: 'muted' }, 'keine Instanz; mit der GitLab-CLI anmelden (glab auth login --hostname <instanz>) oder ein eigenes Token verwenden'),
+    const open = tok.forge === 'gitlab';
+    const status = (g) => g.ownToken ? `eigenes Token (${storageLabel(g.ownStorage)})`
+      : g.signedIn === true ? 'über glab' : g.signedIn === false ? 'nicht angemeldet' : g.configured ? 'in glab eingerichtet' : 'wird beim ersten Lesen geprüft';
+    return topRow('GitLab', h('div', { class: 'field-stack' },
+      hosts.map((g) => {
+        const mine = own.find((i) => i.host === g.host);
+        const editing = open && tok.lockHost && tok.host === g.host;
+        return tokLine(h('span', { class: 'token-host-status' }, h('span', { class: 'mono' }, g.host),
+          h('span', { class: `small ${!g.ownToken && g.signedIn === false ? 'orange' : 'muted'}` }, status(g))), '',
+          g.ownToken && !editing && button('Ersetzen …', () => tokOpen('gitlab', g.host, mine?.scheme ?? 'https', mine?.storage ?? g.ownStorage)),
+          g.ownToken && !editing && button('Entfernen', () => tokForget({ kind: 'gitlab', host: g.host })),
+          !g.ownToken && !open && button('Eigenes Token …', () => tokOpen('gitlab', g.host)));
+      }),
+      !hosts.length && !open && tokLine('Keine Instanz verbunden', 'muted'),
+      (() => {
+        const out = hosts.filter((g) => !g.ownToken && g.signedIn === false);
+        return out.length > 0 && !open && h('div', { class: 'note' }, `Im Terminal glab auth login --hostname ${out.length === 1 ? out[0].host : '<instanz>'}, oder ein eigenes Token eintragen.`);
+      })(),
       tok.ok?.kind === 'gitlab' && h('div', { class: 'note ok-text' }, `${tok.ok.host}: ${tok.ok.text}`),
-      tok.forge === 'gitlab' ? tokForm('gitlab') : h('div', { class: 'line' }, button('Instanz mit Token hinzufügen …', () => tokOpen('gitlab')))));
+      open ? tokForm('gitlab') : h('div', { class: 'line' }, button('Instanz hinzufügen …', () => tokOpen('gitlab')))));
   };
   const dlg = openDialog('Einstellungen', (close, rerender) => {
     render = rerender;
@@ -2605,6 +2624,7 @@ function settingsDialog() {
           h('fieldset', null, h('legend', null, 'Zugänge'),
             githubRow(),
             gitlabRow(),
+            h('div', { class: 'note' }, 'Ohne eigenes Token nutzt die App das Token von gh bzw. glab. Claude bekommt nie eines.'),
             row('Repo-Ordner', h('div', { class: 'line' }, text('workspaceDir', { id: 's-workspace', placeholder: `${view.workspaceDisplay} (automatisch)` }),
               button('Auswählen …', async () => { const p = await call('pick_folder'); if (p) { s.workspaceDir = p; repoCache = null; render(); } }, { id: 's-workspace-pick' }))),
             h('div', { class: 'note' }, 'Aus diesem Ordner bietet „Repositories auswählen“ die lokalen Klone an; neue Klone legt die App hier an.')),

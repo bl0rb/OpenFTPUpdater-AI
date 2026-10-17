@@ -6,29 +6,56 @@ use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-/// Token of the GitHub CLI (`gh auth token`), if it is installed and signed in. Raises the API
-/// limit from 60 to 5000 requests per hour; also handed to the app's own build as `GITHUB_TOKEN`, never to Claude.
-pub fn token() -> Option<&'static str> {
-    TOKEN.get_or_init(|| output("gh", &["auth", "token"], Path::new("/")).ok().filter(|t| !t.is_empty())).as_deref()
+/// The token for the GitHub API: the one entered in the app, else the GitHub CLI's (`gh auth token`).
+/// Raises the API limit from 60 to 5000 requests per hour; also handed to the app's own build as
+/// `GITHUB_TOKEN`, never to Claude.
+pub fn token() -> Option<String> {
+    crate::tokens::github().or_else(cli_token)
+}
+
+/// Token of the GitHub CLI, asked once.
+fn cli_token() -> Option<String> {
+    TOKEN.get_or_init(|| output("gh", &["auth", "token"], Path::new("/")).ok().filter(|t| !t.is_empty())).clone()
 }
 
 static TOKEN: OnceLock<Option<String>> = OnceLock::new();
 
-/// Whether gh is signed in, if `token` already looked; never starts gh itself.
+/// Whether there is a token: an own one, else whether gh is signed in, if `token` already looked;
+/// never starts gh or reads the keychain itself.
 pub fn signed_in() -> Option<bool> {
+    if crate::tokens::has_github_cached() {
+        return Some(true);
+    }
     TOKEN.get().map(Option::is_some)
 }
 
 fn request(method: &str, path: &str) -> ureq::Request {
+    request_with(method, path, token().as_deref())
+}
+
+fn request_with(method: &str, path: &str, token: Option<&str>) -> ureq::Request {
     let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).build();
     let mut request = agent
         .request(method, &format!("https://api.github.com/{path}"))
         .set("Accept", "application/vnd.github+json")
         .set("User-Agent", "OpenReleasePilot");
-    if let Some(token) = token() {
+    if let Some(token) = token {
         request = request.set("Authorization", &format!("Bearer {token}"));
     }
     request
+}
+
+/// Checks a token against `GET /user` before it is stored; returns the login name.
+pub fn validate_token(token: &str) -> Result<String> {
+    match request_with("GET", "user", Some(token)).call() {
+        Ok(response) => {
+            let json: serde_json::Value = serde_json::from_reader(response.into_reader()).context("Antwort von GitHub unlesbar")?;
+            json["login"].as_str().map(str::to_owned).context("Antwort von GitHub ohne Anmeldename")
+        }
+        Err(ureq::Error::Status(401, _)) => bail!("Token abgelehnt"),
+        Err(ureq::Error::Status(code, _)) => bail!("GitHub antwortet mit HTTP {code}"),
+        Err(e) => bail!("GitHub nicht erreichbar: {e}"),
+    }
 }
 
 /// GitHub refused access with HTTP 403 for another reason than its rate limit (e.g. SSO
@@ -58,7 +85,7 @@ pub(crate) fn get(path: &str) -> Result<Option<serde_json::Value>> {
             let limited = code == 429 || response.header("x-ratelimit-remaining") == Some("0");
             let reason = serde_json::from_str(&response.into_string().unwrap_or_default()).map(|json| message(&json)).unwrap_or_default();
             if limited || reason.to_lowercase().contains("rate limit") {
-                bail!("GitHub-Limit erreicht{}", if token().is_none() { " (mit `gh auth login` gilt ein höheres Limit)" } else { "" });
+                bail!("GitHub-Limit erreicht{}", if token().is_none() { " (mit `gh auth login` oder einem eigenen Token gilt ein höheres Limit)" } else { "" });
             }
             return Err(Forbidden(reason).into());
         }
@@ -110,7 +137,7 @@ pub(crate) fn send(method: &str, path: &str, body: Option<&serde_json::Value>) -
         return answer;
     }
     if token().is_none() {
-        bail!("GitHub-CLI nicht angemeldet (gh auth login)");
+        bail!("GitHub nicht angemeldet (gh auth login oder ein eigenes Token in den Einstellungen)");
     }
     let request = request(method, path);
     let result = match body {
@@ -214,7 +241,7 @@ pub fn repo_info(repo: &str) -> Result<RepoInfo> {
 /// first; includes private ones. Needs `gh auth login`.
 pub fn user_repos() -> Result<Vec<RepoInfo>> {
     if token().is_none() {
-        bail!("Für die Liste deiner Repositories die GitHub-CLI anmelden: gh auth login");
+        bail!("Für die Liste deiner Repositories bei GitHub anmelden: gh auth login oder ein eigenes Token in den Einstellungen");
     }
     let mut repos = Vec::new();
     for page in 1..=5 {

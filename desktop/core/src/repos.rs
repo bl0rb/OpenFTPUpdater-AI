@@ -690,8 +690,8 @@ pub fn capabilities(target: &RepoTarget, facts: Option<&Facts>, signed_in: Optio
         Some("deaktiviert".to_owned())
     } else if signed_in == Some(false) {
         Some(match &target.forge {
-            Forge::Github => "GitHub-CLI nicht angemeldet (gh auth login)".to_owned(),
-            forge => format!("GitLab-CLI nicht angemeldet ({})", forge.login_hint()),
+            Forge::Github => format!("GitHub nicht angemeldet ({})", Forge::Github.sign_in_hint()),
+            forge => format!("GitLab nicht angemeldet ({})", forge.sign_in_hint()),
         })
     } else {
         match facts {
@@ -956,7 +956,7 @@ mod tests {
         assert_eq!(facts.access.ok().unwrap().can_push, None, "public data without a login");
         let h = health(&target, Some(&facts), None, 1000);
         assert_eq!(h.state, HealthState::NeedsAttention);
-        assert_eq!(capabilities(&target, Some(&facts), Some(false)).care.as_deref(), Some("GitHub-CLI nicht angemeldet (gh auth login)"));
+        assert_eq!(capabilities(&target, Some(&facts), Some(false)).care.as_deref(), Some("GitHub nicht angemeldet (gh auth login oder ein eigenes Token in den Einstellungen)"));
         assert!(mock::writes().is_empty());
         assert!(crate::shell::RAN.with(|ran| ran.borrow().is_empty()), "no git command at all");
 

@@ -5,6 +5,7 @@
 //! - `shell`, `git`, `github`, `gitlab`, `claude`: external tools
 //! - `forge`: whether a repository lives on GitHub or on a GitLab instance
 //! - `sftp`, `manifest`, `verify`, `secrets`: upload, change tracking, live check, password storage
+//! - `tokens`: tokens the user entered for GitHub and GitLab, in the keychain, ahead of the CLIs' tokens
 //! - `update`: updates of the app itself from its GitHub releases
 //! - `repos`: the managed repositories, what GitHub reports about them, their health (read only)
 //! - `security`: security check of the managed repositories (branch protection, scanning, alerts) and its fixes
@@ -31,4 +32,5 @@ pub mod sftp;
 pub mod shell;
 pub mod site;
 pub mod update;
+pub mod tokens;
 pub mod verify;

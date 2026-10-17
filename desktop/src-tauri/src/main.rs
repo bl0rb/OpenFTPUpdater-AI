@@ -15,6 +15,7 @@ use openreleasepilot_core::forge::{self, Forge};
 use openreleasepilot_core::{github, gitlab, localrepo, manifest, repos, security};
 use openreleasepilot_core::paths::{self, abbreviate_home, expand_home};
 use openreleasepilot_core::secrets;
+use openreleasepilot_core::tokens;
 use openreleasepilot_core::sftp::{self, ConnectError};
 use openreleasepilot_core::shell::Runner;
 use openreleasepilot_core::site::{self, Site};
@@ -318,16 +319,32 @@ struct GitlabHost {
     signed_in: Option<bool>,
     /// glab knows the host (its configuration names it).
     configured: bool,
+    /// An own token for it is stored.
+    own_token: bool,
+    /// Where that token is kept; `None` without an own token.
+    own_storage: Option<tokens::Storage>,
 }
 
 fn gitlab_hosts(config: &Config) -> Vec<GitlabHost> {
     let configured = gitlab::configured_hosts();
-    let mut hosts: Vec<String> = config.repositories.iter().filter_map(|r| gitlab::project(&r.repo).map(|p| p.host)).chain(configured.iter().cloned()).collect();
+    let mut hosts: Vec<String> = config
+        .repositories
+        .iter()
+        .filter_map(|r| gitlab::project(&r.repo).map(|p| p.host))
+        .chain(configured.iter().cloned())
+        .chain(config.gitlab_instances.iter().map(|i| i.host.to_lowercase()))
+        .collect();
     hosts.sort();
     hosts.dedup();
     hosts
         .into_iter()
-        .map(|host| GitlabHost { signed_in: gitlab::signed_in(&host), configured: configured.contains(&host), host })
+        .map(|host| GitlabHost {
+            signed_in: if config.gitlab_instances.iter().any(|i| i.host.eq_ignore_ascii_case(&host)) { Some(true) } else { gitlab::signed_in(&host) },
+            configured: configured.contains(&host),
+            own_token: config.gitlab_instances.iter().any(|i| i.host.eq_ignore_ascii_case(&host)),
+            own_storage: config.gitlab_instances.iter().find(|i| i.host.eq_ignore_ascii_case(&host)).map(|i| i.storage),
+            host,
+        })
         .collect()
 }
 
@@ -500,7 +517,7 @@ fn get_view(app: AppHandle) -> View {
             job_running: m.job_running.clone(),
             jobs_unreadable: m.jobs_unreadable.clone(),
             website_sources: website_sources(&m.config, &m.site),
-            signed_in: github::signed_in(),
+            signed_in: if m.config.github_token_saved { Some(true) } else { github::signed_in() },
             gitlab_hosts: gitlab_hosts(&m.config),
             fresh_secs: repos::FRESH_SECS,
             now,
@@ -608,6 +625,96 @@ fn apply_settings(app: &AppHandle, input: SettingsInput) -> Result<(), String> {
 #[tauri::command]
 async fn save_settings(app: AppHandle, input: SettingsInput) -> Result<(), String> {
     blocking(move || apply_settings(&app, input)).await
+}
+
+/// The account the token is stored under, and the host for GitLab.
+fn token_account(forge: &Forge) -> Result<(String, Option<String>), String> {
+    match forge {
+        Forge::Github => Ok((tokens::github_account(), None)),
+        Forge::Gitlab { host } => {
+            let host = host.trim().to_lowercase();
+            if !gitlab::is_host(&host) {
+                return Err("Kein gültiger GitLab-Host (z. B. gitlab.example.com oder 192.168.178.88:8929)".into());
+            }
+            Ok((tokens::gitlab_account(&host), Some(host)))
+        }
+    }
+}
+
+/// Checks the token against the service, then stores it in the chosen place (keychain or app)
+/// and notes that in the settings. Returns the login name. Stores nothing if the check fails.
+#[tauri::command]
+async fn save_forge_token(app: AppHandle, forge: Forge, token: String, scheme: Option<String>, storage: Option<String>) -> Result<String, String> {
+    blocking(move || {
+        let token = token.trim().to_owned();
+        if token.is_empty() {
+            return Err("Kein Token eingegeben".to_owned());
+        }
+        let (account, host) = token_account(&forge)?;
+        let scheme = match scheme.as_deref().map(|s| s.trim().to_lowercase()).as_deref() {
+            None | Some("") | Some("https") => "https",
+            Some("http") => "http",
+            Some(_) => return Err("Schema muss https oder http sein".to_owned()),
+        };
+        let storage = tokens::Storage::parse(storage.as_deref()).ok_or("Ablage muss keychain oder app sein")?;
+        let login = match &host {
+            None => github::validate_token(&token),
+            Some(host) => gitlab::validate_token(host, scheme, &token),
+        }
+        .map_err(|e| format!("{e:#}"))?;
+        // Clear the other place first, so no stale copy stays behind.
+        tokens::delete(&account).map_err(|e| format!("{e:#}"))?;
+        tokens::set(&account, storage, &token).map_err(|e| format!("{e:#}"))?;
+        let mut next = with_model(&app, |m| m.config.clone());
+        match &host {
+            None => {
+                next.github_token_saved = true;
+                next.github_token_storage = storage;
+            }
+            Some(host) => {
+                let instance = config::GitlabInstance { host: host.clone(), scheme: scheme.to_owned(), storage };
+                match next.gitlab_instances.iter_mut().find(|i| i.host.eq_ignore_ascii_case(host)) {
+                    Some(existing) => *existing = instance,
+                    None => next.gitlab_instances.push(instance),
+                }
+            }
+        }
+        config::save(&next).map_err(|e| format!("{e:#}"))?;
+        with_model(&app, |m| m.config = next);
+        match &host {
+            None => tokens::remember_github(Some(token)),
+            Some(host) => tokens::remember_gitlab(host, Some((token, scheme.to_owned()))),
+        }
+        changed(&app);
+        Ok(login)
+    })
+    .await
+}
+
+/// Removes the own token from the keychain and the app; the CLI's token, if any, applies again.
+#[tauri::command]
+async fn forget_forge_token(app: AppHandle, forge: Forge) -> Result<(), String> {
+    blocking(move || {
+        let (account, host) = token_account(&forge)?;
+        tokens::delete(&account).map_err(|e| format!("{e:#}"))?;
+        let mut next = with_model(&app, |m| m.config.clone());
+        match &host {
+            None => {
+                next.github_token_saved = false;
+                next.github_token_storage = tokens::Storage::default();
+            }
+            Some(host) => next.gitlab_instances.retain(|i| !i.host.eq_ignore_ascii_case(host)),
+        }
+        config::save(&next).map_err(|e| format!("{e:#}"))?;
+        with_model(&app, |m| m.config = next);
+        match &host {
+            None => tokens::remember_github(None),
+            Some(host) => tokens::remember_gitlab(host, None),
+        }
+        changed(&app);
+        Ok(())
+    })
+    .await
 }
 
 #[derive(Serialize)]
@@ -867,6 +974,8 @@ pub fn refresh_status(app: &AppHandle, keys: &[String]) {
         if full {
             gitlab::forget_tokens();
         }
+        // The own tokens come out of the keychain here, never when merely showing the window.
+        tokens::ensure_loaded();
         github::token();
         for host in &hosts {
             gitlab::token(host);
@@ -1013,6 +1122,7 @@ fn check_security_of(app: &AppHandle, keys: &[String]) {
     changed(app);
     let app = app.clone();
     std::thread::spawn(move || {
+        tokens::ensure_loaded();
         github::token();
         let queue = Mutex::new(jobs);
         std::thread::scope(|scope| {
@@ -1159,7 +1269,7 @@ async fn add_repositories(app: AppHandle, repos: Vec<AddRepo>) -> Result<Vec<Str
                 Some(project) => match (gitlab::project_info(&project), origin) {
                     (Ok(info), _) => found.push((info.id, None, local.to_owned())),
                     (Err(_), Some(origin)) => found.push((origin, None, local.to_owned())),
-                    (Err(e), None) => return Err(format!("{e:#}{}", if gitlab::token(&project.host).is_none() { format!(" ({})", Forge::of(&repo).login_hint()) } else { String::new() })),
+                    (Err(e), None) => return Err(format!("{e:#}{}", if gitlab::token(&project.host).is_none() { format!(" ({})", Forge::of(&repo).sign_in_hint()) } else { String::new() })),
                 },
                 None => match (github::repo_info(&repo), origin) {
                     (Ok(info), _) => found.push((info.full_name, Some(info.id), local.to_owned())),
@@ -1601,6 +1711,8 @@ fn main() {
             get_view,
             get_log,
             save_settings,
+            save_forge_token,
+            forget_forge_token,
             test_connection,
             trust_host_key,
             reject_host_key,

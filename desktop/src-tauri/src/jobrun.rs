@@ -395,7 +395,7 @@ pub fn require_logins(repos: &[String]) -> Result<()> {
             continue;
         }
         if !forge.sign_in_check() {
-            bail!("Für die Pflege die {}-CLI anmelden: {}", forge.name(), forge.login_hint());
+            bail!("Für die Pflege bei {} anmelden: {}", forge.name(), forge.sign_in_hint());
         }
         seen.push(forge);
     }

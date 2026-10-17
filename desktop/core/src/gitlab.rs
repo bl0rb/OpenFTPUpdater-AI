@@ -38,7 +38,7 @@ impl Project {
     }
 
     pub fn web_url(&self) -> String {
-        format!("https://{}/{}", self.host, self.path)
+        format!("{}://{}/{}", scheme(&self.host), self.host, self.path)
     }
 }
 
@@ -75,8 +75,8 @@ pub fn is_update_bot(username: &str) -> bool {
 
 static TOKENS: Mutex<Option<HashMap<String, Option<String>>>> = Mutex::new(None);
 
-/// The token `glab` keeps for the host (`glab config get token --host <host>`), asked once per host.
-/// Never handed to Claude.
+/// The token for the host: the one entered in the app, else the one `glab` keeps
+/// (`glab config get token --host <host>`, asked once per host). Never handed to Claude.
 pub fn token(host: &str) -> Option<String> {
     #[cfg(test)]
     if mock::signed_out(host) {
@@ -86,6 +86,9 @@ pub fn token(host: &str) -> Option<String> {
     }
     #[allow(unreachable_code)]
     {
+        if let Some(own) = crate::tokens::gitlab(host) {
+            return Some(own);
+        }
         let mut tokens = TOKENS.lock().unwrap_or_else(|e| e.into_inner());
         let tokens = tokens.get_or_insert_with(HashMap::new);
         tokens
@@ -97,23 +100,70 @@ pub fn token(host: &str) -> Option<String> {
     }
 }
 
-/// Whether `glab` has a token for the host, if `token` already asked; never starts glab itself.
+/// Whether there is a token for the host: an own one, else whether `glab` has one, if `token`
+/// already asked; never starts glab or reads the keychain itself.
 pub fn signed_in(host: &str) -> Option<bool> {
+    if crate::tokens::has_gitlab_cached(host) {
+        return Some(true);
+    }
     TOKENS.lock().unwrap_or_else(|e| e.into_inner()).as_ref()?.get(host).map(Option::is_some)
 }
 
 /// Forgets the asked tokens, so a login since then counts (on "Status aktualisieren").
 pub fn forget_tokens() {
     *TOKENS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *PROTOCOLS.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 fn login_hint(host: &str) -> String {
-    format!("glab auth login --hostname {host}")
+    crate::forge::Forge::Gitlab { host: host.to_owned() }.sign_in_hint()
+}
+
+static PROTOCOLS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+
+/// `https` or `http` for the instance: what the user chose with the own token, else glab's
+/// `api_protocol` for the host, else `https`. Self-hosted instances without TLS are reached over http.
+pub fn scheme(host: &str) -> String {
+    let host = host.to_lowercase();
+    let own = crate::tokens::scheme_of(&host);
+    #[cfg(test)]
+    let glab: Option<String> = None;
+    #[cfg(not(test))]
+    let glab = PROTOCOLS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(|| glab_records().into_iter().filter_map(|r| Some((r.host, r.api_protocol?))).collect())
+        .get(&host)
+        .cloned();
+    resolve_scheme(own.as_deref(), glab.as_deref())
+}
+
+/// Own choice before glab's configuration before `https`; anything but `http` is `https`.
+fn resolve_scheme(own: Option<&str>, glab: Option<&str>) -> String {
+    match own.or(glab) {
+        Some(s) if s.eq_ignore_ascii_case("http") => "http".into(),
+        _ => "https".into(),
+    }
+}
+
+/// Checks a token against `GET /user` of the instance before it is stored; returns the user name.
+pub fn validate_token(host: &str, scheme: &str, token: &str) -> Result<String> {
+    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).build();
+    let url = format!("{scheme}://{host}/api/v4/user");
+    match agent.get(&url).set("User-Agent", "OpenReleasePilot").set("Authorization", &format!("Bearer {token}")).call() {
+        Ok(response) => {
+            let json: Value = serde_json::from_reader(response.into_reader()).with_context(|| format!("Antwort von GitLab {host} unlesbar"))?;
+            json["username"].as_str().map(str::to_owned).with_context(|| format!("Antwort von GitLab {host} ohne Benutzernamen"))
+        }
+        Err(ureq::Error::Status(401, _)) => bail!("Token abgelehnt"),
+        Err(ureq::Error::Status(code, _)) => bail!("GitLab {host} antwortet mit HTTP {code}"),
+        Err(e) => bail!("GitLab {host} nicht erreichbar: {e}"),
+    }
 }
 
 fn request(host: &str, method: &str, path: &str) -> ureq::Request {
     let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).build();
-    let mut request = agent.request(method, &format!("https://{host}/api/v4/{path}")).set("User-Agent", "OpenReleasePilot");
+    let mut request = agent.request(method, &format!("{}://{host}/api/v4/{path}", scheme(host))).set("User-Agent", "OpenReleasePilot");
     if let Some(token) = token(host) {
         request = request.set("Authorization", &format!("Bearer {token}"));
     }
@@ -178,7 +228,7 @@ pub(crate) fn send(host: &str, method: &str, path: &str, body: Option<&Value>) -
         return answer;
     }
     if token(host).is_none() {
-        bail!("GitLab-CLI für {host} nicht angemeldet ({})", login_hint(host));
+        bail!("GitLab {host} nicht angemeldet ({})", login_hint(host));
     }
     let request = request(host, method, path);
     let result = match body {
@@ -1119,21 +1169,43 @@ pub fn project_info(p: &Project) -> Result<ProjectInfo> {
 }
 
 /// The hosts `glab` is signed in to, from its configuration file; nothing is started.
+/// glab's empty template section for `gitlab.com` does not count.
 pub fn configured_hosts() -> Vec<String> {
-    let home = dirs::home_dir().unwrap_or_default();
-    let candidates = [
-        std::env::var_os("GLAB_CONFIG_DIR").map(std::path::PathBuf::from).map(|d| d.join("config.yml")),
-        std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from).map(|d| d.join("glab-cli").join("config.yml")),
-        Some(home.join(".config").join("glab-cli").join("config.yml")),
-        Some(home.join("Library").join("Application Support").join("glab-cli").join("config.yml")),
-    ];
-    let Some(text) = candidates.into_iter().flatten().find_map(|f| std::fs::read_to_string(f).ok()) else { return Vec::new() };
-    hosts_in_config(&text)
+    glab_records().into_iter().filter(|r| r.signed_in).map(|r| r.host).collect()
 }
 
-/// The keys under `hosts:` of glab's YAML configuration.
+/// What glab's configuration says about one host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GlabHost {
+    host: String,
+    /// A token, a keyring entry or a user is set.
+    signed_in: bool,
+    /// `https` or `http`, if the configuration says.
+    api_protocol: Option<String>,
+}
+
+/// Every host section of glab's configuration file, empty template sections included.
+fn glab_records() -> Vec<GlabHost> {
+    let home = dirs::home_dir().unwrap_or_default();
+    let candidates = [
+        std::env::var_os("GLAB_CONFIG_DIR").map(|d| Path::new(&d).join("config.yml")),
+        std::env::var_os("XDG_CONFIG_HOME").map(|d| Path::new(&d).join("glab-cli").join("config.yml")),
+        Some(home.join(".config").join("glab-cli").join("config.yml")),
+    ];
+    let Some(text) = candidates.into_iter().flatten().find_map(|f| std::fs::read_to_string(f).ok()) else { return Vec::new() };
+    records_in_config(&text)
+}
+
+/// The hosts under `hosts:` of glab's YAML configuration that carry a login: a token, a keyring
+/// entry or a user. glab writes an empty template section for `gitlab.com` into every configuration,
+/// and that one is no instance of yours.
 pub fn hosts_in_config(text: &str) -> Vec<String> {
-    let mut hosts = Vec::new();
+    records_in_config(text).into_iter().filter(|r| r.signed_in).map(|r| r.host).collect()
+}
+
+/// The sections under `hosts:` of glab's YAML configuration, with what they say about login and protocol.
+fn records_in_config(text: &str) -> Vec<GlabHost> {
+    let mut hosts: Vec<GlabHost> = Vec::new();
     let mut inside = false;
     let mut indent = None;
     for line in text.lines() {
@@ -1154,8 +1226,18 @@ pub fn hosts_in_config(text: &str) -> Vec<String> {
             if let Some(key) = line.trim().strip_suffix(':') {
                 let key = key.trim_matches('"').trim_matches('\'');
                 if is_host(key) {
-                    hosts.push(key.to_lowercase());
+                    hosts.push(GlabHost { host: key.to_lowercase(), signed_in: false, api_protocol: None });
                 }
+            }
+        } else if depth > level {
+            let Some((key, value)) = line.trim().split_once(':') else { continue };
+            let value = value.trim().trim_matches('"').trim_matches('\'');
+            let Some(last) = hosts.last_mut() else { continue };
+            match key.trim() {
+                "token" | "job_token" | "user" => last.signed_in |= !value.is_empty(),
+                "use_keyring" => last.signed_in |= matches!(value, "true" | "1"),
+                "api_protocol" if !value.is_empty() => last.api_protocol = Some(value.to_lowercase()),
+                _ => {}
             }
         }
     }
@@ -1248,6 +1330,22 @@ mod tests {
         let config = "git_protocol: ssh\nhosts:\n    gitlab.com:\n        token: x\n        api_host: gitlab.com\n    gitpro.example.de:\n        token: y\n    \"git.example.org:8443\":\n        token: z\neditor: vim\n";
         assert_eq!(hosts_in_config(config), ["gitlab.com", "gitpro.example.de", "git.example.org:8443"]);
         assert!(hosts_in_config("editor: vim\n").is_empty());
+        // glab's own template: gitlab.com with every field empty, the real instance in the keyring.
+        let template = "host: gitlab.com\nhosts:\n    gitlab.com:\n        api_protocol: https\n        api_host: gitlab.com\n        # Your GitLab access token.\n        token:\n        user:\n        use_keyring:\n        custom_headers: []\n    192.168.178.88:8929:\n        use_keyring: \"true\"\n        api_host: 192.168.178.88:8929\n        user: root\n";
+        assert_eq!(hosts_in_config(template), ["192.168.178.88:8929"], "the empty template section is no instance");
+        let protocols: Vec<(String, Option<String>)> = records_in_config(template).into_iter().map(|r| (r.host, r.api_protocol)).collect();
+        assert_eq!(protocols, [("gitlab.com".into(), Some("https".into())), ("192.168.178.88:8929".into(), None)]);
+        assert_eq!(records_in_config("hosts:\n    10.0.0.5:8080:\n        token: x\n        api_protocol: http\n")[0].api_protocol.as_deref(), Some("http"));
+    }
+
+    #[test]
+    fn the_scheme_is_the_own_choice_then_glabs_then_https() {
+        assert_eq!(resolve_scheme(Some("http"), Some("https")), "http");
+        assert_eq!(resolve_scheme(Some("https"), Some("http")), "https");
+        assert_eq!(resolve_scheme(None, Some("http")), "http");
+        assert_eq!(resolve_scheme(None, None), "https");
+        assert_eq!(resolve_scheme(Some("ftp"), None), "https", "only http is ever chosen over https");
+        assert_eq!(project("gitlab.example.com/g/app").unwrap().web_url(), "https://gitlab.example.com/g/app");
     }
 
     fn project_json() -> Value {

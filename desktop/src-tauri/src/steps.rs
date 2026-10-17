@@ -339,7 +339,7 @@ pub fn start_with(app: &AppHandle, work: impl FnOnce(&mut Model) -> Result<Vec<W
 }
 
 fn github_env() -> HashMap<String, String> {
-    github::token().map(|t| HashMap::from([("GITHUB_TOKEN".to_owned(), t.to_owned())])).unwrap_or_default()
+    github::token().map(|t| HashMap::from([("GITHUB_TOKEN".to_owned(), t)])).unwrap_or_default()
 }
 
 /// Runs the build command; lines matching `failOnOutput` fail it even with exit code 0.
@@ -467,8 +467,8 @@ fn precheck(ctx: &Ctx) -> Result<(Status, String)> {
         }
     }
     match github::token() {
-        Some(_) => push(&mut checks, "GitHub", Status::Ok, "angemeldet über gh (5000 Anfragen/Stunde)".into()),
-        None => push(&mut checks, "GitHub", Status::Warning, "ohne gh-Anmeldung nur 60 Anfragen/Stunde – `gh auth login`".into()),
+        Some(_) => push(&mut checks, "GitHub", Status::Ok, "angemeldet (5000 Anfragen/Stunde)".into()),
+        None => push(&mut checks, "GitHub", Status::Warning, "ohne Anmeldung nur 60 Anfragen/Stunde – `gh auth login` oder ein eigenes Token in den Einstellungen".into()),
     }
     publish(&checks);
     ctx.runner.check()?;

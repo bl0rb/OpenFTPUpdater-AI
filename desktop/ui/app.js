@@ -258,10 +258,10 @@ function renderBanners() {
   if (view.notice) items.push(banner('info', view.notice, [['Schließen', () => call('dismiss')]]));
   if (view.jobsUnreadable.length) items.push(banner('warning', `Gespeicherte Aufträge nicht lesbar: ${view.jobsUnreadable.join('; ')}`));
   if (view.signedIn === false && view.repositories.some((r) => forgeOf(r) === 'github')) {
-    items.push(banner('warning', 'Die GitHub-CLI ist nicht angemeldet: Status nur für öffentliche Repositories, Pflege nicht möglich. Im Terminal: gh auth login'));
+    items.push(banner('warning', 'Die GitHub-CLI ist nicht angemeldet: Status nur für öffentliche Repositories, Pflege nicht möglich. Im Terminal: gh auth login, oder ein eigenes Token in den Einstellungen.'));
   }
   for (const host of (view.gitlabHosts ?? []).filter((g) => g.signedIn === false && view.repositories.some((r) => forgeOf(r) === `gitlab:${g.host}`))) {
-    items.push(banner('warning', `Die GitLab-CLI ist für ${host.host} nicht angemeldet: Status nur für öffentliche Projekte, Pflege nicht möglich. Im Terminal: glab auth login --hostname ${host.host}`));
+    items.push(banner('warning', `Die GitLab-CLI ist für ${host.host} nicht angemeldet: Status nur für öffentliche Projekte, Pflege nicht möglich. Im Terminal: glab auth login --hostname ${host.host}, oder ein eigenes Token in den Einstellungen.`));
   }
   // The website's own warnings only where the website is worked on.
   if (area === 'website' && view.siteError) items.push(banner('warning', `Website: ${view.siteError}`, [['Einstellungen', settingsDialog]]));
@@ -709,14 +709,14 @@ function forges() {
   const owners = [...new Set(github.map((r) => repoParts(r.repo).owner))];
   const cards = [
     { id: 'github', kind: 'github', name: 'GitHub', where: ['github.com', owners.slice(0, 2).join(', ') + (owners.length > 2 ? ` +${owners.length - 2}` : '')].filter(Boolean).join(' · '),
-      repos: github, connected: view.signedIn !== false,
-      login: view.signedIn === false ? 'gh nicht angemeldet' : view.signedIn ? 'über gh angemeldet' : 'Anmeldung wird geprüft' },
+      repos: github, connected: view.signedIn !== false || view.config.githubTokenSaved,
+      login: view.config.githubTokenSaved ? 'über eigenes Token angemeldet' : view.signedIn === false ? 'gh nicht angemeldet' : view.signedIn ? 'über gh angemeldet' : 'Anmeldung wird geprüft' },
   ];
   for (const h of view.gitlabHosts ?? []) {
     cards.push({
       id: `gitlab:${h.host}`, kind: 'gitlab', host: h.host, name: 'GitLab', where: h.host,
-      repos: repos.filter((r) => forgeOf(r) === `gitlab:${h.host}`), connected: h.signedIn === true || (h.signedIn == null && h.configured),
-      login: h.signedIn === true ? 'über glab angemeldet' : h.signedIn === false ? 'glab nicht angemeldet' : h.configured ? 'glab eingerichtet' : 'Anmeldung wird geprüft',
+      repos: repos.filter((r) => forgeOf(r) === `gitlab:${h.host}`), connected: h.ownToken || h.signedIn === true || (h.signedIn == null && h.configured),
+      login: h.ownToken ? 'über eigenes Token angemeldet' : h.signedIn === true ? 'über glab angemeldet' : h.signedIn === false ? 'glab nicht angemeldet' : h.configured ? 'glab eingerichtet' : 'Anmeldung wird geprüft',
     });
   }
   // Without any instance: one card that explains how to connect one.
@@ -759,7 +759,7 @@ function renderForges() {
       h('span', { class: 'forge-more' }, h('span', { class: 'forge-more-inner' },
         f.repos.length ? h('span', { class: 'forge-dots', role: 'img', 'aria-label': `Zustand: ${counts.map(([c, t]) => `${c} ${t}`).join(', ')}` },
           f.repos.map((r) => h('span', { class: `forge-dot ${r.loading && !r.facts ? 'idle' : HEALTH[r.health.state][0]}`, title: `${r.repo}: ${HEALTH[r.health.state][1]}` })))
-          : h('span', { class: 'muted small' }, f.connected ? 'Noch keine Repositories' : f.host ? `Mit glab anmelden: glab auth login --hostname ${f.host}` : 'Noch nicht verbunden: Karte öffnen für die Einrichtung'),
+          : h('span', { class: 'muted small' }, f.connected ? 'Noch keine Repositories' : f.host ? `Mit glab anmelden (glab auth login --hostname ${f.host}) oder ein eigenes Token in den Einstellungen` : 'Noch nicht verbunden: Karte öffnen für die Einrichtung'),
         h('span', { class: 'forge-counts' }, counts.map(([c, t, cls]) => h('span', { class: cls || null }, h('strong', null, c), ` ${t}`))))),
       h('span', { class: 'forge-compact-count muted small' }, f.repos.length ? `${f.repos.length}` : ''));
   }));
@@ -770,7 +770,7 @@ function gitlabPanel(host) {
   const target = host ?? '<deine-instanz>';
   return h('section', { class: 'panel section forge-setup' },
     h('h2', null, host ? `GitLab ${host} verbinden` : 'GitLab verbinden'),
-    h('p', { class: 'muted', style: 'margin:0' }, 'Die App liest und pflegt GitLab-Projekte wie GitHub-Repositories: Status, Merge Requests mit Renovate, Releases, README und Wiki, Sicherheitsprüfung. Angemeldet wird über die GitLab-CLI; die App nutzt ihren Token und speichert selbst keinen, Claude bekommt ihn nie.'),
+    h('p', { class: 'muted', style: 'margin:0' }, 'Die App liest und pflegt GitLab-Projekte wie GitHub-Repositories: Status, Merge Requests mit Renovate, Releases, README und Wiki, Sicherheitsprüfung. Angemeldet wird über die GitLab-CLI (die App nutzt ihren Token) oder mit einem eigenen Token unter Einstellungen → Zugänge → „Instanz mit Token hinzufügen“; Claude bekommt den Token nie.'),
     h('ol', { class: 'plain-list steps-list' },
       h('li', null, 'GitLab-CLI installieren: ', h('code', { class: 'selectable' }, 'brew install glab')),
       h('li', null, 'An der Instanz anmelden: ', h('code', { class: 'selectable' }, `glab auth login --hostname ${target}`)),
@@ -1297,9 +1297,9 @@ function securitySection(r) {
     report.archived ? h('div', { class: 'note' }, 'Archiviert: Einstellungen lassen sich nicht ändern.')
       : report.admin !== true && h('div', { class: 'note orange' },
         gitlabHost(r.repo)
-          ? (report.admin == null ? `Ohne glab-Anmeldung ist vieles nicht lesbar, und nichts lässt sich in der App beheben (glab auth login --hostname ${gitlabHost(r.repo)}).`
+          ? (report.admin == null ? `Ohne glab-Anmeldung ist vieles nicht lesbar, und nichts lässt sich in der App beheben (glab auth login --hostname ${gitlabHost(r.repo)}, oder ein eigenes Token in den Einstellungen).`
             : 'Ohne Maintainer-Rechte sind manche Einstellungen nicht lesbar, und nichts lässt sich in der App beheben.')
-          : report.admin == null ? 'Ohne gh-Anmeldung ist vieles nicht lesbar, und nichts lässt sich in der App beheben (gh auth login).'
+          : report.admin == null ? 'Ohne gh-Anmeldung ist vieles nicht lesbar, und nichts lässt sich in der App beheben (gh auth login, oder ein eigenes Token in den Einstellungen).'
             : 'Ohne Admin-Rechte sind manche Einstellungen nicht lesbar, und nichts lässt sich in der App beheben.'),
     findings.length ? h('div', { class: 'items' }, findings.map((c) => securityItem(r, c))) : h('div', { class: 'note green' }, 'Kein Befund.'),
     rest.length > 0 && h('details', { class: 'sec-more' },
@@ -2505,6 +2505,91 @@ function settingsDialog() {
     }
     s.busy = false; render();
   };
+  // Own tokens: the form for GitHub or one GitLab instance; the token lives only in this field's state until saved.
+  const tok = { forge: null, host: '', scheme: 'https', storage: 'keychain', token: '', busy: false, error: null, ok: null, lockHost: false };
+  const tokClose = () => { tok.forge = null; tok.token = ''; tok.error = null; tok.busy = false; render(); };
+  const storageLabel = (storage) => (storage === 'app' ? 'in der App' : 'Schlüsselbund');
+  const tokOpen = (kind, host = '', scheme = 'https', storage = 'keychain') => {
+    Object.assign(tok, { forge: kind, host, scheme, storage: storage === 'app' ? 'app' : 'keychain', token: '', error: null, ok: null, busy: false, lockHost: !!host });
+    render();
+    queueMicrotask(() => document.getElementById(kind === 'gitlab' && !host ? 's-tok-host' : 's-tok-token')?.focus());
+  };
+  const tokSave = async () => {
+    const host = tok.host.trim();
+    if (tok.forge === 'gitlab' && !host) { tok.error = 'Bitte die Instanz angeben, z. B. gitlab.example.com.'; render(); return; }
+    if (!tok.token.trim()) { tok.error = 'Bitte das Token einfügen.'; render(); return; }
+    tok.busy = true; tok.error = null; render();
+    try {
+      const login = await invoke('save_forge_token', {
+        forge: tok.forge === 'github' ? { kind: 'github' } : { kind: 'gitlab', host },
+        token: tok.token.trim(), scheme: tok.forge === 'gitlab' ? tok.scheme : null, storage: tok.storage,
+      });
+      const kind = tok.forge;
+      tok.forge = null; tok.token = ''; tok.busy = false;
+      tok.ok = { kind, host, text: `Angemeldet als ${login}` };
+      await refresh();
+    } catch (error) {
+      tok.busy = false; tok.token = ''; tok.error = String(error);
+    }
+    render();
+  };
+  const tokForget = async (forgeArg) => {
+    tok.ok = null;
+    if (await act('forget_forge_token', { forge: forgeArg })) await refresh();
+    render();
+  };
+  const tokForm = (kind) => h('div', { class: 'field-stack' },
+    kind === 'gitlab' && h('div', { class: 'field-row' }, h('label', { for: 's-tok-host' }, 'Instanz'),
+      h('div', { class: 'line' },
+        h('input', { id: 's-tok-host', type: 'text', value: tok.host, spellcheck: 'false', autocomplete: 'off', disabled: tok.busy || tok.lockHost,
+          placeholder: 'gitlab.example.com oder 192.168.1.5:8929', oninput: (e) => { tok.host = e.target.value; } }),
+        h('select', { id: 's-tok-scheme', 'aria-label': 'Verbindung', disabled: tok.busy, onchange: (e) => { tok.scheme = e.target.value; } },
+          h('option', { value: 'https', selected: tok.scheme === 'https' }, 'https'),
+          h('option', { value: 'http', selected: tok.scheme === 'http' }, 'http (ohne TLS, nur im eigenen Netz)')))),
+    h('div', { class: 'field-row' }, h('label', { for: 's-tok-token' }, 'Token'),
+      h('input', { id: 's-tok-token', type: 'password', value: tok.token, spellcheck: 'false', autocomplete: 'off', disabled: tok.busy,
+        oninput: (e) => { tok.token = e.target.value; } })),
+    h('div', { class: 'field-row' }, h('label', { for: 's-tok-storage' }, 'Ablage'),
+      h('select', { id: 's-tok-storage', disabled: tok.busy, onchange: (e) => { tok.storage = e.target.value; } },
+        h('option', { value: 'keychain', selected: tok.storage !== 'app' }, 'Schlüsselbund (empfohlen)'),
+        h('option', { value: 'app', selected: tok.storage === 'app' }, 'In der App (Datei im App-Ordner, nur für dich lesbar)'))),
+    h('div', { class: 'note' }, 'Im Schlüsselbund kann macOS beim ersten Zugriff nachfragen; in der App liegt das Token als Datei im Datenordner der App.'),
+    h('div', { class: 'note' }, kind === 'github'
+      ? 'Erstellen unter GitHub: Einstellungen → Developer settings → Personal access tokens; Scopes „repo“ und „workflow“.'
+      : 'Erstellen unter GitLab: Benutzereinstellungen → Zugriffstoken; Scope „api“.'),
+    tok.error && h('div', { class: 'note error-text', role: 'alert' }, tok.error),
+    h('div', { class: 'line' },
+      button(tok.busy ? 'Wird geprüft …' : 'Prüfen und sichern', tokSave, { cls: 'primary', disabled: tok.busy, id: 's-tok-save' }),
+      button('Abbrechen', tokClose, { disabled: tok.busy })));
+  const githubRow = () => {
+    const open = tok.forge === 'github';
+    return row('GitHub', h('div', { class: 'field-stack' },
+      view.config.githubTokenSaved
+        ? h('div', { class: 'line' }, h('span', { class: 'muted spacer' }, `über eigenes Token angemeldet (${storageLabel(view.config.githubTokenStorage)})`),
+          !open && button('Token ersetzen …', () => tokOpen('github', '', 'https', view.config.githubTokenStorage)),
+          button('Token entfernen', () => tokForget({ kind: 'github' })))
+        : h('div', { class: 'line' },
+          h('span', { class: `spacer ${view.signedIn === false ? 'orange' : 'muted'}` }, view.signedIn === false
+            ? 'GitHub-CLI nicht angemeldet: im Terminal gh auth login, oder ein eigenes Token verwenden'
+            : view.signedIn ? 'über die GitHub-CLI (gh) angemeldet; die App nutzt ihren Token, Claude nie' : 'wird beim ersten Lesen geprüft (GitHub-CLI gh)'),
+          !open && button('Eigenes Token …', () => tokOpen('github'))),
+      tok.ok?.kind === 'github' && h('div', { class: 'note ok-text' }, tok.ok.text),
+      open && tokForm('github')));
+  };
+  const gitlabRow = () => {
+    const hosts = view.gitlabHosts ?? [];
+    const own = view.config.gitlabInstances ?? [];
+    return row('GitLab', h('div', { class: 'field-stack' },
+      hosts.length
+        ? hosts.map((g) => h('div', { class: 'line' },
+          h('span', { class: `spacer ${!g.ownToken && g.signedIn === false ? 'orange' : 'muted'}` }, `${g.host}: ${g.ownToken ? `über eigenes Token angemeldet (${storageLabel(g.ownStorage)})`
+            : g.signedIn === true ? 'über glab angemeldet' : g.signedIn === false ? `nicht angemeldet (glab auth login --hostname ${g.host}, oder ein eigenes Token)` : g.configured ? 'in glab eingerichtet' : 'wird beim ersten Lesen geprüft'}`),
+          g.ownToken && button('Token ersetzen …', () => tokOpen('gitlab', g.host, own.find((i) => i.host === g.host)?.scheme ?? 'https', own.find((i) => i.host === g.host)?.storage ?? g.ownStorage)),
+          g.ownToken && button('Token entfernen', () => tokForget({ kind: 'gitlab', host: g.host }))))
+        : h('div', { class: 'muted' }, 'keine Instanz; mit der GitLab-CLI anmelden (glab auth login --hostname <instanz>) oder ein eigenes Token verwenden'),
+      tok.ok?.kind === 'gitlab' && h('div', { class: 'note ok-text' }, `${tok.ok.host}: ${tok.ok.text}`),
+      tok.forge === 'gitlab' ? tokForm('gitlab') : h('div', { class: 'line' }, button('Instanz mit Token hinzufügen …', () => tokOpen('gitlab')))));
+  };
   const dlg = openDialog('Einstellungen', (close, rerender) => {
     render = rerender;
     const password = s.auth === 'password';
@@ -2518,12 +2603,8 @@ function settingsDialog() {
         h('h2', null, 'Einstellungen'),
         section('general', 'Allgemein',
           h('fieldset', null, h('legend', null, 'Zugänge'),
-            row('GitHub', h('div', { class: view.signedIn === false ? 'orange' : 'muted' }, view.signedIn === false
-              ? 'GitHub-CLI nicht angemeldet: im Terminal gh auth login'
-              : view.signedIn ? 'über die GitHub-CLI (gh) angemeldet; die App nutzt ihren Token, Claude nie' : 'wird beim ersten Lesen geprüft (GitHub-CLI gh)')),
-            row('GitLab', h('div', { class: (view.gitlabHosts ?? []).some((g) => g.signedIn === false) ? 'orange' : 'muted' }, (view.gitlabHosts ?? []).length
-              ? (view.gitlabHosts ?? []).map((g) => `${g.host}: ${g.signedIn === true ? 'über glab angemeldet' : g.signedIn === false ? `nicht angemeldet (glab auth login --hostname ${g.host})` : g.configured ? 'in glab eingerichtet' : 'wird beim ersten Lesen geprüft'}`).join(' · ')
-              : 'keine Instanz; mit der GitLab-CLI anmelden: glab auth login --hostname <instanz>')),
+            githubRow(),
+            gitlabRow(),
             row('Repo-Ordner', h('div', { class: 'line' }, text('workspaceDir', { id: 's-workspace', placeholder: `${view.workspaceDisplay} (automatisch)` }),
               button('Auswählen …', async () => { const p = await call('pick_folder'); if (p) { s.workspaceDir = p; repoCache = null; render(); } }, { id: 's-workspace-pick' }))),
             h('div', { class: 'note' }, 'Aus diesem Ordner bietet „Repositories auswählen“ die lokalen Klone an; neue Klone legt die App hier an.')),

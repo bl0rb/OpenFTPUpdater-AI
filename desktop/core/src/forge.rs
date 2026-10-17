@@ -3,9 +3,9 @@
 //! a dot or a colon, a host always does, so the first segment decides. Keys, jobs and settings of
 //! GitHub repositories stay exactly as they were.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Forge {
     Github,
@@ -51,6 +51,11 @@ impl Forge {
         }
     }
 
+    /// The CLI login, or an own token entered in the settings: for errors that tell the user to sign in.
+    pub fn sign_in_hint(&self) -> String {
+        format!("{} oder ein eigenes Token in den Einstellungen", self.login_hint())
+    }
+
     /// Whether the CLI is signed in, `None` while unknown (nothing asked yet).
     pub fn signed_in(&self) -> Option<bool> {
         match self {
@@ -59,7 +64,7 @@ impl Forge {
         }
     }
 
-    /// Asks the CLI for its token once; `false` when it is not signed in.
+    /// Asks for the token (own, else the CLI's) once; `false` when it is not signed in.
     pub fn sign_in_check(&self) -> bool {
         match self {
             Forge::Github => crate::github::token().is_some(),
@@ -87,7 +92,7 @@ pub fn path(repo: &str) -> &str {
 /// The URL `git clone` uses (the user's own git credentials).
 pub fn clone_url(repo: &str) -> String {
     match crate::gitlab::project(repo) {
-        Some(p) => format!("https://{}/{}.git", p.host, p.path),
+        Some(p) => format!("{}://{}/{}.git", crate::gitlab::scheme(&p.host), p.host, p.path),
         None => format!("https://github.com/{repo}.git"),
     }
 }
@@ -95,7 +100,7 @@ pub fn clone_url(repo: &str) -> String {
 /// The URL of the repository's wiki, a git repository of its own on both services.
 pub fn wiki_url(repo: &str) -> String {
     match crate::gitlab::project(repo) {
-        Some(p) => format!("https://{}/{}.wiki.git", p.host, p.path),
+        Some(p) => format!("{}://{}/{}.wiki.git", crate::gitlab::scheme(&p.host), p.host, p.path),
         None => format!("https://github.com/{repo}.wiki.git"),
     }
 }
@@ -103,7 +108,7 @@ pub fn wiki_url(repo: &str) -> String {
 /// The repository's page in the browser.
 pub fn web_url(repo: &str) -> String {
     match crate::gitlab::project(repo) {
-        Some(p) => format!("https://{}/{}", p.host, p.path),
+        Some(p) => p.web_url(),
         None => format!("https://github.com/{repo}"),
     }
 }
@@ -123,6 +128,10 @@ mod tests {
         assert_eq!(path("gitlab.example.com/g/sub/app"), "g/sub/app");
         assert_eq!(path("o/app"), "o/app");
         assert_eq!(clone_url("gitlab.example.com/g/app"), "https://gitlab.example.com/g/app.git");
+        assert_eq!(Forge::Github.sign_in_hint(), "gh auth login oder ein eigenes Token in den Einstellungen");
+        let forge: Forge = serde_json::from_str(r#"{"kind":"gitlab","host":"git.example.com"}"#).unwrap();
+        assert_eq!(forge, Forge::Gitlab { host: "git.example.com".into() });
+        assert_eq!(serde_json::from_str::<Forge>(r#"{"kind":"github"}"#).unwrap(), Forge::Github);
         assert_eq!(wiki_url("o/app"), "https://github.com/o/app.wiki.git");
         assert_eq!(wiki_url("gitlab.example.com/g/app"), "https://gitlab.example.com/g/app.wiki.git");
     }

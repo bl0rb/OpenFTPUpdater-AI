@@ -121,6 +121,19 @@ pub struct ReleaseRule {
     pub publishes_release: bool,
 }
 
+/// A GitLab instance the user entered an own token for, and how it is reached. Exists only while
+/// that token is stored.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitlabInstance {
+    /// Lower case, with port if any, like `gitlab.example.com` or `192.168.178.88:8929`.
+    pub host: String,
+    /// `https`, or `http` for a self-hosted instance without TLS.
+    pub scheme: String,
+    /// Where its token is kept.
+    #[serde(default)]
+    pub storage: crate::tokens::Storage,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Config {
@@ -144,6 +157,13 @@ pub struct Config {
     pub skipped_products: std::collections::BTreeSet<String>,
     /// No look for a new version of the app at start (e.g. when IT distributes it).
     pub no_update_check: bool,
+    /// Whether an own GitHub token is stored. Kept here so that showing the window never
+    /// reads a token.
+    pub github_token_saved: bool,
+    /// Where the own GitHub token is kept.
+    pub github_token_storage: crate::tokens::Storage,
+    /// GitLab instances with an own token (keychain or app).
+    pub gitlab_instances: Vec<GitlabInstance>,
 }
 
 impl Config {
@@ -223,6 +243,7 @@ pub fn parse_budget(text: &str) -> Result<Option<f64>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tokens::Storage;
 
     #[test]
     fn only_an_empty_budget_removes_the_limit() {
@@ -253,5 +274,22 @@ mod tests {
         assert_eq!(config.project_dir, "~/site");
         let repo: ManagedRepo = serde_json::from_str(r#"{"repo":"o/a"}"#).unwrap();
         assert!(repo.enabled && repo.release.is_none(), "no release rule is guessed");
+        assert!(!config.github_token_saved && config.gitlab_instances.is_empty(), "no own token unless saved");
+        assert_eq!(config.github_token_storage, Storage::Keychain);
+        let old: GitlabInstance = serde_json::from_str(r#"{"host":"h","scheme":"https"}"#).unwrap();
+        assert_eq!(old.storage, Storage::Keychain, "tokens saved before the choice are in the keychain");
+    }
+
+    #[test]
+    fn own_token_flags_round_trip_and_never_hold_a_secret() {
+        let mut config = Config { github_token_saved: true, github_token_storage: Storage::App, ..Config::default() };
+        config.gitlab_instances.push(GitlabInstance { host: "192.168.178.88:8929".into(), scheme: "http".into(), storage: Storage::Keychain });
+        let json = serde_json::to_value(&config).unwrap();
+        assert_eq!(json["githubTokenSaved"], true);
+        assert_eq!(json["gitlabInstances"][0], serde_json::json!({ "host": "192.168.178.88:8929", "scheme": "http", "storage": "keychain" }));
+        assert_eq!(json["githubTokenStorage"], "app");
+        let back: Config = serde_json::from_value(json).unwrap();
+        assert!(back.github_token_saved && back.github_token_storage == Storage::App);
+        assert_eq!(back.gitlab_instances, config.gitlab_instances);
     }
 }

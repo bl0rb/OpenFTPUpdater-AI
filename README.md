@@ -4,11 +4,11 @@
 
 # OpenReleasePilot
 
-Desktop app that looks after the GitHub repositories you choose, with Claude Code doing the work and
-you making the decisions. It reads their state, reviews and merges pull requests, cleans up merged
+Desktop app that looks after the repositories you choose on GitHub and GitLab, with Claude Code doing the
+work and you making the decisions. It reads their state, reviews and merges pull and merge requests, cleans up merged
 branches, tags patch releases and waits for the published release, keeps a README, other documentation
-or a GitHub wiki up to date, and, if you have one, updates and publishes a static website as the last
-step. Everything that changes something on GitHub, in a wiki or on a website is first shown as a
+or a wiki up to date, and, if you have one, updates and publishes a static website as the last
+step. Everything that changes something on GitHub, GitLab, in a wiki or on a website is first shown as a
 concrete proposal and only carried out after your approval.
 
 The app has three areas, switched in the toolbar, and its settings under **Einstellungen** (settings):
@@ -241,6 +241,36 @@ After approval, and only for exactly the approved files:
 Content can be updated without a new release: with the basis "current state", the job pins the head of
 the default branch and does not skip the target for lack of a new version.
 
+## GitLab
+
+GitLab projects, on gitlab.com or a self-hosted instance, are looked after with the same rules as GitHub
+repositories. The start view shows one card per service: GitHub and each GitLab instance, with its
+sign-in state, one square per repository and the counts that need you. A click slides the cards into a
+strip and opens that service's overview below.
+
+- **Sign-in:** through the GitLab CLI, `glab auth login --hostname <instance>`. The app asks `glab` for the
+  instance's token, stores none itself and never hands it to Claude Code. "Status aktualisieren" asks
+  again, so a sign-in in between counts at once.
+- **Identity:** a GitLab project is `host/group/…/project` in the app, e.g.
+  `gitlab.example.com/werk/tools/app`. Local clones with such an origin (HTTPS or SSH) appear under
+  "Repositories auswählen"; without a clone, enter the project's name or address there.
+- **Status:** the newest pipeline of exactly the commit (one waiting for a manual job or skipped counts
+  as unclear, not as green), open merge requests, releases and tags.
+- **Care:** Claude reviews the merge requests read-only with `glab`. Merges go through the API with the
+  project's merge method and the expected commit (`sha`), so a push in between makes GitLab refuse.
+  Renovate counts as the update bot; Renovate rebuilds a conflicting merge request after the label
+  "rebase". Cleanup, tagging on a green pipeline and waiting for the GitLab release work as on GitHub.
+- **Content:** README and documentation as one commit on a new branch from exactly the base commit plus a
+  merge request; the wiki through its own Git repository (`<project>.wiki.git`), pushed without force.
+  `.gitlab-ci.yml` and `.gitlab/`, like `.github`, are never writable for content targets or Claude,
+  because a pushed branch runs them.
+- **Security check:** protection of the default branch (direct pushes, force push), a green pipeline as
+  merge requirement, the push rule against secrets (GitLab Premium), secret detection in
+  `.gitlab-ci.yml`, a Renovate configuration, access by other projects' CI job tokens, deploy keys with
+  write access, SECURITY.md for public projects. What the tier or the rights do not show is "not
+  checkable". Fixes for maintainers: protect the default branch, block force pushes, require a green
+  pipeline, the push rule against secrets, restrict job token access.
+
 ## Website (optional)
 
 A website is an optional target, not the configuration root. It is set up under **Einstellungen →
@@ -293,6 +323,8 @@ repository; it does not change which repositories the app manages.
   instead of counting as "nothing new".
 - From 0.3.0: a tag needs CI that positively passed for exactly the tagged commit; repositories without CI
   get no automatic tag.
+- After 0.3.6: GitLab projects (gitlab.com and self-hosted instances, sign-in through `glab`); the start
+  view shows one card per service. See [GitLab](#gitlab).
 - From 0.3.5: "Einrichtung" is now **Einstellungen**, "Läufe" is **Aufträge**, and the website steps are
   Prüfen, Inhalte aktualisieren, Veröffentlichen and Live-Seite prüfen. "Verbindung testen" (test
   connection) no longer saves anything; only "Sichern" (save) applies the settings, including a server
@@ -358,7 +390,8 @@ suchen** or when a beta is installed. Development builds do not check.
 - On the machine: `git` with access to your repositories, [Claude Code](https://claude.com/claude-code)
   signed in, the GitHub CLI `gh` signed in for care jobs (it also raises the GitHub API limit from 60 to
   5000 requests per hour; the token is used by the app, and handed to the website build as
-  `GITHUB_TOKEN`, but never to Claude Code)
+  `GITHUB_TOKEN`, but never to Claude Code), and for GitLab projects the GitLab CLI `glab` signed in
+  (`brew install glab`, then `glab auth login --hostname <instance>`)
 - Only for a website: Node.js/npm (or whatever its build needs) and an SFTP account for the web space
 
 The app starts from the Finder and asks the login shell for the user's `PATH` once, so tools
@@ -450,9 +483,12 @@ denied calls are listed after the run. Each kind of run has its own rights:
 - **Pull request review:** read only: the clone, `gh pr view|diff|checks|list`, `gh release`, reading
   `gh api` calls, the web for release notes. No edits, no `gh pr merge|close|comment`, no write calls.
   The app merges, closes and comments.
+- **Merge request review (GitLab):** read only as well: `glab mr view|diff|list`, `glab release`, reading
+  `glab api projects/…` calls; no `glab mr merge|close|note|approve|update|rebase`, no `glab api` with a
+  method or fields.
 - **Content (README, documentation, wiki):** reading and editing files in the app's work folder (the
-  target's clone) and reading the pinned sources beside it; skills. No shell, no web, nothing in `.git`
-  or `.github`. What counts is decided afterwards by the app (see Content targets).
+  target's clone) and reading the pinned sources beside it; skills. No shell, no web, nothing in `.git`,
+  `.github`, `.gitlab` or `.gitlab-ci.yml`. What counts is decided afterwards by the app (see Content targets).
 - **Website update:** as follows.
 
 For the website, Claude Code runs as `claude -p … --permission-mode acceptEdits` in the project folder:

@@ -582,13 +582,20 @@ pub fn care_result(items: &[CareItem]) -> (StepState, String) {
     let (done, already, skipped, failed) =
         (count(ItemOutcome::Done), count(ItemOutcome::AlreadyDone), count(ItemOutcome::Skipped), count(ItemOutcome::Failed));
     let of = |kind: ItemKind, outcome: ItemOutcome| counted.iter().filter(|i| i.kind == kind && i.outcome == Some(outcome)).count();
+    // PRs on GitHub, MRs on GitLab; a job with both says both.
+    let gitlab = counted.iter().filter(|i| crate::gitlab::project(&i.repo).is_some()).count();
+    let word = match gitlab {
+        0 => "PR",
+        n if n == counted.len() => "MR",
+        _ => "PR/MR",
+    };
     let mut parts = Vec::new();
     for (kind, one, many) in [
-        (ItemKind::Merge, "PR gemergt", "PRs gemergt"),
-        (ItemKind::Close, "PR geschlossen", "PRs geschlossen"),
-        (ItemKind::Rebase, "Rebase angestoßen", "Rebases angestoßen"),
-        (ItemKind::Branch, "Branch gelöscht", "Branches gelöscht"),
-        (ItemKind::LocalBranch, "lokaler Branch gelöscht", "lokale Branches gelöscht"),
+        (ItemKind::Merge, format!("{word} gemergt"), format!("{word}s gemergt")),
+        (ItemKind::Close, format!("{word} geschlossen"), format!("{word}s geschlossen")),
+        (ItemKind::Rebase, "Rebase angestoßen".to_owned(), "Rebases angestoßen".to_owned()),
+        (ItemKind::Branch, "Branch gelöscht".to_owned(), "Branches gelöscht".to_owned()),
+        (ItemKind::LocalBranch, "lokaler Branch gelöscht".to_owned(), "lokale Branches gelöscht".to_owned()),
     ] {
         let n = of(kind, ItemOutcome::Done);
         if n > 0 {
@@ -636,11 +643,11 @@ pub fn care_items(set: &PlanSet) -> Vec<CareItem> {
         };
         for (action, kind) in [(Action::Close, ItemKind::Close), (Action::Merge, ItemKind::Merge), (Action::Rebase, ItemKind::Rebase)] {
             for pr in plan.prs.iter().filter(|pr| pr.action == action) {
-                items.push(item(kind, pr.number.to_string(), format!("PR #{}", pr.number), pr.title.clone()));
+                items.push(item(kind, pr.number.to_string(), crate::repocare::request_ref(&plan.repo, pr.number), pr.title.clone()));
             }
         }
         for pr in plan.prs.iter().filter(|pr| pr.action == Action::Keep && pr.optional) {
-            items.push(CareItem { optional: true, ..item(ItemKind::Merge, pr.number.to_string(), format!("PR #{}", pr.number), pr.title.clone()) });
+            items.push(CareItem { optional: true, ..item(ItemKind::Merge, pr.number.to_string(), crate::repocare::request_ref(&plan.repo, pr.number), pr.title.clone()) });
         }
         if let Some(tag) = &plan.tag {
             items.push(item(ItemKind::Tag, tag.clone(), format!("Tag {tag}"), "im Release-Schritt".into()));

@@ -143,6 +143,9 @@ pub(crate) fn encode_ref(name: &str) -> String {
 
 /// Tag of the newest published release (no pre-releases, no drafts); `None` if there is none.
 pub fn latest_release(repo: &str) -> Result<Option<String>> {
+    if let Some(p) = crate::gitlab::project(repo) {
+        return crate::gitlab::latest_release(&p);
+    }
     let Some(json) = get(&format!("repos/{repo}/releases/latest"))? else { return Ok(None) };
     match json["tag_name"].as_str() {
         Some(tag) if !tag.is_empty() => Ok(Some(tag.to_owned())),
@@ -152,6 +155,9 @@ pub fn latest_release(repo: &str) -> Result<Option<String>> {
 
 /// Whether `tag` has a release that `latest_release` can report: published, no pre-release.
 pub fn has_published_release(repo: &str, tag: &str) -> Result<bool> {
+    if let Some(p) = crate::gitlab::project(repo) {
+        return crate::gitlab::has_published_release(&p, tag);
+    }
     let Some(json) = get(&format!("repos/{repo}/releases/tags/{}", encode_ref(tag)))? else { return Ok(false) };
     Ok(json["draft"].as_bool() != Some(true) && json["prerelease"].as_bool() != Some(true))
 }
@@ -289,7 +295,7 @@ pub(crate) mod mock {
         MOCK.with(|m| m.borrow().as_ref().map(|m| m.writes.iter().map(|(w, _)| w.clone()).collect()).unwrap_or_default())
     }
 
-    pub(super) fn get(path: &str) -> Option<Result<Option<Value>>> {
+    pub(crate) fn get(path: &str) -> Option<Result<Option<Value>>> {
         MOCK.with(|m| {
             let mut m = m.borrow_mut();
             let mock = m.as_mut()?;
@@ -314,7 +320,7 @@ pub(crate) mod mock {
         MOCK.with(|m| m.borrow().as_ref()?.writes.iter().find(|(w, _)| w == write).and_then(|(_, body)| body.clone()))
     }
 
-    pub(super) fn send(method: &str, path: &str, body: Option<&Value>) -> Option<Result<(u16, Value)>> {
+    pub(crate) fn send(method: &str, path: &str, body: Option<&Value>) -> Option<Result<(u16, Value)>> {
         MOCK.with(|m| {
             let mut m = m.borrow_mut();
             let mock = m.as_mut()?;

@@ -4,11 +4,11 @@
 
 # OpenReleasePilot
 
-Desktop-App, die sich um die GitHub-Repositories kümmert, die du auswählst: Claude Code erledigt die
-Arbeit, du triffst die Entscheidungen. Sie liest den Zustand, prüft und mergt Pull Requests, räumt
+Desktop-App, die sich um die Repositories auf GitHub und GitLab kümmert, die du auswählst: Claude Code
+erledigt die Arbeit, du triffst die Entscheidungen. Sie liest den Zustand, prüft und mergt Pull bzw. Merge Requests, räumt
 gemergte Branches auf, taggt Patch-Releases und wartet auf das veröffentlichte Release, hält eine README,
-weitere Dokumentation oder ein GitHub-Wiki aktuell und aktualisiert und veröffentlicht, wenn vorhanden,
-als letzten Schritt eine statische Website. Alles, was auf GitHub, in einem Wiki oder auf einer Website
+weitere Dokumentation oder ein Wiki aktuell und aktualisiert und veröffentlicht, wenn vorhanden,
+als letzten Schritt eine statische Website. Alles, was auf GitHub, GitLab, in einem Wiki oder auf einer Website
 etwas ändert, zeigt die App vorher als konkreten Vorschlag und führt es erst nach deiner Freigabe aus.
 
 Die App hat drei Bereiche, umschaltbar in der Kopfleiste, und ihre Einstellungen unter **Einstellungen**:
@@ -252,6 +252,37 @@ Nach der Freigabe, und nur mit genau den freigegebenen Dateien:
 Inhalte lassen sich auch ohne neues Release aktualisieren: Mit der Basis „aktueller Stand“ hält der
 Auftrag den HEAD des Default-Branches fest und lässt das Ziel nicht mangels neuer Version aus.
 
+## GitLab
+
+GitLab-Projekte, auf gitlab.com oder einer eigenen Instanz, pflegt die App nach denselben Regeln wie
+GitHub-Repositories. Die Startansicht zeigt je Dienst eine Karte: GitHub und jede GitLab-Instanz mit
+Anmeldestatus, einem Quadrat je Repository und den Zahlen, die Aufmerksamkeit brauchen. Ein Klick
+schiebt die Karten zu einer Leiste zusammen und öffnet darunter die Übersicht dieses Dienstes.
+
+- **Anmeldung:** über die GitLab-CLI, `glab auth login --hostname <instanz>`. Die App fragt `glab` nach
+  dem Token der Instanz, speichert selbst keinen und gibt ihn nie an Claude Code. „Status aktualisieren“
+  fragt erneut, eine Anmeldung danach zählt also sofort.
+- **Identität:** ein GitLab-Projekt heißt in der App `host/gruppe/…/projekt`, z. B.
+  `gitlab.example.com/werk/tools/app`. Lokale Klone mit diesem Origin (HTTPS oder SSH) erscheinen unter
+  „Repositories auswählen“; ohne Klon dort den Namen oder die Adresse des Projekts eingeben.
+- **Status:** die neueste Pipeline genau des Commits (wartet sie auf einen manuellen Job oder wurde sie
+  übersprungen, gilt sie als unklar, nicht als grün), offene Merge Requests, Releases und Tags.
+- **Pflege:** Claude bewertet die Merge Requests nur lesend mit `glab`. Gemergt wird über die API mit der
+  Merge-Methode des Projekts und dem erwarteten Commit (`sha`), sodass ein Push dazwischen den Merge
+  ablehnt. Renovate gilt als Update-Bot; einen Renovate-MR mit Konflikt baut Renovate nach dem Label
+  „rebase“ neu auf. Aufräumen, Tag auf grüner Pipeline und das Warten auf das GitLab-Release laufen wie
+  bei GitHub.
+- **Inhalte:** README und Dokumentation als ein Commit auf einem neuen Branch genau vom Ausgangs-Commit
+  und ein Merge Request; das Wiki über sein eigenes Git-Repository (`<projekt>.wiki.git`), Push ohne
+  Force. `.gitlab-ci.yml` und `.gitlab/` sind, wie `.github`, für Inhaltsziele und Claude nie schreibbar,
+  weil ein gepushter Branch sie ausführt.
+- **Sicherheitsprüfung:** Schutz des Default-Branches (direkte Pushes, Force-Push), grüne Pipeline als
+  Merge-Voraussetzung, Push-Regel gegen Secrets (GitLab Premium), Secret Detection in der
+  `.gitlab-ci.yml`, Renovate-Konfiguration, Zugriff fremder CI-Job-Tokens, Deploy-Keys mit Schreibrecht,
+  SECURITY.md bei öffentlichen Projekten. Was der Tarif oder die Rechte nicht zeigen, steht als „nicht
+  prüfbar“ da. Behebungen gibt es für Maintainer: Default-Branch schützen, Force-Push sperren, grüne
+  Pipeline verlangen, Push-Regel gegen Secrets, Job-Token-Zugriff beschränken.
+
 ## Website (optional)
 
 Eine Website ist ein optionales Ziel, nicht die Wurzel der Konfiguration. Sie wird unter
@@ -309,6 +340,8 @@ Einstellungen, nicht im Website-Repository; welche Repositories die App verwalte
   „nichts Neues“ zu gelten.
 - Seit 0.3.0: Ein Tag braucht eine CI, die für genau den getaggten Commit erfolgreich war; Repositories
   ohne CI bekommen keinen automatischen Tag.
+- Nach 0.3.6: GitLab-Projekte (gitlab.com und eigene Instanzen, Anmeldung über `glab`); die
+  Startansicht zeigt je Dienst eine Karte. Siehe [GitLab](#gitlab).
 - Seit 0.3.5: „Einrichtung“ heißt **Einstellungen**, „Läufe“ heißt **Aufträge**, die Website-Schritte
   heißen Prüfen, Inhalte aktualisieren, Veröffentlichen und Live-Seite prüfen. „Verbindung testen“
   speichert nichts mehr; erst „Sichern“ übernimmt die Einstellungen, auch einen dabei bestätigten
@@ -375,7 +408,8 @@ gültige Signatur wird abgelehnt; danach die App neu starten. Beta-Versionen (`X
 - Auf dem Rechner: `git` mit Zugriff auf deine Repositories, angemeldetes
   [Claude Code](https://claude.com/claude-code), für Pflegeaufträge die angemeldete GitHub-CLI `gh` (sie
   hebt auch das GitHub-API-Limit von 60 auf 5000 Anfragen pro Stunde; das Token nutzt die App selbst und
-  gibt es als `GITHUB_TOKEN` an den Build der Website, aber nie an Claude Code)
+  gibt es als `GITHUB_TOKEN` an den Build der Website, aber nie an Claude Code), für GitLab-Projekte die
+  angemeldete GitLab-CLI `glab` (`brew install glab`, dann `glab auth login --hostname <instanz>`)
 - Nur für eine Website: Node.js/npm (oder was ihr Build braucht) und ein SFTP-Zugang zum Webspace
 
 Die App startet aus dem Finder und fragt einmal die Login-Shell nach dem `PATH`, damit
@@ -467,9 +501,12 @@ wird abgelehnt, und abgelehnte Aufrufe stehen nach dem Lauf im Log. Jede Art von
 - **PR-Prüfung:** nur lesend: der Klon, `gh pr view|diff|checks|list`, `gh release`, lesende
   `gh api`-Aufrufe, das Web für Release-Notes. Keine Änderungen, kein `gh pr merge|close|comment`, keine
   schreibenden Aufrufe. Mergen, schließen und kommentieren macht die App.
+- **MR-Prüfung (GitLab):** ebenso nur lesend: `glab mr view|diff|list`, `glab release`, lesende
+  `glab api projects/…`-Aufrufe; kein `glab mr merge|close|note|approve|update|rebase`, kein `glab api`
+  mit Methode oder Feldern.
 - **Inhalte (README, Dokumentation, Wiki):** Dateien im Arbeitsordner der App (dem Klon des Ziels) lesen
   und bearbeiten, die festgehaltenen Quellen daneben lesen; Skills. Keine Shell, kein Web, nichts in
-  `.git` oder `.github`. Was zählt, entscheidet danach die App (siehe Inhaltsziele).
+  `.git`, `.github`, `.gitlab` oder `.gitlab-ci.yml`. Was zählt, entscheidet danach die App (siehe Inhaltsziele).
 - **Website-Update:** wie folgt.
 
 Für die Website läuft Claude Code als `claude -p … --permission-mode acceptEdits` im Projektordner:

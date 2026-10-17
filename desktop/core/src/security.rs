@@ -41,6 +41,14 @@ pub enum Fix {
     CodeScanning,
     WorkflowReadOnly,
     PrivateReporting,
+    /// GitLab: protect the default branch (no direct push, merges by developers, no force push).
+    ProtectDefaultBranch,
+    /// GitLab: merge requests only with a passed pipeline.
+    PipelineMustSucceed,
+    /// GitLab (Premium): the push rule that rejects commits with secrets.
+    PreventSecrets,
+    /// GitLab: only projects on the allowlist may use their CI job token here.
+    JobTokenScope,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -265,6 +273,9 @@ fn check(id: &'static str, title: impl Into<String>, level: Level, detail: impl 
 /// every other part that cannot be read becomes a check with level `Unknown`.
 /// `website`: it is the website's own repository, whose upload pushes to it.
 pub fn check_repo(repo: &str, website: bool, now: u64) -> Result<Report> {
+    if let Some(p) = crate::gitlab::project(repo) {
+        return gitlab_check(&p, website, now);
+    }
     let info = match read(&format!("repos/{repo}")) {
         Read::Found(info) => info,
         Read::Missing => bail!("GitHub meldet 404: gelöscht, umbenannt oder privat ohne Zugriff"),
@@ -692,6 +703,9 @@ pub struct FixResult {
 /// each on its own: one GitHub refuses does not stop the others. Checks first that the login is
 /// still admin of a repository that is not archived.
 pub fn apply(repo: &str, fixes: &[Fix]) -> Result<Vec<FixResult>> {
+    if let Some(p) = crate::gitlab::project(repo) {
+        return gitlab_apply(&p, fixes);
+    }
     let info = get(&format!("repos/{repo}"))?.with_context(|| format!("{repo} nicht gefunden"))?;
     if info["archived"].as_bool() == Some(true) {
         bail!("{repo} ist archiviert; Einstellungen sind gesperrt");
@@ -748,6 +762,293 @@ fn apply_one(repo: &str, fix: Fix) -> Result<String> {
             expect(send("PUT", &format!("repos/{repo}/private-vulnerability-reporting"), Some(&json!({})))?, &[200, 204], "Private Meldung")?;
             Ok("Private Meldung von Sicherheitslücken eingeschaltet".into())
         }
+        Fix::ProtectDefaultBranch | Fix::PipelineMustSucceed | Fix::PreventSecrets | Fix::JobTokenScope => bail!("nur für GitLab-Projekte"),
+    }
+}
+
+// MARK: GitLab
+
+fn gl_read(host: &str, path: &str) -> Read {
+    match crate::gitlab::get(host, path) {
+        Ok(Some(json)) => Read::Found(json),
+        Ok(None) => Read::Missing,
+        Err(e) => match e.downcast_ref::<Forbidden>() {
+            Some(Forbidden(reason)) => Read::Denied(reason.clone()),
+            None => Read::Failed(format!("{e:#}")),
+        },
+    }
+}
+
+fn gl_access(info: &Value) -> Option<u64> {
+    let permissions = &info["permissions"];
+    permissions.is_object().then(|| {
+        let level = |key: &str| permissions[key]["access_level"].as_u64().unwrap_or(0);
+        level("project_access").max(level("group_access"))
+    })
+}
+
+/// `Maintainer`, `Developer + Maintainer`, … for GitLab's access levels.
+fn gl_roles(levels: &Value) -> String {
+    let names: Vec<String> = levels
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|l| match (l["access_level"].as_u64(), l["user_id"].as_u64(), l["group_id"].as_u64(), l["deploy_key_id"].as_u64()) {
+            (_, Some(_), _, _) => "einzelne Benutzer".to_owned(),
+            (_, _, Some(_), _) => "eine Gruppe".to_owned(),
+            (_, _, _, Some(_)) => "ein Deploy-Key".to_owned(),
+            (Some(0), ..) => "niemand".to_owned(),
+            (Some(30), ..) => "Developer und Maintainer".to_owned(),
+            (Some(40), ..) => "Maintainer".to_owned(),
+            (Some(60), ..) => "Admins".to_owned(),
+            (Some(level), ..) => format!("Stufe {level}"),
+            _ => l["access_level_description"].as_str().unwrap_or("?").to_owned(),
+        })
+        .collect();
+    if names.is_empty() {
+        "niemand".into()
+    } else {
+        names.join(", ")
+    }
+}
+
+/// Whether anyone may push directly: any entry above "no one".
+fn gl_pushes(levels: &Value) -> bool {
+    levels.as_array().into_iter().flatten().any(|l| l["access_level"].as_u64() != Some(0) || l["user_id"].is_u64() || l["group_id"].is_u64() || l["deploy_key_id"].is_u64())
+}
+
+/// The security state of a GitLab project. Only maintainers may change settings; what this login
+/// cannot read (or the instance's tier does not offer) is "not checkable", never fine.
+fn gitlab_check(p: &crate::gitlab::Project, website: bool, now: u64) -> Result<Report> {
+    let api = format!("projects/{}", crate::gitlab::encode(&p.path));
+    let info = match gl_read(&p.host, &api) {
+        Read::Found(info) => info,
+        Read::Missing => bail!("GitLab {} meldet 404: gelöscht, verschoben oder ohne Zugriff", p.host),
+        Read::Denied(why) => bail!("Zugriff verweigert: {why}"),
+        Read::Failed(why) => bail!("{why}"),
+    };
+    let branch = info["default_branch"].as_str().filter(|b| !b.is_empty()).context("Projekt ohne Default-Branch")?.to_owned();
+    let private = info["visibility"].as_str() != Some("public");
+    let archived = info["archived"].as_bool().unwrap_or(false);
+    let level = gl_access(&info);
+    let admin = level.map(|l| l >= crate::gitlab::MAINTAINER);
+    let can_fix = !archived && admin == Some(true);
+    let web = p.web_url();
+    let settings = |anchor: &str| Some(format!("{web}/-/settings/{anchor}"));
+    let offer = |fix: Fix, label: &str, effect: String, warning: Option<String>| can_fix.then(|| FixOffer { fix, label: label.into(), effect, warning });
+    let mut checks = Vec::new();
+
+    // Default branch: protected, no force push, who may push directly.
+    let protected = gl_read(&p.host, &format!("{api}/protected_branches/{}", crate::gitlab::encode(&branch)));
+    let website_note = website.then(|| format!("Das ist das Repository der Website: Deren Upload pusht direkt auf {branch} und schlägt mit diesem Schutz fehl, solange er nicht über einen MR läuft."));
+    match protected {
+        Read::Missing => checks.push(Check {
+            fix: offer(
+                Fix::ProtectDefaultBranch,
+                "Default-Branch schützen",
+                format!("Schützt {branch}: niemand pusht mehr direkt, Merges dürfen Developer und Maintainer, kein Force-Push, kein Löschen."),
+                Some(website_note.clone().unwrap_or_else(|| format!("Werkzeuge oder Pipelines, die direkt auf {branch} pushen, schlagen danach fehl."))),
+            ),
+            url: settings("repository#js-protected-branches-settings"),
+            ..check("protection", format!("{branch} ist nicht geschützt"), Level::High, "Jeder mit Developer-Rechten kann direkt pushen, force-pushen und den Branch löschen.")
+        }),
+        Read::Found(rule) => {
+            if rule["allow_force_push"].as_bool() == Some(true) {
+                checks.push(Check {
+                    fix: offer(Fix::BlockForcePush, "Force-Push sperren", format!("Verbietet Force-Pushes auf {branch}; sonst bleibt der Schutz, wie er ist."), None),
+                    url: settings("repository#js-protected-branches-settings"),
+                    ..check("forcePush", format!("Force-Push auf {branch} erlaubt"), Level::High, "Die Historie des Default-Branches lässt sich umschreiben.")
+                });
+            }
+            let push = &rule["push_access_levels"];
+            if gl_pushes(push) {
+                checks.push(Check {
+                    url: settings("repository#js-protected-branches-settings"),
+                    ..check("directPush", format!("Direkte Pushes auf {branch} erlaubt"), Level::Medium, format!("Pushen dürfen: {}. Änderungen ohne Merge Request umgehen Review und Pipeline.", gl_roles(push)))
+                });
+            } else if rule["allow_force_push"].as_bool() != Some(true) {
+                checks.push(check("protection", format!("{branch} geschützt"), Level::Ok, format!("Pushen: niemand direkt; Mergen: {}; kein Force-Push.", gl_roles(&rule["merge_access_levels"]))));
+            }
+        }
+        Read::Denied(_) => checks.push(check("protection", format!("Schutz von {branch}"), Level::Unknown, "nur mit Maintainer-Rechten lesbar")),
+        Read::Failed(why) => checks.push(check("protection", format!("Schutz von {branch}"), Level::Unknown, why)),
+    }
+
+    // Merging only with a passed pipeline.
+    match info["only_allow_merge_if_pipeline_succeeds"].as_bool() {
+        Some(true) => checks.push(check("pipelineRequired", "Mergen nur mit grüner Pipeline", Level::Ok, "GitLab lässt MRs erst nach erfolgreicher Pipeline mergen.")),
+        Some(false) => checks.push(Check {
+            fix: offer(
+                Fix::PipelineMustSucceed,
+                "Grüne Pipeline verlangen",
+                "Merge Requests lassen sich nur noch mergen, wenn ihre Pipeline erfolgreich war.".into(),
+                Some("Projekte ohne Pipeline können dann gar nicht mehr über MRs mergen, bis eine eingerichtet ist.".into()),
+            ),
+            url: settings("merge_requests"),
+            ..check("pipelineRequired", "MRs lassen sich ohne grüne Pipeline mergen", Level::Medium, "Ein roter oder fehlender Pipeline-Lauf hält niemanden vom Mergen ab.")
+        }),
+        None => checks.push(check("pipelineRequired", "Mergen nur mit grüner Pipeline", Level::Unknown, "nicht lesbar (mit dieser Anmeldung meldet GitLab die Einstellung nicht)")),
+    }
+
+    // Secrets: the push rule (Premium) and secret detection in the pipeline.
+    match gl_read(&p.host, &format!("{api}/push_rule")) {
+        Read::Found(rule) if rule["prevent_secrets"].as_bool() == Some(true) => {
+            checks.push(check("secretPush", "Push-Regel gegen Secrets", Level::Ok, "Commits mit erkennbaren Secrets lehnt GitLab ab."))
+        }
+        Read::Found(_) => checks.push(Check {
+            fix: offer(Fix::PreventSecrets, "Secrets beim Push ablehnen", "Schaltet die Push-Regel „Prevent pushing secret files“ ein.".into(), None),
+            url: settings("repository#js-push-rules"),
+            ..check("secretPush", "Keine Push-Regel gegen Secrets", Level::Medium, "Schlüsseldateien und Zugangsdaten können ins Repository gelangen.")
+        }),
+        Read::Missing | Read::Denied(_) => {
+            checks.push(check("secretPush", "Push-Regel gegen Secrets", Level::Unknown, "nicht lesbar: Push-Regeln gibt es ab GitLab Premium, lesbar für Maintainer"))
+        }
+        Read::Failed(why) => checks.push(check("secretPush", "Push-Regel gegen Secrets", Level::Unknown, why)),
+    }
+    let ci_text = crate::gitlab::get_text(&p.host, &format!("{api}/repository/files/.gitlab-ci.yml/raw?ref={}", crate::gitlab::encode(&branch)));
+    match ci_text {
+        Ok(Some(text)) if text.contains("Secret-Detection") || text.contains("secret_detection") || text.contains("secret-detection") => {
+            checks.push(check("secretDetection", "Secret Detection in der Pipeline", Level::Ok, "Die Pipeline bindet Secret Detection ein."))
+        }
+        Ok(Some(_)) => checks.push(Check {
+            url: Some(format!("{web}/-/blob/{branch}/.gitlab-ci.yml")),
+            ..check("secretDetection", "Keine Secret Detection in der Pipeline", Level::Low, "Die .gitlab-ci.yml bindet das Template Security/Secret-Detection nicht ein (geprüft wird nur diese Datei, nicht eingebundene).")
+        }),
+        Ok(None) => checks.push(check("secretDetection", "Keine Pipeline", Level::Low, "Keine .gitlab-ci.yml auf dem Default-Branch: keine Pipeline, keine Secret Detection.")),
+        Err(e) => checks.push(check("secretDetection", "Secret Detection in der Pipeline", Level::Unknown, format!("{e:#}"))),
+    }
+
+    // Dependency updates: a Renovate configuration.
+    let renovate = ["renovate.json", "renovate.json5", ".renovaterc", ".renovaterc.json", ".gitlab/renovate.json", ".gitlab/renovate.json5"]
+        .iter()
+        .map(|file| (file, gl_read(&p.host, &format!("{api}/repository/files/{}?ref={}", crate::gitlab::encode(file), crate::gitlab::encode(&branch)))))
+        .find(|(_, read)| !matches!(read, Read::Missing));
+    match renovate {
+        Some((file, Read::Found(_))) => checks.push(check("updates", "Abhängigkeits-Updates mit Renovate", Level::Ok, format!("Renovate ist eingerichtet ({file})."))),
+        Some((_, Read::Denied(why) | Read::Failed(why))) => checks.push(check("updates", "Abhängigkeits-Updates", Level::Unknown, why)),
+        _ => checks.push(check("updates", "Keine Renovate-Konfiguration", Level::Low, "Abhängigkeits- und Sicherheitsupdates kommen nicht automatisch als Merge Request.")),
+    }
+
+    // CI job tokens of other projects.
+    if admin == Some(true) {
+        match gl_read(&p.host, &format!("{api}/job_token_scope")) {
+            Read::Found(scope) if scope["inbound_enabled"].as_bool() == Some(false) => checks.push(Check {
+                fix: offer(
+                    Fix::JobTokenScope,
+                    "Job-Token-Zugriff beschränken",
+                    "Nur Projekte auf der Allowlist dürfen mit ihrem CI-Job-Token auf dieses Projekt zugreifen.".into(),
+                    Some("Pipelines anderer Projekte, die dieses Projekt mit ihrem Job-Token lesen, brauchen danach einen Eintrag in der Allowlist.".into()),
+                ),
+                url: settings("ci_cd#js-token-access"),
+                ..check("jobToken", "Job-Tokens aller Projekte haben Zugriff", Level::Low, "Jede Pipeline, deren Benutzer hier Rechte hat, kann mit ihrem Job-Token auf dieses Projekt zugreifen.")
+            }),
+            Read::Found(_) => checks.push(check("jobToken", "Job-Token-Zugriff beschränkt", Level::Ok, "Nur Projekte der Allowlist dürfen ihr Job-Token hier nutzen.")),
+            Read::Missing => checks.push(check("jobToken", "Job-Token-Zugriff", Level::Unknown, "von dieser GitLab-Version nicht gemeldet")),
+            Read::Denied(why) | Read::Failed(why) => checks.push(check("jobToken", "Job-Token-Zugriff", Level::Unknown, why)),
+        }
+        match gl_read(&p.host, &format!("{api}/deploy_keys")) {
+            Read::Found(keys) => {
+                let writers: Vec<&str> = keys.as_array().into_iter().flatten().filter(|k| k["can_push"].as_bool() == Some(true)).filter_map(|k| k["title"].as_str()).collect();
+                if writers.is_empty() {
+                    checks.push(check("deployKeys", "Keine Deploy-Keys mit Schreibrecht", Level::Ok, ""));
+                } else {
+                    checks.push(Check {
+                        url: settings("repository#js-deploy-keys-settings"),
+                        ..check("deployKeys", "Deploy-Keys mit Schreibrecht", Level::Medium, format!("{}: Wer den Schlüssel hat, kann pushen; Schutzregeln gelten nur, wenn der Key nicht ausdrücklich freigegeben ist.", writers.join(", ")))
+                    });
+                }
+            }
+            Read::Missing | Read::Denied(_) => checks.push(check("deployKeys", "Deploy-Keys", Level::Unknown, "nur mit Maintainer-Rechten lesbar")),
+            Read::Failed(why) => checks.push(check("deployKeys", "Deploy-Keys", Level::Unknown, why)),
+        }
+    } else {
+        let why = if level.is_none() { "nur mit glab-Anmeldung und Maintainer-Rechten lesbar" } else { "nur mit Maintainer-Rechten lesbar" };
+        checks.push(check("jobToken", "Job-Token-Zugriff und Deploy-Keys", Level::Unknown, why));
+    }
+
+    if !private {
+        match gl_read(&p.host, &format!("{api}/repository/files/SECURITY.md?ref={}", crate::gitlab::encode(&branch))) {
+            Read::Found(_) => checks.push(check("securityPolicy", "SECURITY.md vorhanden", Level::Ok, "Wer eine Lücke findet, weiß, wie er sie meldet.")),
+            Read::Missing => checks.push(check("securityPolicy", "Keine SECURITY.md", Level::Low, "Öffentliches Projekt ohne Hinweis, wie Sicherheitslücken vertraulich gemeldet werden.")),
+            Read::Denied(why) | Read::Failed(why) => checks.push(check("securityPolicy", "SECURITY.md", Level::Unknown, why)),
+        }
+    }
+    checks.push(check(
+        "vulnerabilities",
+        "Gemeldete Schwachstellen",
+        Level::Unknown,
+        "Schwachstellenberichte (Dependency und Container Scanning) gibt es in GitLab Ultimate; die App liest sie nicht.",
+    ));
+    checks.sort_by_key(|c| c.level);
+    Ok(Report { checked_at: now, default_branch: branch, private, archived, admin, checks })
+}
+
+/// Carries out the confirmed GitLab fixes, each on its own, after checking that this login is still
+/// maintainer of a project that is not archived.
+fn gitlab_apply(p: &crate::gitlab::Project, fixes: &[Fix]) -> Result<Vec<FixResult>> {
+    let api = format!("projects/{}", crate::gitlab::encode(&p.path));
+    let info = crate::gitlab::get(&p.host, &api)?.with_context(|| format!("{} nicht gefunden", p.id()))?;
+    if info["archived"].as_bool() == Some(true) {
+        bail!("{} ist archiviert; Einstellungen sind gesperrt", p.id());
+    }
+    if gl_access(&info).is_none_or(|level| level < crate::gitlab::MAINTAINER) {
+        bail!("Für {} fehlen Maintainer-Rechte (oder die glab-Anmeldung)", p.id());
+    }
+    let branch = info["default_branch"].as_str().context("Projekt ohne Default-Branch")?.to_owned();
+    let mut order: Vec<Fix> = fixes.to_vec();
+    order.sort();
+    order.dedup();
+    Ok(order
+        .into_iter()
+        .map(|fix| match gitlab_apply_one(p, &api, &branch, fix) {
+            Ok(text) => FixResult { fix, ok: true, text },
+            Err(e) => FixResult { fix, ok: false, text: format!("{e:#}") },
+        })
+        .collect())
+}
+
+fn gl_expect((status, body): (u16, Value), ok: &[u16], what: &str) -> Result<Value> {
+    if !ok.contains(&status) {
+        bail!("{what}: GitLab antwortet mit HTTP {status}: {}", crate::gitlab::message(&body));
+    }
+    Ok(body)
+}
+
+fn gitlab_apply_one(p: &crate::gitlab::Project, api: &str, branch: &str, fix: Fix) -> Result<String> {
+    let send = |method: &str, path: &str, body: Value| crate::gitlab::send(&p.host, method, path, Some(&body));
+    let protected = format!("{api}/protected_branches/{}", crate::gitlab::encode(branch));
+    match fix {
+        Fix::ProtectDefaultBranch => {
+            let body = json!({ "name": branch, "push_access_level": 0, "merge_access_level": 30, "allow_force_push": false });
+            gl_expect(send("POST", &format!("{api}/protected_branches"), body)?, &[201], "Branch schützen")?;
+            Ok(format!("{branch} geschützt: kein direkter Push, Mergen für Developer und Maintainer, kein Force-Push"))
+        }
+        Fix::BlockForcePush => {
+            gl_expect(send("PATCH", &protected, json!({ "allow_force_push": false }))?, &[200], "Force-Push sperren")?;
+            Ok(format!("Force-Push auf {branch} gesperrt"))
+        }
+        Fix::PipelineMustSucceed => {
+            gl_expect(send("PUT", api, json!({ "only_allow_merge_if_pipeline_succeeds": true }))?, &[200], "Pipeline-Pflicht")?;
+            Ok("Merge Requests lassen sich nur noch mit grüner Pipeline mergen".into())
+        }
+        Fix::PreventSecrets => {
+            let path = format!("{api}/push_rule");
+            match send("PUT", &path, json!({ "prevent_secrets": true }))? {
+                (200, _) => {}
+                (404, _) => {
+                    gl_expect(send("POST", &path, json!({ "prevent_secrets": true }))?, &[201], "Push-Regel")?;
+                }
+                answer => {
+                    gl_expect(answer, &[200], "Push-Regel")?;
+                }
+            }
+            Ok("Push-Regel gegen Secrets eingeschaltet".into())
+        }
+        Fix::JobTokenScope => {
+            gl_expect(send("PATCH", &format!("{api}/job_token_scope"), json!({ "enabled": true }))?, &[200, 204], "Job-Token-Zugriff")?;
+            Ok("Nur noch Projekte der Allowlist dürfen ihr Job-Token hier nutzen".into())
+        }
+        other => bail!("{other:?} gibt es nur auf GitHub"),
     }
 }
 
@@ -1006,5 +1307,69 @@ mod tests {
         for c in &report.checks {
             println!("{:?} {}: {}{}", c.level, c.title, c.detail, c.fix.as_ref().map(|f| format!(" [Fix: {}]", f.label)).unwrap_or_default());
         }
+    }
+
+    fn gl(path: &str) -> String {
+        crate::gitlab::mock::key("gitlab.example.com", path)
+    }
+
+    fn gitlab_world(level: u64, protected: Option<Value>, pipeline_required: bool) -> Vec<(String, Option<Value>)> {
+        let api = "projects/werk%2Fapp";
+        vec![
+            (
+                gl(api),
+                Some(json!({
+                    "path_with_namespace": "werk/app", "default_branch": "main", "visibility": "private", "archived": false,
+                    "only_allow_merge_if_pipeline_succeeds": pipeline_required, "permissions": { "project_access": { "access_level": level } },
+                })),
+            ),
+            (gl(&format!("{api}/protected_branches/main")), protected),
+            (gl(&format!("{api}/push_rule")), None),
+            (gl(&format!("{api}/repository/files/.gitlab-ci.yml/raw?ref=main")), Some(json!("include:\n  - template: Security/Secret-Detection.gitlab-ci.yml\n"))),
+            (gl(&format!("{api}/repository/files/renovate.json?ref=main")), Some(json!({ "file_name": "renovate.json" }))),
+            (gl(&format!("{api}/job_token_scope")), Some(json!({ "inbound_enabled": false }))),
+            (gl(&format!("{api}/deploy_keys")), Some(json!([{ "title": "deploy", "can_push": true }]))),
+        ]
+    }
+
+    #[test]
+    fn a_gitlab_project_is_checked_with_its_own_rules() {
+        mock::install(gitlab_world(40, None, false));
+        let report = check_repo("gitlab.example.com/werk/app", false, 1).unwrap();
+        let by = |id: &str| report.checks.iter().find(|c| c.id == id).unwrap_or_else(|| panic!("{id}: {:#?}", report.checks));
+        assert_eq!(by("protection").level, Level::High, "an unprotected default branch");
+        assert_eq!(by("protection").fix.as_ref().map(|f| f.fix), Some(Fix::ProtectDefaultBranch));
+        assert_eq!(by("pipelineRequired").fix.as_ref().map(|f| f.fix), Some(Fix::PipelineMustSucceed));
+        assert_eq!(by("secretPush").level, Level::Unknown, "push rules need Premium: not readable is not fine");
+        assert_eq!(by("secretDetection").level, Level::Ok);
+        assert_eq!(by("updates").level, Level::Ok);
+        assert_eq!(by("jobToken").fix.as_ref().map(|f| f.fix), Some(Fix::JobTokenScope));
+        assert_eq!(by("deployKeys").level, Level::Medium);
+        assert_eq!(report.admin, Some(true));
+        assert!(mock::writes().is_empty(), "checking writes nothing");
+
+        let force = json!({ "allow_force_push": true, "push_access_levels": [{ "access_level": 30 }], "merge_access_levels": [{ "access_level": 30 }] });
+        mock::install(gitlab_world(30, Some(force), true));
+        let report = check_repo("gitlab.example.com/werk/app", false, 1).unwrap();
+        let by = |id: &str| report.checks.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(by("forcePush").level, Level::High);
+        assert_eq!(by("directPush").level, Level::Medium);
+        assert!(report.checks.iter().all(|c| c.fix.is_none()), "a developer gets no fixes");
+        assert_eq!(by("pipelineRequired").level, Level::Ok);
+    }
+
+    #[test]
+    fn gitlab_fixes_only_add_protection() {
+        mock::install(gitlab_world(40, None, false));
+        let results = apply("gitlab.example.com/werk/app", &[Fix::PipelineMustSucceed, Fix::ProtectDefaultBranch]).unwrap();
+        assert!(results.iter().all(|r| r.ok), "{results:?}");
+        assert_eq!(
+            mock::written(&format!("POST {}", gl("projects/werk%2Fapp/protected_branches"))),
+            Some(json!({ "name": "main", "push_access_level": 0, "merge_access_level": 30, "allow_force_push": false }))
+        );
+        assert_eq!(mock::written(&format!("PUT {}", gl("projects/werk%2Fapp"))), Some(json!({ "only_allow_merge_if_pipeline_succeeds": true })));
+        mock::install(gitlab_world(30, None, false));
+        assert!(apply("gitlab.example.com/werk/app", &[Fix::PipelineMustSucceed]).is_err(), "only maintainers");
+        assert!(mock::writes().is_empty());
     }
 }

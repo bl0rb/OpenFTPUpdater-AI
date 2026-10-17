@@ -1,4 +1,5 @@
-//! Care for the managed repositories on GitHub, three separate choices: pull requests (merge what
+//! Care for the managed repositories on GitHub and GitLab (`gitlab` carries out the GitLab side with
+//! the same rules), three separate choices: pull requests (merge what
 //! GitHub reports mergeable with green checks and Claude judges safe, close superfluous ones, ask
 //! Dependabot to rebase conflicting ones), cleanup (delete branches whose commits are all in the
 //! default branch, on GitHub and in the local clone) and release (tag the next patch version once the
@@ -209,7 +210,11 @@ pub fn scan(target: &RepoTarget, prs: bool, cleanup: bool) -> Plan {
         plan.tag_blocked = true;
         plan.tag_note = Some("keine Release-Regel eingerichtet; kein Tag".into());
     }
-    if let Err(e) = look(&mut plan, target, prs, cleanup) {
+    let looked = match crate::gitlab::project(&target.repo) {
+        Some(_) => crate::gitlab::look(&mut plan, target, prs, cleanup),
+        None => look(&mut plan, target, prs, cleanup),
+    };
+    if let Err(e) = looked {
         plan.prs.clear();
         plan.branches.clear();
         plan.local_branches.clear();
@@ -281,25 +286,39 @@ fn look(plan: &mut Plan, target: &RepoTarget, merge: bool, cleanup: bool) -> Res
             };
             plan.branches.push(Branch { name: name.to_owned(), sha: sha.to_owned(), reason, proof });
         }
-        match &target.local {
-            LocalCopy::Found { path } => {
-                if let Err(e) = look_local(plan, Path::new(path), &merged) {
-                    plan.local_branches.clear();
-                    plan.local_sync = None;
-                    plan.clone_note = Some(format!("{e:#}"));
-                }
-            }
-            LocalCopy::NotConfigured => {}
-            other => plan.clone_note = repos::local_problem(other),
-        }
+        look_local_of(plan, target, &merged);
     }
     Ok(())
+}
+
+/// The local clone's part of the preview, for GitHub and GitLab alike; a problem with the clone
+/// leaves the local branches out, nothing else.
+pub(crate) fn look_local_of(plan: &mut Plan, target: &RepoTarget, merged: &HashMap<String, u64>) {
+    match &target.local {
+        LocalCopy::Found { path } => {
+            if let Err(e) = look_local(plan, Path::new(path), merged) {
+                plan.local_branches.clear();
+                plan.local_sync = None;
+                plan.clone_note = Some(format!("{e:#}"));
+            }
+        }
+        LocalCopy::NotConfigured => {}
+        other => plan.clone_note = repos::local_problem(other),
+    }
+}
+
+/// `PR #12` on GitHub, `MR !12` on GitLab.
+pub fn request_ref(repo: &str, number: u64) -> String {
+    match crate::gitlab::project(repo) {
+        Some(_) => format!("MR !{number}"),
+        None => format!("PR #{number}"),
+    }
 }
 
 /// Branches of the local clone that are merged, judged by what the clone already knows: no fetch.
 /// When its `origin/<default>` differs from GitHub, the run fetches first (`local_sync`).
 fn look_local(plan: &mut Plan, dir: &Path, merged: &HashMap<String, u64>) -> Result<()> {
-    let origin = localrepo::origin_repo(dir).context("lokale Kopie ohne GitHub-origin")?;
+    let origin = localrepo::origin_repo(dir).context("lokale Kopie ohne erkannten origin")?;
     if !origin.eq_ignore_ascii_case(&plan.repo) {
         bail!("lokale Kopie gehört zu {origin}");
     }
@@ -314,7 +333,7 @@ fn look_local(plan: &mut Plan, dir: &Path, merged: &HashMap<String, u64>) -> Res
             continue;
         }
         let (proof, reason) = match merged.get(sha) {
-            Some(&number) => (Proof::MergedPr(number), format!("PR #{number} gemergt")),
+            Some(&number) => (Proof::MergedPr(number), format!("{} gemergt", request_ref(&plan.repo, number))),
             None if output("git", &["merge-base", "--is-ancestor", sha, &base], dir).is_ok() => {
                 (Proof::Contained, format!("in origin/{} enthalten", plan.default_branch))
             }
@@ -324,9 +343,10 @@ fn look_local(plan: &mut Plan, dir: &Path, merged: &HashMap<String, u64>) -> Res
     }
     if !plan.local_branches.is_empty() && local_head.trim() != plan.base_head {
         plan.local_sync = Some(format!(
-            "origin/{} steht in der lokalen Kopie auf {}, auf GitHub auf {}",
+            "origin/{} steht in der lokalen Kopie auf {}, auf {} auf {}",
             plan.default_branch,
             short(local_head.trim()),
+            crate::forge::Forge::of(&plan.repo).name(),
             short(&plan.base_head)
         ));
     }
@@ -434,7 +454,7 @@ pub fn finish(plan: &mut Plan, cleanup: bool, release: bool) {
             .filter(|pr| pr.action == Action::Merge)
             .filter_map(|pr| {
                 let name = pr.head_branch.clone().filter(|b| *b != plan.default_branch)?;
-                Some(Branch { name, sha: pr.head_sha.clone(), reason: format!("nach dem Merge von PR #{}", pr.number), proof: Proof::AfterMerge(pr.number) })
+                Some(Branch { name, sha: pr.head_sha.clone(), reason: format!("nach dem Merge von {}", request_ref(&plan.repo, pr.number)), proof: Proof::AfterMerge(pr.number) })
             })
             .collect();
         plan.branches.splice(0..0, heads);
@@ -445,12 +465,10 @@ fn plan_tag(plan: &mut Plan) -> Result<()> {
     if plan.tag_blocked {
         return Ok(());
     }
-    let list = get_list(&format!("repos/{}/tags", plan.repo), 3)?;
-    if !list.complete {
+    let Some(tags) = tag_names(&plan.repo)? else {
         plan.tag_note = Some("über 300 Tags: der höchste ist nicht sicher bestimmbar; Tag von Hand setzen".into());
         return Ok(());
-    }
-    let tags: Vec<String> = list.items.iter().filter_map(|t| t["name"].as_str().map(str::to_owned)).collect();
+    };
     let Some(last) = latest_release_tag(&tags, &plan.tag_prefix) else {
         plan.tag_note = Some(format!("noch kein Tag im Format {}x.y.z; das erste Release von Hand taggen", plan.tag_prefix));
         return Ok(());
@@ -541,6 +559,9 @@ pub fn merge(plan: &Plan, pr: &PullRequest, state: &mut RunState) -> Result<Done
     if pr.action != Action::Merge || !pr.reviewed || !matches!(pr.risk.as_deref(), Some("green" | "yellow")) {
         return Ok(Done::Skipped("keine gültige Freigabe (grün oder gelb) für diesen Stand".into()));
     }
+    if crate::gitlab::project(&plan.repo).is_some() {
+        return crate::gitlab::merge(plan, pr, state);
+    }
     let current = pull(&plan.repo, pr.number)?;
     if let Some(why) = changed(plan, pr, &current) {
         return Ok(Done::Skipped(why));
@@ -589,6 +610,9 @@ pub const CLOSE_COMMENT: &str = "Geschlossen von OpenReleasePilot:";
 /// open, same head and target, and a named replacement is still open or merged. `commented`: an
 /// interrupted earlier attempt already posted the comment.
 pub fn close(plan: &Plan, pr: &PullRequest, commented: bool) -> Result<Done> {
+    if crate::gitlab::project(&plan.repo).is_some() {
+        return crate::gitlab::close(plan, pr, commented);
+    }
     let current = pull(&plan.repo, pr.number)?;
     if current["state"].as_str() != Some("open") {
         return Ok(Done::Skipped("war schon geschlossen".into()));
@@ -624,6 +648,9 @@ pub fn close(plan: &Plan, pr: &PullRequest, commented: bool) -> Result<Done> {
 /// Asks Dependabot to rebase a conflicting pull request, after checking it again: still open,
 /// really Dependabot's, same head and target, still in conflict or behind.
 pub fn rebase(plan: &Plan, pr: &PullRequest) -> Result<Done> {
+    if crate::gitlab::project(&plan.repo).is_some() {
+        return crate::gitlab::rebase(plan, pr);
+    }
     let current = pull(&plan.repo, pr.number)?;
     if let Some(why) = changed(plan, pr, &current) {
         return Ok(Done::Skipped(why));
@@ -660,6 +687,10 @@ fn changed(plan: &Plan, pr: &PullRequest, current: &Value) -> Option<String> {
 }
 
 /// Notes when the default branch is not where the run expects it (a push from elsewhere).
+pub(crate) fn note_head_of(plan: &Plan, state: &mut RunState) -> Result<()> {
+    note_head(plan, state)
+}
+
 fn note_head(plan: &Plan, state: &mut RunState) -> Result<()> {
     if state.foreign.is_some() {
         return Ok(());
@@ -681,6 +712,9 @@ fn comment(plan: &Plan, number: u64, body: &str) -> Result<()> {
 
 /// Head commit of the default branch.
 pub fn head(plan: &Plan) -> Result<String> {
+    if crate::gitlab::project(&plan.repo).is_some() {
+        return crate::gitlab::head(plan);
+    }
     let branch = get(&format!("repos/{}/branches/{}", plan.repo, encode_ref(&plan.default_branch)))?.context("Default-Branch nicht gefunden")?;
     Ok(branch["commit"]["sha"].as_str().context("Default-Branch ohne Commit")?.to_owned())
 }
@@ -749,7 +783,7 @@ pub fn tag(plan: &Plan, state: &RunState, runner: &Runner, wait: &CiWait, progre
     if head(plan)? != target {
         return Ok(Done::Skipped(format!("{} hat sich während des Wartens bewegt; kein Tag", plan.default_branch)));
     }
-    if get(&format!("repos/{}/git/ref/tags/{}", plan.repo, encode_ref(tag)))?.is_some() {
+    if tag_exists(&plan.repo, tag)? {
         return Ok(Done::Skipped(format!("{tag} gibt es inzwischen")));
     }
     if let Some(why) = release_line_changed(plan, last, tag)? {
@@ -759,6 +793,12 @@ pub fn tag(plan: &Plan, state: &RunState, runner: &Runner, wait: &CiWait, progre
         Ok(0) => return Ok(Done::Nothing(format!("{} unverändert seit {last} (nach dem Warten auf die CI)", plan.default_branch))),
         Err(e) => return Ok(Done::Skipped(format!("Änderungen seit {last} {e:#} (nach dem Warten auf die CI); kein Tag"))),
         Ok(_) => {}
+    }
+    if crate::gitlab::project(&plan.repo).is_some() {
+        return Ok(match crate::gitlab::create_tag(&plan.repo, tag, &target)? {
+            Ok(()) => Done::Ok(format!("gesetzt auf {commit} ({}); eine Release-Pipeline startet gegebenenfalls", ci.detail)),
+            Err(why) => Done::Skipped(format!("GitLab lehnt ab: {why}; bestehende Tags bleiben unverändert")),
+        });
     }
     let body = json!({ "ref": format!("refs/tags/{tag}"), "sha": target });
     match send("POST", &format!("repos/{}/git/refs", plan.repo), Some(&body)) {
@@ -778,11 +818,9 @@ pub fn tag(plan: &Plan, state: &RunState, runner: &Runner, wait: &CiWait, progre
 
 /// Why the release line is no longer the preview's: a newer tag, the planned one, an unreadable list.
 fn release_line_changed(plan: &Plan, last: &str, tag: &str) -> Result<Option<String>> {
-    let list = get_list(&format!("repos/{}/tags", plan.repo), 3)?;
-    if !list.complete {
+    let Some(names) = tag_names(&plan.repo)? else {
         return Ok(Some("über 300 Tags; die Version ist nicht sicher prüfbar, kein Tag".into()));
-    }
-    let names: Vec<String> = list.items.iter().filter_map(|t| t["name"].as_str().map(str::to_owned)).collect();
+    };
     if names.iter().any(|name| name == tag) {
         return Ok(Some(format!("{tag} gibt es schon")));
     }
@@ -809,6 +847,9 @@ pub enum ReleaseWait {
 /// Waits, at most `wait.timeout`, until the GitHub release of `tag` is published and the tag still
 /// points to `commit`; stops early when a workflow run for the tag failed. Reads only.
 pub fn wait_for_release(repo: &str, tag: &str, commit: &str, runner: &Runner, wait: &CiWait, progress: &dyn Fn(&str)) -> Result<ReleaseWait> {
+    if let Some(p) = crate::gitlab::project(repo) {
+        return crate::gitlab::wait_for_release(&p, tag, commit, runner, wait, progress);
+    }
     let start = Instant::now();
     let mut reported = false;
     loop {
@@ -888,6 +929,9 @@ pub fn wait_for_checks(repo: &str, sha: &str, runner: &Runner, wait: &CiWait, pr
 /// default branch, no open pull request from or into it, the proof still holds. The delete itself
 /// has no precondition on the commit at GitHub; a short window remains.
 pub fn delete_branch(plan: &Plan, branch: &Branch, state: &RunState) -> Result<Done> {
+    if crate::gitlab::project(&plan.repo).is_some() {
+        return crate::gitlab::delete_branch(plan, branch, state);
+    }
     if let Proof::AfterMerge(number) = branch.proof {
         if !state.merged.contains(&number) {
             return Ok(Done::Skipped(format!("PR #{number} wurde nicht gemergt")));
@@ -984,13 +1028,16 @@ pub fn delete_local_branch(plan: &Plan, branch: &Branch, state: &RunState) -> Re
 fn foreign_clone(plan: &Plan, dir: &Path) -> Option<String> {
     match localrepo::origin_repo(dir) {
         Some(origin) if origin.eq_ignore_ascii_case(&plan.repo) => None,
-        origin => Some(format!("die lokale Kopie gehört nicht mehr zu {} ({})", plan.repo, origin.as_deref().unwrap_or("ohne GitHub-origin"))),
+        origin => Some(format!("die lokale Kopie gehört nicht mehr zu {} ({})", plan.repo, origin.as_deref().unwrap_or("ohne erkannten origin"))),
     }
 }
 
 /// Why the branch's proof no longer holds, judged by GitHub's current state. A local branch is
 /// compared by its commit: the clone's `origin/<default>` may be older than GitHub.
 fn proof_gone(plan: &Plan, branch: &Branch, state: &RunState, local: bool) -> Result<Option<String>> {
+    if crate::gitlab::project(&plan.repo).is_some() {
+        return crate::gitlab::proof_gone(plan, branch, state, local);
+    }
     Ok(match branch.proof {
         Proof::AfterMerge(number) => (!state.merged.contains(&number)).then(|| format!("PR #{number} wurde nicht gemergt")),
         Proof::MergedPr(number) => {
@@ -1010,6 +1057,9 @@ fn proof_gone(plan: &Plan, branch: &Branch, state: &RunState, local: bool) -> Re
 
 /// Whether a comment starting with `prefix` was posted on the pull request since `since` (Unix seconds).
 pub fn commented_since(repo: &str, number: u64, prefix: &str, since: u64) -> Result<bool> {
+    if crate::gitlab::project(repo).is_some() {
+        return crate::gitlab::commented_since(repo, number, prefix, since);
+    }
     let list = get_list(&format!("repos/{repo}/issues/{number}/comments?since={}", iso8601(since)), 3)?;
     Ok(list.items.iter().any(|c| c["body"].as_str().is_some_and(|b| b.starts_with(prefix))))
 }
@@ -1131,6 +1181,22 @@ fn merged_heads(repo: &str) -> Result<HashMap<String, u64>> {
 fn contained(repo: &str, base: &str, branch: &str) -> Result<bool> {
     let compare = get(&format!("repos/{repo}/compare/{}...{}", encode_ref(base), encode_ref(branch)))?;
     Ok(compare.is_some_and(|c| matches!(c["status"].as_str(), Some("identical" | "behind"))))
+}
+
+/// Tag names of the repository; `None` when there are more than the app reads (300).
+fn tag_names(repo: &str) -> Result<Option<Vec<String>>> {
+    if let Some(p) = crate::gitlab::project(repo) {
+        return crate::gitlab::tag_names(&p);
+    }
+    let list = get_list(&format!("repos/{repo}/tags"), 3)?;
+    Ok(list.complete.then(|| list.items.iter().filter_map(|t| t["name"].as_str().map(str::to_owned)).collect()))
+}
+
+fn tag_exists(repo: &str, tag: &str) -> Result<bool> {
+    if let Some(p) = crate::gitlab::project(repo) {
+        return Ok(crate::gitlab::resolve_tag(&p, tag).is_ok());
+    }
+    Ok(get(&format!("repos/{repo}/git/ref/tags/{}", encode_ref(tag)))?.is_some())
 }
 
 /// `(1, 2, 3)` for `v1.2.3` with prefix `v`; only plain releases, no `-beta.1`.
@@ -1512,6 +1578,7 @@ mod tests {
         RepoTarget {
             key: "o/app".into(),
             repo: "o/app".into(),
+            forge: crate::forge::Forge::Github,
             github_id: None,
             enabled: true,
             products: Vec::new(),
@@ -1697,7 +1764,7 @@ mod tests {
     fn reviews_a_real_repository() {
         let mut plan = scan(&own_target(), true, false);
         assert!(plan.error.is_none(), "{:?}", plan.error);
-        let args = crate::claude::review_args(&crate::claude::review_prompt(&plan), Some("haiku"), None, Some(1.0));
+        let args = crate::claude::review_args(&crate::claude::review_prompt(&plan), Some("haiku"), None, Some(1.0), false);
         let mut outcome = None;
         crate::shell::stream("claude", &args, &std::env::temp_dir(), &HashMap::new(), &Runner::default(), |line| {
             match crate::claude::parse(line) {

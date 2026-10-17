@@ -257,8 +257,11 @@ function renderBanners() {
   if (view.error) items.push(banner('error', view.error, [['Schließen', () => call('dismiss')]]));
   if (view.notice) items.push(banner('info', view.notice, [['Schließen', () => call('dismiss')]]));
   if (view.jobsUnreadable.length) items.push(banner('warning', `Gespeicherte Aufträge nicht lesbar: ${view.jobsUnreadable.join('; ')}`));
-  if (view.signedIn === false && view.repositories.length) {
+  if (view.signedIn === false && view.repositories.some((r) => forgeOf(r) === 'github')) {
     items.push(banner('warning', 'Die GitHub-CLI ist nicht angemeldet: Status nur für öffentliche Repositories, Pflege nicht möglich. Im Terminal: gh auth login'));
+  }
+  for (const host of (view.gitlabHosts ?? []).filter((g) => g.signedIn === false && view.repositories.some((r) => forgeOf(r) === `gitlab:${g.host}`))) {
+    items.push(banner('warning', `Die GitLab-CLI ist für ${host.host} nicht angemeldet: Status nur für öffentliche Projekte, Pflege nicht möglich. Im Terminal: glab auth login --hostname ${host.host}`));
   }
   // The website's own warnings only where the website is worked on.
   if (area === 'website' && view.siteError) items.push(banner('warning', `Website: ${view.siteError}`, [['Einstellungen', settingsDialog]]));
@@ -280,7 +283,7 @@ function renderMain() {
     main.replaceChildren(h('div', { class: 'empty' },
       h('img', { src: 'icon.svg', alt: '' }),
       h('h2', null, 'Willkommen'),
-      h('p', { class: 'muted' }, 'OpenReleasePilot pflegt die Repositories, die du auswählst: Zustand, Pull Requests, Releases, README und Wiki. Du triffst die Entscheidungen, die App erledigt die Arbeit. Eine Website ist optional und kann später dazukommen.'),
+      h('p', { class: 'muted' }, 'OpenReleasePilot pflegt die Repositories, die du auswählst, auf GitHub und GitLab: Zustand, Pull und Merge Requests, Releases, README und Wiki. Du triffst die Entscheidungen, die App erledigt die Arbeit. Eine Website ist optional und kann später dazukommen.'),
       h('div', { class: 'line' },
         button('Repositories auswählen …', addReposDialog, { cls: 'primary', iconName: 'plus' }),
         button('Website einrichten (optional) …', settingsDialog))));
@@ -668,6 +671,114 @@ function stepChip(state) {
   return h('span', { class: `chip ${cls}` }, state === 'running' && h('span', { class: 'spinner' }), text);
 }
 
+// MARK: Repositories: hosting services
+
+// The services the repositories live on, one card each. GitLab has no connection yet: its card says so
+// and explains how to connect, it never pretends to have repositories.
+const FORGE_MARKS = {
+  github: '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>',
+  gitlab: '<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#e24329" d="m12 21.6 4.2-12.9H7.8z"/><path fill="#fc6d26" d="M12 21.6 7.8 8.7H1.9z"/><path fill="#fca326" d="m1.9 8.7-1.3 3.9c-.1.4 0 .8.3 1L12 21.6z"/><path fill="#e24329" d="M1.9 8.7h5.9L5.3 1c-.1-.4-.7-.4-.8 0z"/><path fill="#fc6d26" d="m12 21.6 4.2-12.9h5.9z"/><path fill="#fca326" d="m22.1 8.7 1.3 3.9c.1.4 0 .8-.3 1L12 21.6z"/><path fill="#e24329" d="M22.1 8.7h-5.9L18.7 1c.1-.4.7-.4.8 0z"/></svg>',
+};
+/** The GitLab host of a repository id (`host/group/name`), or null for GitHub (`owner/name`). */
+function gitlabHost(repo) {
+  const first = String(repo ?? '').split('/')[0];
+  return /[.:]/.test(first) ? first.toLowerCase() : null;
+}
+/** The card a repository belongs to: `github` or `gitlab:<host>`. */
+const forgeOf = (r) => (r?.forge?.kind === 'gitlab' ? `gitlab:${r.forge.host}` : 'github');
+const serviceOf = (repo) => (gitlabHost(repo) ? 'GitLab' : 'GitHub');
+const requestWord = (repo) => (gitlabHost(repo) ? 'MR' : 'PR');
+const requestsTitle = (repo) => (gitlabHost(repo) ? 'Merge Requests' : 'Pull Requests');
+/** `#12` on GitHub, `!12` on GitLab. */
+const requestRef = (repo, n) => `${gitlabHost(repo) ? '!' : '#'}${n}`;
+const botOf = (repo) => (gitlabHost(repo) ? 'Renovate' : 'Dependabot');
+/** Owner or group path and name, without the host. */
+function repoParts(repo) {
+  const host = gitlabHost(repo);
+  const path = host ? repo.slice(host.length + 1) : repo;
+  const cut = path.lastIndexOf('/');
+  return { host, owner: path.slice(0, cut), name: path.slice(cut + 1), path };
+}
+// The open service, or null: then the cards are large and nothing is open below them.
+let forge = (() => { try { return localStorage.getItem('forge') || null; } catch { return null; } })();
+
+/** GitHub, then one card per GitLab instance (of a managed repository, or one glab is signed in to). */
+function forges() {
+  const repos = view.repositories;
+  const github = repos.filter((r) => forgeOf(r) === 'github');
+  const owners = [...new Set(github.map((r) => repoParts(r.repo).owner))];
+  const cards = [
+    { id: 'github', kind: 'github', name: 'GitHub', where: ['github.com', owners.slice(0, 2).join(', ') + (owners.length > 2 ? ` +${owners.length - 2}` : '')].filter(Boolean).join(' · '),
+      repos: github, connected: view.signedIn !== false,
+      login: view.signedIn === false ? 'gh nicht angemeldet' : view.signedIn ? 'über gh angemeldet' : 'Anmeldung wird geprüft' },
+  ];
+  for (const h of view.gitlabHosts ?? []) {
+    cards.push({
+      id: `gitlab:${h.host}`, kind: 'gitlab', host: h.host, name: 'GitLab', where: h.host,
+      repos: repos.filter((r) => forgeOf(r) === `gitlab:${h.host}`), connected: h.signedIn === true || (h.signedIn == null && h.configured),
+      login: h.signedIn === true ? 'über glab angemeldet' : h.signedIn === false ? 'glab nicht angemeldet' : h.configured ? 'glab eingerichtet' : 'Anmeldung wird geprüft',
+    });
+  }
+  // Without any instance: one card that explains how to connect one.
+  if (cards.length === 1) cards.push({ id: 'gitlab', kind: 'gitlab', name: 'GitLab', where: 'noch keine Instanz', repos: [], connected: false, login: 'nicht verbunden' });
+  return cards;
+}
+
+function selectForge(id) {
+  forge = forge === id ? null : id;
+  try { forge ? localStorage.setItem('forge', forge) : localStorage.removeItem('forge'); } catch { /* a convenience only */ }
+  renderRepos();
+  // The content below slides in; the card keeps the focus.
+  reposUi.below.classList.remove('enter');
+  void reposUi.below.offsetWidth;
+  if (forge) reposUi.below.classList.add('enter');
+}
+
+/** One card per service: mark, account, login, a dot per repository, the counts that need you. */
+function renderForges() {
+  const list = forges();
+  reposUi.forges.classList.toggle('compact', !!forge);
+  reposUi.forges.replaceChildren(...list.map((f) => {
+    const n = (state) => f.repos.filter((r) => r.health.state === state).length;
+    const decisions = view.jobs.filter((j) => j.status.state === 'needsApproval' && j.repos.some((k) => f.repos.some((r) => r.key === k))).length;
+    const counts = [
+      [f.repos.length, f.repos.length === 1 ? 'Repository' : 'Repositories', ''],
+      [n('needsAttention'), 'Aufmerksamkeit', 'orange'], [n('blocked'), 'blockiert', 'red'], [decisions, decisions === 1 ? 'Entscheidung' : 'Entscheidungen', 'accent'],
+    ].filter(([count], i) => i === 0 || count > 0);
+    const on = forge === f.id;
+    return h('button', {
+      type: 'button', id: domId('forge', f.id), class: `forge-card ${f.kind} ${on ? 'on' : ''} ${f.connected ? '' : 'offline'}`,
+      'aria-pressed': String(on), 'aria-controls': 'repos-below', onclick: () => selectForge(f.id),
+      title: on ? 'Wieder alle Dienste zeigen' : `${f.name} öffnen`,
+    },
+      h('span', { class: 'forge-head' },
+        h('span', { class: 'forge-mark' }, (() => { const m = document.createElement('span'); m.innerHTML = FORGE_MARKS[f.kind]; return m.firstChild; })()),
+        h('span', { class: 'forge-title' }, h('strong', null, f.name), h('span', { class: 'muted small', title: f.where }, f.where)),
+        h('span', { class: 'spacer' }),
+        h('span', { class: `chip ${f.connected ? 'ok' : 'idle'}` }, f.login)),
+      h('span', { class: 'forge-more' }, h('span', { class: 'forge-more-inner' },
+        f.repos.length ? h('span', { class: 'forge-dots', role: 'img', 'aria-label': `Zustand: ${counts.map(([c, t]) => `${c} ${t}`).join(', ')}` },
+          f.repos.map((r) => h('span', { class: `forge-dot ${r.loading && !r.facts ? 'idle' : HEALTH[r.health.state][0]}`, title: `${r.repo}: ${HEALTH[r.health.state][1]}` })))
+          : h('span', { class: 'muted small' }, f.connected ? 'Noch keine Repositories' : f.host ? `Mit glab anmelden: glab auth login --hostname ${f.host}` : 'Noch nicht verbunden: Karte öffnen für die Einrichtung'),
+        h('span', { class: 'forge-counts' }, counts.map(([c, t, cls]) => h('span', { class: cls || null }, h('strong', null, c), ` ${t}`))))),
+      h('span', { class: 'forge-compact-count muted small' }, f.repos.length ? `${f.repos.length}` : ''));
+  }));
+}
+
+/** How a GitLab instance gets connected: below the card while there is none, or while glab is not signed in. */
+function gitlabPanel(host) {
+  const target = host ?? '<deine-instanz>';
+  return h('section', { class: 'panel section forge-setup' },
+    h('h2', null, host ? `GitLab ${host} verbinden` : 'GitLab verbinden'),
+    h('p', { class: 'muted', style: 'margin:0' }, 'Die App liest und pflegt GitLab-Projekte wie GitHub-Repositories: Status, Merge Requests mit Renovate, Releases, README und Wiki, Sicherheitsprüfung. Angemeldet wird über die GitLab-CLI; die App nutzt ihren Token und speichert selbst keinen, Claude bekommt ihn nie.'),
+    h('ol', { class: 'plain-list steps-list' },
+      h('li', null, 'GitLab-CLI installieren: ', h('code', { class: 'selectable' }, 'brew install glab')),
+      h('li', null, 'An der Instanz anmelden: ', h('code', { class: 'selectable' }, `glab auth login --hostname ${target}`)),
+      h('li', null, 'Projekte aufnehmen: Lokale Klone im Repo-Ordner erscheinen unter „Repositories auswählen“; ohne Klon dort ', h('code', { class: 'selectable' }, `${target}/gruppe/projekt`), ' eingeben.'),
+      h('li', null, '„Status aktualisieren“, damit die App die Anmeldung erneut prüft.')),
+    h('div', { class: 'line' }, button('Repositories auswählen …', addReposDialog, { cls: 'primary', iconName: 'plus' })));
+}
+
 // Overview filter: a name search and one of the repository states; never changes the selection.
 const REPO_FILTERS = [
   ['all', 'Alle', () => true],
@@ -695,7 +806,10 @@ function buildRepos() {
   };
   reposUi.filterBar = h('div', { class: 'filter-bar' }, reposUi.search, reposUi.filters);
   reposUi.overview.append(reposUi.head, reposUi.note, reposUi.filterBar);
-  reposUi.root.append(reposUi.decisions, reposUi.overview, reposUi.body);
+  // Built once, so selecting a card animates instead of rebuilding.
+  reposUi.forges = h('div', { class: 'forges', role: 'group', 'aria-label': 'Dienste' });
+  reposUi.below = h('div', { class: 'repos-below', id: 'repos-below' }, reposUi.overview, reposUi.body);
+  reposUi.root.append(reposUi.forges, reposUi.decisions, reposUi.below);
 }
 
 const repoVisible = (r) => (REPO_FILTERS.find(([id]) => id === repoFilter)?.[2] ?? (() => true))(r)
@@ -726,16 +840,30 @@ function keepFocus(render) {
 
 function renderRepos() {
   keepFocus(() => {
-    const repos = view.repositories;
-    const repo = repoKey && repos.find((r) => r.key === repoKey);
+    const repos = view.repositories.filter((r) => !forge || forgeOf(r) === forge);
+    // A repository opened from elsewhere (a job) shows whichever service is open.
+    const repo = repoKey && view.repositories.find((r) => r.key === repoKey);
     if (!repo) repoKey = null;
-    // The details concern one repository only: no fleet actions, no other repository's jobs above them.
+    // The details concern one repository only: no service cards, no fleet actions, no other repository's jobs.
     reposUi.overview.hidden = !!repo;
+    reposUi.forges.hidden = !!repo;
     if (repo) {
       reposUi.decisions.hidden = true;
       reposUi.body.replaceChildren(repoDetail(repo));
       return;
     }
+    const card = forges().find((f) => f.id === forge);
+    if (forge && !card) forge = null;
+    renderForges();
+    if (!card || (card.kind === 'gitlab' && !card.host)) {
+      // No service open, or no GitLab instance yet: the open decisions stay, the setup below.
+      reposUi.overview.hidden = true;
+      renderDecisions();
+      reposUi.body.replaceChildren(...(card ? [gitlabPanel()] : []));
+      return;
+    }
+    // An instance glab is not signed in to: how to sign in, then its repositories as far as readable.
+    const signIn = card.kind === 'gitlab' && !card.connected && gitlabPanel(card.host);
     const reading = repos.some((r) => r.loading || r.detailsLoading);
     const securing = repos.some((r) => r.securityLoading);
     const chosen = repos.filter((r) => selection.has(r.key));
@@ -759,11 +887,11 @@ function renderRepos() {
       h('span', { class: 'spacer' }),
       (reading || securing) && button('Lesen abbrechen', () => call('cancel_repo_refresh'), { id: 'repos-cancel-read' }),
       repos.length > 0 && button(reading ? 'Wird gelesen …' : 'Status aktualisieren', () => call('refresh_repos', { keys: [] }),
-        { id: 'repos-refresh', iconName: 'refresh', disabled: reading, title: 'Liest den Stand aller Repositories auf GitHub: nur lesend, ohne Claude' }),
+        { id: 'repos-refresh', iconName: 'refresh', disabled: reading, title: `Liest den Stand aller Repositories auf ${card.name}: nur lesend, ohne Claude` }),
       repos.length > 0 && button(securing ? 'Wird geprüft …' : chosen.length ? `Sicherheit prüfen (${chosen.length})` : 'Sicherheit prüfen',
         () => call('check_security', { keys: chosen.map((r) => r.key) }),
         { id: 'repos-security', iconName: 'shield', disabled: securing,
-          title: `Prüft ${chosen.length ? 'die ausgewählten' : 'alle'} Repositories auf GitHub: Schutz des Default-Branches (direkte Pushes, Force-Push), Secret- und Abhängigkeits-Scanning, offene Alerts, Workflow-Rechte. Nur lesend, ohne Claude.` }),
+          title: `Prüft ${chosen.length ? 'die ausgewählten' : 'alle'} Repositories auf ${card.name}: Schutz des Default-Branches (direkte Pushes, Force-Push), Secret- und Abhängigkeits-Scanning, offene Alerts, Workflow-Rechte. Nur lesend, ohne Claude.` }),
       button('Hinzufügen …', addReposDialog, { id: 'repos-add', iconName: 'plus', title: 'Lokale Repositories in die Verwaltung aufnehmen' }),
       repos.length > 0 && button(chosen.length ? `Pflegen (${chosen.length}) …` : 'Pflegen …', () => jobDialog(chosen.map((r) => r.key)),
         { id: 'repos-care', iconName: 'branch', cls: chosen.length ? 'primary' : null, disabled: !chosen.length || !!view.running,
@@ -785,7 +913,9 @@ function renderRepos() {
     if (!repos.length) {
       body = h('div', { class: 'empty' },
         h('h2', null, 'Repositories auswählen'),
-        h('p', { class: 'muted' }, 'Wähle die Repositories, um die sich die App kümmern soll. Eine Website, ein SFTP-Zugang oder ein Release sind dafür nicht nötig.'),
+        h('p', { class: 'muted' }, card.kind === 'gitlab'
+          ? `Noch kein Projekt von ${card.host}. Lokale Klone erscheinen unter „Repositories auswählen“; ohne Klon dort ${card.host}/gruppe/projekt eingeben.`
+          : 'Wähle die Repositories, um die sich die App kümmern soll. Eine Website, ein SFTP-Zugang oder ein Release sind dafür nicht nötig.'),
         h('div', { class: 'line' }, button('Repositories auswählen …', addReposDialog, { cls: 'primary', iconName: 'plus' })));
     } else if (!visible.length) {
       body = h('div', { class: 'note-box' },
@@ -794,14 +924,17 @@ function renderRepos() {
     } else {
       body = h('div', { class: 'repo-cards' }, visible.map(repoCard));
     }
-    reposUi.body.replaceChildren(body);
+    // Not signed in and nothing added yet: the guide says it all.
+    reposUi.body.replaceChildren(...[signIn, signIn && !repos.length ? null : body].filter(Boolean));
   });
 }
 
 /** Open jobs at the top: what needs a decision first, then what runs or waits. */
 function renderDecisions() {
   const order = { needsApproval: 0, running: 1, preparing: 1, blocked: 2, waiting: 3, planned: 4 };
-  const jobs = openJobs().sort((a, b) => (order[a.status.state] ?? 9) - (order[b.status.state] ?? 9));
+  // With a service open, only the jobs of its repositories; without one, all of them.
+  const ofForge = (j) => !forge || j.repos.some((k) => view.repositories.some((r) => r.key === k && forgeOf(r) === forge));
+  const jobs = openJobs().filter(ofForge).sort((a, b) => (order[a.status.state] ?? 9) - (order[b.status.state] ?? 9));
   reposUi.decisions.hidden = !jobs.length;
   if (!jobs.length) return;
   reposUi.decisions.replaceChildren(
@@ -810,7 +943,7 @@ function renderDecisions() {
 }
 
 function jobTitle(j) {
-  const names = j.repos.map((key) => repoName(key).split('/').pop());
+  const names = j.repos.map((key) => repoParts(repoName(key)).name);
   return names.length > 3 ? `${names.slice(0, 3).join(', ')} +${names.length - 3}` : names.join(', ');
 }
 
@@ -837,6 +970,9 @@ function jobCard(j) {
 
 function openRepo(key) {
   const main = document.getElementById('main');
+  // Back from the details leads to the service the repository lives on.
+  const r = view.repositories.find((x) => x.key === key);
+  if (r) forge = forgeOf(r);
   repoListScroll = main.scrollTop;
   repoKey = key;
   renderRepos();
@@ -862,18 +998,19 @@ function healthChip(r) {
 }
 
 function mainReason(r) {
-  if (r.loading && !r.facts) return 'GitHub wird abgefragt …';
+  if (r.loading && !r.facts) return `${serviceOf(r.repo)} wird abgefragt …`;
   return r.health.reasons[0] ?? r.health.gaps[0] ?? 'Alles gelesen, kein Befund';
 }
 
 function prSummary(r) {
   const prs = r.facts?.prs;
-  if (!prs || prs.state === 'notQueried') return 'PRs nicht abgefragt';
-  if (prs.state === 'failed') return 'PR-Abfrage fehlgeschlagen';
+  if (!prs || prs.state === 'notQueried') return `${requestWord(r.repo)}s nicht abgefragt`;
+  if (prs.state === 'failed') return `${requestWord(r.repo)}-Abfrage fehlgeschlagen`;
   const { items, complete } = prs.value;
   const dependabot = items.filter((p) => p.dependabot).length;
-  if (!items.length) return 'keine offenen PRs';
-  return `${complete ? '' : 'mind. '}${items.length} offene${items.length === 1 ? 'r PR' : ' PRs'}${dependabot ? `, ${dependabot} von Dependabot` : ''}`;
+  if (!items.length) return `keine offenen ${requestWord(r.repo)}s`;
+  const word = requestWord(r.repo);
+  return `${complete ? '' : 'mind. '}${items.length} offene${items.length === 1 ? `r ${word}` : ` ${word}s`}${dependabot ? `, ${dependabot} von ${botOf(r.repo)}` : ''}`;
 }
 
 function ciSummary(r) {
@@ -906,12 +1043,12 @@ function relations(r) {
     targets.length && `Inhalte: ${targets.join(', ')}`,
     r.products.length && `Website: ${r.products.map((p) => `${p.name}${p.enabled ? '' : ' (abgewählt)'}`).join(', ')}`,
     r.website && 'Website-Repository',
-    r.release ? `Release-Regel: Tags ${r.release.tagPrefix}x.y.z${r.release.publishesRelease ? ', mit GitHub-Release' : ''}` : 'keine Release-Regel',
+    r.release ? `Release-Regel: Tags ${r.release.tagPrefix}x.y.z${r.release.publishesRelease ? `, mit ${serviceOf(r.repo)}-Release` : ''}` : 'keine Release-Regel',
   ].filter(Boolean).join(' · ');
 }
 
 function repoCard(r) {
-  const [owner, name] = r.repo.split('/');
+  const { owner, name, host } = repoParts(r.repo);
   const locked = r.capabilities.care ?? (r.job ? 'gehört zu einem offenen Auftrag' : null);
   return h('div', { class: `repo-card ${r.loading && !r.facts ? '' : HEALTH[r.health.state][0]} ${r.enabled ? '' : 'off'}`, onclick: () => openRepo(r.key) },
     h('div', { class: 'repo-card-head' },
@@ -922,7 +1059,7 @@ function repoCard(r) {
         onchange: (e) => { e.target.checked ? selection.add(r.key) : selection.delete(r.key); renderRepos(); },
       }),
       h('button', { type: 'button', class: 'repo-name', id: domId('repo-row', r.key), onclick: (e) => { e.stopPropagation(); openRepo(r.key); } },
-        h('strong', { class: 'ellipsis' }, name), h('span', { class: 'muted small ellipsis' }, owner)),
+        h('strong', { class: 'ellipsis' }, name), h('span', { class: 'muted small ellipsis', title: host ? `${host}/${owner}` : owner }, owner)),
       h('span', { class: 'spacer' }),
       r.loading && r.facts && h('span', { class: 'spinner muted', title: 'wird neu gelesen' }),
       r.job && jobChip(r.job.status, r.job.status.state === 'running' || r.job.status.state === 'preparing'),
@@ -970,14 +1107,14 @@ function repoDetail(r) {
   return h('div', { class: 'repo-detail' },
     h('div', { class: 'repo-detail-head' },
       h('nav', { class: 'crumbs', 'aria-label': 'Pfad' },
-        button('Alle Repositories', closeRepo, { id: 'repo-back', iconName: 'back', cls: 'link' }),
+        button(gitlabHost(r.repo) ? `GitLab ${gitlabHost(r.repo)}` : 'GitHub', closeRepo, { id: 'repo-back', iconName: 'back', cls: 'link', title: 'Zurück zur Übersicht' }),
         h('span', { class: 'muted', 'aria-hidden': 'true' }, '›'),
-        h('h2', { class: 'ellipsis', title: r.repo }, r.repo)),
+        h('h2', { class: 'ellipsis', title: r.repo }, repoParts(r.repo).path)),
       healthChip(r),
       h('span', { class: 'spacer' }),
       button(r.loading ? 'Wird gelesen …' : 'Status aktualisieren', () => call('refresh_repos', { keys: [r.key] }),
-        { id: 'repo-refresh', iconName: 'refresh', disabled: r.loading, title: `Liest den Stand von ${r.repo} auf GitHub: nur lesend, ohne Claude` }),
-      access?.url && button('Auf GitHub', () => call('open_url', { url: access.url }), { id: 'repo-github', iconName: 'external' }),
+        { id: 'repo-refresh', iconName: 'refresh', disabled: r.loading, title: `Liest den Stand von ${r.repo} auf ${serviceOf(r.repo)}: nur lesend, ohne Claude` }),
+      access?.url && button(`Auf ${serviceOf(r.repo)}`, () => call('open_url', { url: access.url }), { id: 'repo-github', iconName: 'external' }),
       button('Pflegen …', () => jobDialog([r.key]), { id: 'repo-care', cls: 'primary', iconName: 'branch', disabled: !!locked || !!view.running, title: locked ? `Nicht möglich: ${locked}` : `Pflegeauftrag für ${r.repo}` })),
     statusLine(r),
     r.job && h('div', { class: `note-box ${JOB_STATE[r.job.status.state]?.[0] ?? ''}` },
@@ -1027,7 +1164,7 @@ function localText(local) {
   switch (local.state) {
     case 'found': return local.path;
     case 'missing': return `fehlt: ${local.path}`;
-    case 'foreign': return `${local.path} ist keine Kopie dieses Repositorys (${local.origin ?? 'ohne GitHub-origin'})`;
+    case 'foreign': return `${local.path} ist keine Kopie dieses Repositorys (${local.origin ?? 'ohne erkannten origin'})`;
     default: return 'nicht eingetragen; Status und PR-Pflege gehen auch ohne';
   }
 }
@@ -1040,13 +1177,13 @@ function statusFacts(r, branch) {
   const sinceLabel = ok(since) ? `Commits seit ${since.value.baseKind === 'release' ? 'Release' : 'Tag'} ${since.value.base}` : 'Commits seit Release';
   return h('div', { class: 'fact-grid' },
     row('Repository', access ? [access.private ? 'privat' : 'öffentlich', access.archived && 'archiviert'].filter(Boolean).join(' · ') : fetchText(f?.access, () => '')),
-    access && row('Schreibzugriff', access.canPush == null ? 'unbekannt (ohne gh-Anmeldung meldet GitHub keine Rechte)' : access.canPush ? 'ja' : 'nein, nur lesbar', access.canPush === false ? 'orange' : ''),
+    access && row('Schreibzugriff', access.canPush == null ? `unbekannt (ohne ${gitlabHost(r.repo) ? 'glab' : 'gh'}-Anmeldung meldet ${serviceOf(r.repo)} keine Rechte)` : access.canPush ? 'ja' : 'nein, nur lesbar', access.canPush === false ? 'orange' : ''),
     row('Default-Branch', access ? `${branch}${ok(f.head) ? ` · HEAD ${short(f.head.value)}` : ''}` : '–'),
     row('CI', fetchText(f?.ci, (ci) => `${CI_TEXT[ci.state]}: ${ci.detail} (Commit ${short(ci.sha)})`),
       ok(f?.ci)?.state === 'failed' ? 'red' : ok(f?.ci)?.state === 'passed' ? 'green' : ''),
     row('Release', f ? releaseText(f) : '–'),
     row(sinceLabel, !since ? '–' : ok(since) ? String(since.value.commits) : since.state === 'failed' ? since.value : `nicht bestimmbar${since.value ? `: ${since.value}` : ''}`),
-    row('Release-Regel', r.release ? `Patch-Tags ${r.release.tagPrefix}x.y.z${r.release.publishesRelease ? ', danach wartet die App auf das GitHub-Release' : ''}` : 'keine: die App setzt keine Tags', r.release ? '' : 'muted'),
+    row('Release-Regel', r.release ? `Patch-Tags ${r.release.tagPrefix}x.y.z${r.release.publishesRelease ? `, danach wartet die App auf das ${serviceOf(r.repo)}-Release` : ''}` : 'keine: die App setzt keine Tags', r.release ? '' : 'muted'),
     row('Lokale Kopie', localText(r.local), ['found', 'notConfigured'].includes(r.local.state) ? '' : 'orange'),
     r.products.length > 0 && row('Website', [...r.products.map((p) => `${p.name}: dokumentiert ${p.documented}${p.enabled ? '' : ', nicht ausgewählt'}`)].join(' · ')),
     r.website && row('Rolle', 'zugleich das Repository der Website'),
@@ -1056,24 +1193,24 @@ function statusFacts(r, branch) {
 function prSection(r, branch) {
   const prs = r.facts?.prs;
   const list = ok(prs);
-  const head = (info) => h('div', { class: 'section-head wrap' }, h('h3', null, 'Pull Requests'), info, h('span', { class: 'spacer' }),
+  const head = (info) => h('div', { class: 'section-head wrap' }, h('h3', null, requestsTitle(r.repo)), info, h('span', { class: 'spacer' }),
     list?.items.length > 0 && button(r.detailsLoading ? 'Wird gelesen …' : 'CI und Mergebarkeit neu lesen', () => call('load_repo_details', { key: r.key }),
       { id: 'repo-details', iconName: 'refresh', disabled: r.detailsLoading }));
   if (!list) return [head(), h('div', { class: 'note' }, fetchText(prs, () => ''))];
-  if (!list.items.length) return [head(), h('div', { class: 'note' }, 'Keine offenen Pull Requests.')];
+  if (!list.items.length) return [head(), h('div', { class: 'note' }, `Keine offenen ${requestsTitle(r.repo)}.`)];
   const dependabot = list.items.filter((p) => p.dependabot).length;
   const intoDefault = list.items.filter((p) => p.intoDefault).length;
   const details = new Map((r.details?.prs ?? []).map((d) => [d.number, d]));
   return [
     head(h('span', { class: 'muted small' },
-      `${list.complete ? '' : 'mindestens '}${list.items.length} offen, davon ${dependabot} von Dependabot; ${intoDefault} auf ${branch} kommen für die Pflege in Frage`)),
+      `${list.complete ? '' : 'mindestens '}${list.items.length} offen, davon ${dependabot} von ${botOf(r.repo)}; ${intoDefault} auf ${branch} kommen für die Pflege in Frage`)),
     r.detailsLoading && !r.details && h('div', { class: 'note' }, 'CI und Mergebarkeit werden gelesen …'),
     r.details && !r.details.complete && h('div', { class: 'note' }, `CI und Mergebarkeit gelesen für die ersten ${r.details.prs.length}.`),
-    h('div', { class: 'items' }, list.items.map((pr) => prItem(pr, details.get(pr.number), branch))),
+    h('div', { class: 'items' }, list.items.map((pr) => prItem(r.repo, pr, details.get(pr.number), branch))),
   ].filter(Boolean);
 }
 
-function prItem(pr, detail, branch) {
+function prItem(repo, pr, detail, branch) {
   const ci = detail?.ci;
   const ciBadge = !detail ? null : ok(ci)
     ? badge({ passed: 'green', failed: 'red', pending: '', noChecks: 'orange', unknown: 'orange' }[ci.value.state], `CI ${CI_TEXT[ci.value.state]}`, ci.value.detail)
@@ -1081,9 +1218,9 @@ function prItem(pr, detail, branch) {
   const merge = detail && badge(['clean', 'has_hooks'].includes(detail.mergeableState) ? 'green' : detail.mergeableState === 'dirty' ? 'red' : '', detail.mergeable);
   return h('div', { class: 'item' },
     h('div', { class: 'item-line' },
-      button(`#${pr.number}`, () => call('open_url', { url: pr.url }), { cls: 'link mono', title: 'Auf GitHub öffnen' }),
+      button(requestRef(repo, pr.number), () => call('open_url', { url: pr.url }), { cls: 'link mono', title: `Auf ${serviceOf(repo)} öffnen` }),
       h('span', { class: 'item-title', title: pr.title }, pr.title),
-      pr.dependabot ? badge('accent', 'Dependabot') : h('span', { class: 'muted small' }, pr.author),
+      pr.dependabot ? badge('accent', botOf(repo)) : h('span', { class: 'muted small' }, pr.author),
       pr.draft && badge('', 'Entwurf'),
       h('span', { class: 'spacer' }),
       ciBadge, merge),
@@ -1126,7 +1263,7 @@ function securityItem(r, c) {
       c.fix && button(`${c.fix.label} …`, () => securityFixDialog(r, c.fix.fix), {
         cls: 'link', disabled: !!locked, title: locked ? `Nicht möglich: ${locked}` : c.fix.effect, id: domId('sec-fix', `${r.key}-${c.id}`),
       }),
-      c.url && button('Auf GitHub', () => call('open_url', { url: c.url }), { cls: 'link', title: 'Einstellung oder Alerts auf GitHub öffnen' })),
+      c.url && button(`Auf ${serviceOf(r.repo)}`, () => call('open_url', { url: c.url }), { cls: 'link', title: `Einstellung oder Alerts auf ${serviceOf(r.repo)} öffnen` })),
     h('div', { class: 'item-reason selectable' }, c.detail));
 }
 
@@ -1139,14 +1276,16 @@ function securitySection(r) {
     h('span', { class: 'spacer' }),
     offers.length > 0 && button(`Beheben (${offers.length}) …`, () => securityFixDialog(r), {
       id: 'repo-security-fix', iconName: 'shield', disabled: !!locked,
-      title: locked ? `Nicht möglich: ${locked}` : 'Einstellungen auf GitHub ändern; du wählst, welche',
+      title: locked ? `Nicht möglich: ${locked}` : `Einstellungen auf ${serviceOf(r.repo)} ändern; du wählst, welche`,
     }),
     button(r.securityLoading ? 'Wird geprüft …' : report ? 'Neu prüfen' : 'Sicherheit prüfen', () => call('check_security', { keys: [r.key] }),
       { id: 'repo-security-check', iconName: report ? 'refresh' : 'shield', disabled: r.securityLoading, title: 'Nur lesend, ohne Claude' }));
   if (!report) {
     return [head,
       h('div', { class: 'note' }, r.securityLoading ? 'Schutzregeln, Einstellungen und Alerts werden gelesen …'
-        : 'Noch nicht geprüft. Gelesen werden Branch-Schutz, Scanning-Einstellungen, offene Alerts und die Rechte des Workflow-Tokens; nur lesend, ohne Claude.'),
+        : gitlabHost(r.repo)
+          ? 'Noch nicht geprüft. Gelesen werden Branch-Schutz, Pipeline-Pflicht, Push-Regel gegen Secrets, Secret Detection, Renovate, Job-Token-Zugriff und Deploy-Keys; nur lesend, ohne Claude.'
+          : 'Noch nicht geprüft. Gelesen werden Branch-Schutz, Scanning-Einstellungen, offene Alerts und die Rechte des Workflow-Tokens; nur lesend, ohne Claude.'),
       r.securityError && h('div', { class: 'note error-text' }, `Prüfung fehlgeschlagen: ${r.securityError}`)].filter(Boolean);
   }
   const findings = report.checks.filter((c) => FINDING_LEVELS.includes(c.level));
@@ -1157,8 +1296,11 @@ function securitySection(r) {
     r.securityError && h('div', { class: 'note orange' }, `Letzte Prüfung fehlgeschlagen, gezeigt wird die ältere: ${r.securityError}`),
     report.archived ? h('div', { class: 'note' }, 'Archiviert: Einstellungen lassen sich nicht ändern.')
       : report.admin !== true && h('div', { class: 'note orange' },
-        report.admin == null ? 'Ohne gh-Anmeldung ist vieles nicht lesbar, und nichts lässt sich in der App beheben (gh auth login).'
-          : 'Ohne Admin-Rechte sind manche Einstellungen nicht lesbar, und nichts lässt sich in der App beheben.'),
+        gitlabHost(r.repo)
+          ? (report.admin == null ? `Ohne glab-Anmeldung ist vieles nicht lesbar, und nichts lässt sich in der App beheben (glab auth login --hostname ${gitlabHost(r.repo)}).`
+            : 'Ohne Maintainer-Rechte sind manche Einstellungen nicht lesbar, und nichts lässt sich in der App beheben.')
+          : report.admin == null ? 'Ohne gh-Anmeldung ist vieles nicht lesbar, und nichts lässt sich in der App beheben (gh auth login).'
+            : 'Ohne Admin-Rechte sind manche Einstellungen nicht lesbar, und nichts lässt sich in der App beheben.'),
     findings.length ? h('div', { class: 'items' }, findings.map((c) => securityItem(r, c))) : h('div', { class: 'note green' }, 'Kein Befund.'),
     rest.length > 0 && h('details', { class: 'sec-more' },
       h('summary', null, [okCount && `${okCount} in Ordnung`, unknownCount && `${unknownCount} nicht prüfbar`].filter(Boolean).join(', ')),
@@ -1190,7 +1332,7 @@ function securityFixDialog(r, only) {
     return {
       body: [
         h('h2', null, `${r.repo}: Sicherheit verbessern`),
-        h('div', { class: 'note' }, 'Jeder Punkt ändert eine Einstellung auf GitHub. Er fügt Schutz hinzu, entfernt nichts und lässt sich in den Einstellungen des Repositorys auf GitHub wieder zurücknehmen.'),
+        h('div', { class: 'note' }, `Jeder Punkt ändert eine Einstellung auf ${serviceOf(r.repo)}. Er fügt Schutz hinzu, entfernt nichts und lässt sich in den Einstellungen des Repositorys auf ${serviceOf(r.repo)} wieder zurücknehmen.`),
         h('div', { class: 'sec-choices' }, offers.map((o) => h('label', { class: 'check-line top' },
           h('input', { type: 'checkbox', id: domId('sec-pick', o.fix), checked: picked.has(o.fix), disabled: s.busy, onchange: (e) => { e.target.checked ? picked.add(o.fix) : picked.delete(o.fix); render(); } }),
           h('span', null,
@@ -1201,7 +1343,7 @@ function securityFixDialog(r, only) {
       ],
       actions: [
         button('Abbrechen', close, { disabled: s.busy }),
-        button(s.busy ? 'Wird geändert …' : picked.size > 1 ? `${picked.size} Änderungen ausführen` : 'Auf GitHub ändern', async () => {
+        button(s.busy ? 'Wird geändert …' : picked.size > 1 ? `${picked.size} Änderungen ausführen` : `Auf ${serviceOf(r.repo)} ändern`, async () => {
           s.busy = true; s.error = ''; render();
           try {
             s.results = await invoke('fix_security', { key: r.key, fixes: [...picked] });
@@ -1215,7 +1357,7 @@ function securityFixDialog(r, only) {
 
 // MARK: Repositories: content targets
 
-const KIND_TEXT = { docs: 'README/Dokumentation', wiki: 'GitHub-Wiki' };
+const KIND_TEXT = { docs: 'README/Dokumentation', wiki: 'Wiki' };
 const BASIS_TEXT = { release: 'neuestes Release', commit: 'aktueller Stand des Default-Branches' };
 
 function deliveryText(d) {
@@ -1317,13 +1459,15 @@ function manageSection(r) {
     }), h('span', null, h('strong', null, 'Release-Regel: die App darf die nächste Patch-Version taggen'),
       h('div', { class: 'note' }, 'Die App errät keine Versionierung. Getaggt wird nur auf grüner CI genau des Ziel-Commits.'))),
     h('div', { class: 'field-row' }, h('label', { for: 'manage-prefix' }, 'Tag-Präfix'), prefixInput),
-    h('label', { class: 'check-line' }, publishes, 'Ein Workflow des Repositorys veröffentlicht zu jedem Tag ein GitHub-Release; die App wartet darauf'),
+    h('label', { class: 'check-line' }, publishes, gitlabHost(r.repo)
+      ? 'Eine Pipeline des Projekts veröffentlicht zu jedem Tag ein GitLab-Release; die App wartet darauf'
+      : 'Ein Workflow des Repositorys veröffentlicht zu jedem Tag ein GitHub-Release; die App wartet darauf'),
     r.conflicts.length > 0 && h('div', { class: 'note orange' }, r.conflicts.join(' · ')),
     h('div', { class: 'line' },
       saveButton, state,
       h('span', { class: 'spacer' }),
       button('Aus der Verwaltung entfernen …', () => confirmDialog('Aus der Verwaltung entfernen',
-        `${r.repo} aus der Verwaltung nehmen? Gelöscht wird nichts: nicht auf GitHub, nicht die lokale Kopie, nicht die Website-Konfiguration.`, 'Entfernen',
+        `${r.repo} aus der Verwaltung nehmen? Gelöscht wird nichts: nicht auf ${serviceOf(r.repo)}, nicht die lokale Kopie, nicht die Website-Konfiguration.`, 'Entfernen',
         async () => { if (await act('remove_repository', { key: r.key })) { selection.delete(r.key); closeRepo(); } }), { id: 'manage-remove', cls: 'danger', disabled: locked })),
   ].filter(Boolean);
 }
@@ -1454,14 +1598,15 @@ function renderJob(summary, job) {
     !running && !finished && button('Auftrag beenden …', () => confirmDialog('Auftrag beenden', 'Den Auftrag beenden? Was noch nicht erledigt ist, bleibt unerledigt; nichts Erledigtes wird zurückgenommen.', 'Beenden',
       () => act('end_job', { id: summary.id })), { id: 'job-end' }),
     finished && button('Auftragsverlauf löschen …', () => confirmDialog('Auftragsverlauf löschen',
-      'Gelöscht werden die gespeicherten Daten dieses Auftrags, sein Log und seine temporären Arbeitsdaten. Was der Auftrag auf GitHub, im Wiki oder auf der Website geändert hat, bleibt bestehen und wird nicht zurückgenommen.',
+      'Gelöscht werden die gespeicherten Daten dieses Auftrags, sein Log und seine temporären Arbeitsdaten. Was der Auftrag auf GitHub oder GitLab, im Wiki oder auf der Website geändert hat, bleibt bestehen und wird nicht zurückgenommen.',
       'Verlauf löschen', () => act('delete_job', { id: summary.id }).then((ok) => ok && closeJob()), { danger: true }), { id: 'job-delete', cls: 'danger' }),
   ].filter(Boolean));
   runsUi.status.replaceChildren(
     h('div', { class: `note-box ${JOB_STATE[status.state]?.[0] ?? ''}` },
       h('strong', null, status.reason), status.next && h('div', { class: 'muted small' }, `Nächster Schritt: ${status.next}`)));
   const o = summary.options;
-  const activities = [o.prs && 'Pull Requests', o.cleanup && 'Aufräumen', o.release && 'Release'].filter(Boolean);
+  const gitlabOnly = summary.repos.every((key) => gitlabHost(key));
+  const activities = [o.prs && (gitlabOnly ? 'Merge Requests' : 'Pull Requests'), o.cleanup && 'Aufräumen', o.release && 'Release'].filter(Boolean);
   const targetNames = o.targets.map((t) => `${view.targets.find((x) => x.id === t.id)?.name ?? t.id} (${t.basis === 'release' ? 'Release' : 'aktueller Stand'})`);
   runsUi.facts.replaceChildren(...[
     h('span', null, h('strong', null, 'Repositories: '), summary.repos.map(repoName).join(', ')),
@@ -1515,13 +1660,27 @@ function stepBlock(job, step, running) {
   const body = {
     care: careBlock, release: releaseBlock, docs: contentBlock, wiki: contentBlock, website: websiteBlock,
   }[step.kind](job, step, running);
+  const stopped = ['failed', 'blocked'].includes(step.state) && step.detail;
   return h('details', { class: `run step-block ${decide ? 'decide' : ''}`, open, ontoggle: (e) => stepOpen.set(key, e.target.open) },
     h('summary', null,
       h('strong', null, step.label), stepChip(step.state),
       h('span', { class: 'muted small ellipsis step-detail', title: step.detail }, step.detail),
       h('span', { class: 'spacer' }),
       step.links.map((l) => button(l.label, () => call('open_url', { url: l.url }), { cls: 'link', iconName: 'external' }))),
-    h('div', { class: 'run-body' }, body));
+    h('div', { class: 'run-body' },
+      // The heading cuts the reason short; a stopped step shows it in full, with what to do about it.
+      stopped && h('div', { class: `note-box ${step.state === 'failed' ? 'error' : 'warning'}` },
+        h('span', { class: 'selectable' }, step.detail),
+        claudeLoginHint(step.detail) && h('strong', { class: 'small' }, claudeLoginHint(step.detail))),
+      body));
+}
+
+/** What a failed Claude run needs from the user, when its message says so (as `claude_login_hint` in jobrun.rs). */
+function claudeLoginHint(text) {
+  // The care step's own reason already carries the hint.
+  return /authenticat|oauth|log ?in\b|\b401\b|invalid api key/i.test(text ?? '') && !(text ?? '').includes('/login')
+    ? 'Claude Code ist nicht (mehr) angemeldet: im Terminal claude starten und /login ausführen, dann diesen Schritt neu vorbereiten.'
+    : null;
 }
 
 function waitsFor(job, step) {
@@ -1550,7 +1709,7 @@ const DONE_TEXT = { merge: 'gemergt', close: 'geschlossen', rebase: 'Rebase ange
 
 function careBlock(job, step) {
   const set = job.plan;
-  if (!set) return [waitsFor(job, step) || h('div', { class: 'note' }, step.state === 'running' ? 'Die App liest GitHub und lässt Claude die offenen PRs bewerten …' : 'Noch nicht geprüft.')];
+  if (!set) return [waitsFor(job, step) || h('div', { class: 'note' }, step.state === 'running' ? 'Die App liest die Repositories und lässt Claude die offenen PRs und MRs bewerten …' : 'Noch nicht geprüft.')];
   const decide = step.state === 'needsApproval';
   const markKey = `${job.id}:${set.id}`;
   const marks = exclusions.get(markKey) ?? { excluded: new Set(), included: new Set() };
@@ -1568,7 +1727,7 @@ function careBlock(job, step) {
         if (await act('approve_plan', { id: job.id, planId: set.id, excluded: [...marks.excluded], included: [...marks.included] })) exclusions.delete(markKey);
       }, { cls: 'primary', iconName: 'check', disabled: !!view.running, id: 'plan-approve' }),
       button('Plan verwerfen', () => act('reject_plan', { id: job.id, planId: set.id }), { disabled: !!view.running }),
-      button('Neu prüfen', () => act('redo_step', { id: job.id, step: 'care' }), { disabled: !!view.running, title: 'Liest GitHub erneut und lässt Claude neu bewerten (kostet Claude-Nutzung)' })),
+      button('Neu prüfen', () => act('redo_step', { id: job.id, step: 'care' }), { disabled: !!view.running, title: 'Liest die Repositories erneut und lässt Claude neu bewerten (kostet Claude-Nutzung)' })),
     !decide && ['blocked', 'failed'].includes(step.state) && decisionBar(
       button('Neu prüfen', () => act('redo_step', { id: job.id, step: 'care' }), { disabled: !!view.running })),
   ].filter(Boolean);
@@ -1601,20 +1760,24 @@ function planRepo(job, p, decide, marks, single) {
     if (!pr) return line(item, h('span', null, item.label));
     const risk = pr.risk && RISKS[pr.risk];
     return line(item, [
-      button(`#${pr.number}`, () => call('open_url', { url: pr.url }), { cls: 'link mono', title: 'Auf GitHub öffnen' }),
+      button(requestRef(p.repo, pr.number), () => call('open_url', { url: pr.url }), { cls: 'link mono', title: `Auf ${serviceOf(p.repo)} öffnen` }),
       h('span', { class: 'item-title', title: pr.title }, pr.bump ? `${pr.title.replace(/ from .* to .*$/, '')} ${pr.bump}` : pr.title),
       !pr.dependabot && h('span', { class: 'muted small' }, pr.author),
       h('span', { class: 'spacer' }), risk && badge(risk[0], `Claude: ${risk[1]}`)], [
       pr.reason && h('div', { class: 'item-reason selectable' }, pr.reviewed ? `Claude: ${pr.reason}` : pr.reason),
       pr.supersededBy && h('div', { class: 'item-reason' }, `Ersetzt durch #${pr.supersededBy}`),
       decide && item.optional && h('div', { class: 'item-check' }, 'Claude rät, ihn offen zu lassen; nach den Regeln der App wäre er mergebar. Anhaken heißt: nach der Freigabe mergen, mit denselben Prüfungen direkt davor (noch offen, gleicher Commit, mergebar, CI des PR-Commits grün).'),
-      decide && APP_CHECK[pr.action] && h('div', { class: 'item-check' }, APP_CHECK[pr.action]),
-      decide && pr.action === 'merge' && pr.dependabot && h('div', { class: 'item-check' }, 'Bedingt: Verursacht ein vorheriger Merge dieses Laufs einen Konflikt, stößt die App statt des Merges @dependabot rebase an.')]);
+      decide && APP_CHECK[pr.action] && h('div', { class: 'item-check' }, gitlabHost(p.repo)
+        ? APP_CHECK[pr.action].replaceAll('GitHub', 'GitLab').replaceAll('Dependabot', 'Renovate').replaceAll('CI des PR-Commits', 'Pipeline des MR-Commits').replaceAll('PR', 'MR')
+        : APP_CHECK[pr.action]),
+      decide && pr.action === 'merge' && pr.dependabot && h('div', { class: 'item-check' }, gitlabHost(p.repo)
+        ? 'Bedingt: Verursacht ein vorheriger Merge dieses Laufs einen Konflikt, setzt die App statt des Merges das Label „rebase“; Renovate baut den MR dann neu auf.'
+        : 'Bedingt: Verursacht ein vorheriger Merge dieses Laufs einen Konflikt, stößt die App statt des Merges @dependabot rebase an.')]);
   };
   const branchLine = (item, list) => {
     const b = list.find((x) => x.name === item.reference);
     return line(item, [h('span', { class: 'mono item-title', title: item.reference }, item.reference), h('span', { class: 'spacer' }), decide && b?.proof.kind === 'afterMerge' && badge('', 'bedingt')],
-      decide && b && h('div', { class: 'item-reason' }, `${b.reason}${b.proof.kind === 'afterMerge' ? '; nur wenn dieser Merge gelingt' : ''}. Vorher: gleicher Commit, nicht geschützt, kein offener PR, Nachweis gilt bei GitHub noch.`));
+      decide && b && h('div', { class: 'item-reason' }, `${b.reason}${b.proof.kind === 'afterMerge' ? '; nur wenn dieser Merge gelingt' : ''}. Vorher: gleicher Commit, nicht geschützt, kein offener ${requestWord(p.repo)}, Nachweis gilt bei ${serviceOf(p.repo)} noch.`));
   };
   const group = (title, list) => list.length > 0 && [h('div', { class: 'item-group' }, `${title} (${list.length})`), ...list];
   const of = (kind) => items.filter((i) => i.kind === kind);
@@ -1653,11 +1816,11 @@ function planRepo(job, p, decide, marks, single) {
         group('Tag', of('tag').map((item) => line(item, [h('strong', null, item.reference), h('span', { class: 'muted small' }, `nach ${p.lastTag ?? '?'}`), h('span', { class: 'spacer' }), decide && badge('', 'bedingt')],
           decide && h('div', { class: 'item-check' }, `Im Release-Schritt: nur wenn alle geplanten Merges gelingen, ${p.defaultBranch} sich sonst nicht bewegt und die CI genau dieses Commits grün ist (bis zu 30 Minuten). Direkt vor dem Schreiben prüft die App die Release-Linie erneut.`)))),
         !p.tag && p.tagNote && job.options.release && [h('div', { class: 'item-group' }, 'Tag'), h('div', { class: 'item-reason' }, `Kein Tag: ${p.tagNote}`)],
-        group('Aufräumen auf GitHub', of('branch').map((i) => branchLine(i, p.branches))),
+        group(`Aufräumen auf ${serviceOf(p.repo)}`, of('branch').map((i) => branchLine(i, p.branches))),
         group('Lokale Kopie abgleichen', of('localSync').map((i) => line(i, h('span', null, 'git fetch --prune origin'), decide && h('div', { class: 'item-reason' }, `Vor dem Löschen, weil ${p.localSync}. Misslingt der Abgleich, löscht die App lokal nichts.`)))),
         group('Aufräumen lokal', of('localBranch').map((i) => branchLine(i, p.localBranches))),
         keep.length > 0 && [h('div', { class: 'item-group' }, `Bleibt offen (${keep.length})`), ...keep.map((pr) => h('div', { class: 'item' },
-          h('div', { class: 'item-line' }, button(`#${pr.number}`, () => call('open_url', { url: pr.url }), { cls: 'link mono' }), h('span', { class: 'item-title' }, pr.title), h('span', { class: 'spacer' }), pr.risk && badge(RISKS[pr.risk][0], `Claude: ${RISKS[pr.risk][1]}`)),
+          h('div', { class: 'item-line' }, button(requestRef(p.repo, pr.number), () => call('open_url', { url: pr.url }), { cls: 'link mono' }), h('span', { class: 'item-title' }, pr.title), h('span', { class: 'spacer' }), pr.risk && badge(RISKS[pr.risk][0], `Claude: ${RISKS[pr.risk][1]}`)),
           h('div', { class: 'item-reason selectable' }, pr.reviewed ? `Claude: ${pr.reason}` : pr.reason)))]),
       p.cleanupNote && h('div', { class: 'note orange' }, p.cleanupNote),
       p.cloneNote && h('div', { class: 'note orange' }, `Lokale Branches übersprungen: ${p.cloneNote}`),
@@ -1674,8 +1837,8 @@ function releaseBlock(job, step) {
       h('span', null, h('strong', null, 'Repository: '), repoName(step.subject)),
       plan?.tag && h('span', null, h('strong', null, 'Geplant: '), `${plan.tag} nach ${plan.lastTag}`),
       step.tag && h('span', null, h('strong', null, 'Gesetzt: '), `${step.tag} auf ${short(step.commit)}`),
-      rule && h('span', null, h('strong', null, 'GitHub-Release: '), rule.publishesRelease ? 'die App wartet darauf (bis zu 30 Minuten je Prüfung)' : 'laut Regel keins')),
-    step.state === 'waiting' && h('div', { class: 'note orange' }, `${step.detail}. „Erneut prüfen“ oben fragt GitHub wieder; abhängige Schritte warten so lange.`),
+      rule && h('span', null, h('strong', null, `${serviceOf(step.subject)}-Release: `), rule.publishesRelease ? 'die App wartet darauf (bis zu 30 Minuten je Prüfung)' : 'laut Regel keins')),
+    step.state === 'waiting' && h('div', { class: 'note orange' }, `${step.detail}. „Erneut prüfen“ oben fragt ${serviceOf(step.subject)} wieder; abhängige Schritte warten so lange.`),
   ].filter(Boolean);
 }
 
@@ -1741,7 +1904,7 @@ function contentBlock(job, step) {
   const redoable = ['needsApproval', 'blocked', 'failed', 'nothingToDo'].includes(step.state) && !step.pr && !step.writing;
   const docs = step.kind === 'docs';
   const effect = docs
-    ? `Ein neuer Branch und ein Pull Request mit genau diesem Stand${target?.mergeWhenGreen ? '; bei grüner CI mergt die App ihn' : '; gemergt wird nicht automatisch'}. Ist die Datei auf dem Zielbranch inzwischen geändert, stoppt die App.`
+    ? `Ein neuer Branch und ein ${gitlabHost(target?.repo) ? 'Merge Request' : 'Pull Request'} mit genau diesem Stand${target?.mergeWhenGreen ? '; bei grüner CI mergt die App ihn' : '; gemergt wird nicht automatisch'}. Ist die Datei auf dem Zielbranch inzwischen geändert, stoppt die App.`
     : 'Genau dieser Stand wird per Push ohne Force ins Wiki veröffentlicht. Hat jemand das Wiki inzwischen geändert, stoppt die App und überschreibt nichts.';
   const failedChecks = p?.checks.filter((c) => !c.ok) ?? [];
   return [
@@ -1757,7 +1920,7 @@ function contentBlock(job, step) {
       decide && ['Freigeben bewirkt', effect],
     ], p.summary),
     decide && decisionBar(
-      button(docs ? (target?.mergeWhenGreen ? 'Freigeben: PR erstellen und bei grüner CI mergen' : 'Freigeben: Pull Request erstellen') : 'Freigeben: im Wiki veröffentlichen',
+      button(docs ? (target?.mergeWhenGreen ? `Freigeben: ${requestWord(target?.repo)} erstellen und bei grüner CI mergen` : `Freigeben: ${requestsTitle(target?.repo).replace(/s$/, '')} erstellen`) : 'Freigeben: im Wiki veröffentlichen',
         () => act('approve_step', { id: job.id, step: step.id, fingerprint: p.fingerprint }), { cls: 'primary', iconName: 'check', disabled: !!view.running }),
       button('Verwerfen', () => act('reject_step', { id: job.id, step: step.id }), { disabled: !!view.running }),
       button('Neu vorbereiten', () => act('redo_step', { id: job.id, step: step.id }), { disabled: !!view.running, title: 'Neue Quellstände, neuer Claude-Lauf (kostet Claude-Nutzung)' })),
@@ -1987,13 +2150,14 @@ function addReposDialog() {
       },
         h('div', { class: 'repo-head' },
           h('input', { type: 'checkbox', checked: on || r.managed, disabled: r.managed, tabindex: '-1', 'aria-hidden': 'true' }),
-          h('strong', null, r.repo),
+          h('strong', null, repoParts(r.repo).path),
+          gitlabHost(r.repo) && tag(`GitLab · ${gitlabHost(r.repo)}`, 'orange'),
           r.managed && tag('verwaltet', 'green'),
           r.isWebsite && tag('Website', 'accent'),
           r.onSite && tag('Produkt der Website')),
         h('div', { class: 'muted small mono' }, r.path),
         r.others.length > 0 && h('div', { class: 'muted small' }, `Weitere Klone: ${r.others.join(', ')} (in der Verwaltung änderbar)`));
-    }) : [h('div', { class: 'note' }, s.data.repos.length ? 'Keine passenden Repositories.' : 'In diesem Ordner liegt kein Git-Klon mit GitHub-Origin.')]));
+    }) : [h('div', { class: 'note' }, s.data.repos.length ? 'Keine passenden Repositories.' : 'In diesem Ordner liegt kein Git-Klon mit GitHub- oder GitLab-Origin.')]));
     if (focusId) {
       // A bulk button that has just become pointless is disabled; the other one takes the focus.
       const again = document.getElementById(focusId);
@@ -2014,16 +2178,16 @@ function addReposDialog() {
     return {
       body: [
         h('h2', null, 'Repositories auswählen'),
-        h('p', { class: 'note', style: 'margin:0' }, 'Die lokalen Git-Klone mit GitHub-Origin; die lokale Kopie wird gleich mit eingetragen. Nichts wird geklont oder geändert.'),
+        h('p', { class: 'note', style: 'margin:0' }, 'Die lokalen Git-Klone mit GitHub- oder GitLab-Origin; die lokale Kopie wird gleich mit eingetragen. Nichts wird geklont oder geändert.'),
         h('div', { class: 'line' },
           h('span', { class: 'spacer muted small' }, s.data ? `Ordner: ${s.data.folder} · ${s.data.repos.length} Repositories` : ''),
           button('Anderer Ordner …', async () => { const p = await call('pick_folder'); if (p) { s.dir = p; picked.clear(); load(); } }, { id: 'add-folder' }),
           button('Neu einlesen', load, { id: 'add-reload', iconName: 'refresh', iconOnly: true })),
         h('div', { class: 'repo-picker' }, search, bulk, list),
-        h('div', { class: 'field-col' }, h('label', { for: 'add-manual' }, 'Ohne lokale Kopie: owner/name eingeben (mehrere durch Leerzeichen getrennt)'),
-          h('input', { type: 'text', id: 'add-manual', value: s.manual, spellcheck: 'false', autocomplete: 'off', placeholder: 'owner/name', 'aria-describedby': 'add-manual-note',
+        h('div', { class: 'field-col' }, h('label', { for: 'add-manual' }, 'Ohne lokale Kopie: Name oder Adresse eingeben (mehrere durch Leerzeichen getrennt)'),
+          h('input', { type: 'text', id: 'add-manual', value: s.manual, spellcheck: 'false', autocomplete: 'off', placeholder: 'owner/name oder gitlab.example.com/gruppe/projekt', 'aria-describedby': 'add-manual-note',
             oninput: (e) => { s.manual = e.target.value; updateButton(); } }),
-          h('div', { class: 'note', id: 'add-manual-note' }, 'Status und PR-Pflege gehen auch ohne Klon; der Name muss auf GitHub existieren.')),
+          h('div', { class: 'note', id: 'add-manual-note' }, 'GitHub: owner/name. GitLab: host/gruppe/projekt oder die Adresse des Projekts. Status und Pflege gehen auch ohne Klon; das Projekt muss existieren.')),
         s.error && h('div', { class: 'note error-text', role: 'alert' }, s.error),
       ],
       actions: [
@@ -2132,9 +2296,9 @@ function targetDialog(target, source) {
       h('fieldset', null, h('legend', null, 'Inhalt'),
         h('div', { class: 'choice-row', role: 'radiogroup', 'aria-label': 'Art' },
           h('label', { class: 'check-line top' }, h('input', { type: 'radio', name: 't-kind', id: 't-kind-docs', checked: docs, onchange: () => setKind('docs') }),
-            h('span', null, h('strong', null, 'README oder Dokumentation'), h('div', { class: 'note' }, 'Als neuer Branch und Pull Request, nie direkt auf den Default-Branch.'))),
+            h('span', null, h('strong', null, 'README oder Dokumentation'), h('div', { class: 'note' }, 'Als neuer Branch und Pull bzw. Merge Request, nie direkt auf den Default-Branch.'))),
           h('label', { class: 'check-line top' }, h('input', { type: 'radio', name: 't-kind', id: 't-kind-wiki', checked: !docs, onchange: () => setKind('wiki') }),
-            h('span', null, h('strong', null, 'GitHub-Wiki'), h('div', { class: 'note' }, 'Nach Freigabe ein Push ohne Force, nur wenn niemand das Wiki inzwischen geändert hat.')))),
+            h('span', null, h('strong', null, 'Wiki (GitHub oder GitLab)'), h('div', { class: 'note' }, 'Nach Freigabe ein Push ohne Force, nur wenn niemand das Wiki inzwischen geändert hat.')))),
         h('div', { class: 'field-row' }, h('label', { for: 't-name' }, required('Name')), h('div', { class: 'field-stack' }, nameInput, field('name', nameInput))),
         h('div', { class: 'field-col' }, h('label', { for: 't-instructions' }, 'Auftrag an Claude'),
           h('textarea', { id: 't-instructions', rows: 3, value: t.instructions, placeholder: 'z. B. „Halte Installation, Funktionen und Konfiguration in der README auf dem Stand der Quellen; Stil und Gliederung beibehalten.“',
@@ -2158,8 +2322,8 @@ function targetDialog(target, source) {
           h('option', { value: 'commit', selected: t.basis === 'commit' }, 'Aktueller Stand des Default-Branches')), 't-basis'),
         h('div', { class: 'note' }, 'Pro Auftrag änderbar. Mit „aktueller Stand“ geht es auch ohne neues Release.'),
         docs ? h('label', { class: 'check-line top' }, h('input', { type: 'checkbox', id: 't-merge', checked: t.mergeWhenGreen, onchange: (e) => { t.mergeWhenGreen = e.target.checked; } }),
-          h('span', null, h('strong', null, 'Nach Freigabe mergen, sobald die CI grün ist'), h('div', { class: 'note' }, 'Sonst bleibt der Pull Request offen. Ohne CI-Checks wird nicht automatisch gemergt.')))
-          : h('div', { class: 'note' }, 'Ein Wiki wird nach deiner Freigabe direkt veröffentlicht; es hat keine Pull Requests.'),
+          h('span', null, h('strong', null, 'Nach Freigabe mergen, sobald die CI grün ist'), h('div', { class: 'note' }, 'Sonst bleibt der Pull bzw. Merge Request offen. Ohne CI-Checks wird nicht automatisch gemergt.')))
+          : h('div', { class: 'note' }, 'Ein Wiki wird nach deiner Freigabe direkt veröffentlicht; es hat keine Pull oder Merge Requests.'),
         h('div', { class: 'note' }, 'Jede Vorbereitung ist ein Claude-Lauf und kostet Claude-Nutzung; es gilt die Kostengrenze aus den Einstellungen.')),
       h('details', { class: 'fold', open: s.advanced, ontoggle: (e) => { s.advanced = e.target.open; } },
         h('summary', null, 'Erweiterte Optionen', (t.skill || t.model || t.check) ? h('span', { class: 'muted small' }, ' · angepasst') : null),
@@ -2167,7 +2331,7 @@ function targetDialog(target, source) {
           row('Skill (optional)', h('input', { type: 'text', value: t.skill, placeholder: 'Name eines Claude-Code-Skills', spellcheck: 'false', oninput: (e) => { t.skill = e.target.value; } }), 't-skill'),
           row('Modell', modelSelect(t.model, view.config.claudeModel || view.site?.claude?.model, (model) => { t.model = model; }, 't-model'), 't-model'),
           row('Prüfbefehl (optional)', h('input', { type: 'text', value: t.check, placeholder: 'z. B. npx --yes markdownlint-cli2 README.md', spellcheck: 'false', oninput: (e) => { t.check = e.target.value; } }), 't-check'),
-          h('div', { class: 'note' }, 'Läuft im Arbeitsordner nach Claudes Änderung, ohne deinen GitHub-Token; Exit-Code 0 heißt bestanden. Eigene Prüfungen der App laufen immer: Pfade, Konfliktmarker, leere Dateien, neu defekte relative Links.'))),
+          h('div', { class: 'note' }, 'Läuft im Arbeitsordner nach Claudes Änderung, ohne deine GitHub- und GitLab-Tokens; Exit-Code 0 heißt bestanden. Eigene Prüfungen der App laufen immer: Pfade, Konfliktmarker, leere Dateien, neu defekte relative Links.'))),
       s.error && h('div', { class: 'note error-text', role: 'alert', id: 't-form-error', tabindex: '-1' }, s.error),
     ];
     queueMicrotask(paint);
@@ -2214,6 +2378,11 @@ function jobDialog(keys) {
   const feedsWebsite = !!view.websiteSources && allowed.some((r) => view.websiteSources.includes(r.key));
   const o = { prs: true, cleanup: false, release: false, targets: new Map(), website: false, model: '', instructions: '' };
   const s = { error: '', busy: false };
+  // The words of the services the chosen repositories live on.
+  const lab = allowed.some((r) => gitlabHost(r.repo));
+  const hub = allowed.some((r) => !gitlabHost(r.repo));
+  const pick = (github, gitlab) => (lab && hub ? `${github} bzw. ${gitlab}` : lab ? gitlab : github);
+  const service = pick('GitHub', 'GitLab');
   openDialog('Pflegeauftrag', (close, render) => {
     const nothing = !o.prs && !o.cleanup && !o.release && !o.targets.size && !o.website;
     const option = (key, title, note, disabled) => h('label', { class: 'check-line top' },
@@ -2225,10 +2394,10 @@ function jobDialog(keys) {
         allowed.length > 1 && h('ul', { class: 'plain-list' }, allowed.map((r) => h('li', { class: 'mono' }, r.repo))),
         excluded.length > 0 && h('div', { class: 'note orange' }, `Ausgenommen: ${excluded.map((r) => `${r.repo} (${r.capabilities.care ?? 'gehört zu einem offenen Auftrag'})`).join(', ')}`),
         h('fieldset', null, h('legend', null, 'Repository-Pflege'),
-          option('prs', 'Pull Requests prüfen und übernehmen', 'Claude bewertet jeden offenen PR auf den Default-Branch (Risikoklasse, Release-Notes, SHA-Pins, zusammengehörige Abhängigkeiten, Nutzung im Code); das kostet Claude-Nutzung. Gemergt wird nur, was GitHub mergebar mit grüner CI meldet und Claude grün oder gelb einstuft. Überflüssige PRs werden mit Begründung geschlossen, Dependabot-PRs mit Konflikt neu aufgebaut.'),
-          option('cleanup', 'Gemergte Branches aufräumen', 'Branches, deren Commits auf GitHub vollständig im Default-Branch sind oder deren PR gemergt wurde, auf GitHub und in der lokalen Kopie. Geschützte, ausgecheckte und Branches offener PRs bleiben.'),
+          option('prs', `${pick('Pull Requests', 'Merge Requests')} prüfen und übernehmen`, `Claude bewertet jeden offenen ${pick('PR', 'MR')} auf den Default-Branch (Risikoklasse, Release-Notes, Versions-Pins, zusammengehörige Abhängigkeiten, Nutzung im Code); das kostet Claude-Nutzung. Gemergt wird nur, was ${service} mergebar mit grüner CI meldet und Claude grün oder gelb einstuft. Überflüssige ${pick('PRs', 'MRs')} werden mit Begründung geschlossen, ${pick('Dependabot-PRs', 'Renovate-MRs')} mit Konflikt neu aufgebaut.`),
+          option('cleanup', 'Gemergte Branches aufräumen', `Branches, deren Commits auf ${service} vollständig im Default-Branch sind oder deren ${pick('PR', 'MR')} gemergt wurde, auf ${service} und in der lokalen Kopie. Geschützte, ausgecheckte und Branches offener ${pick('PRs', 'MRs')} bleiben.`),
           option('release', 'Release: nächste Patch-Version taggen', withRule.length
-            ? `Nur für Repositories mit Release-Regel (${withRule.map((r) => r.repo).join(', ')}), nur auf grüner CI genau des Ziel-Commits; danach wartet die App bei Bedarf auf das veröffentlichte GitHub-Release.`
+            ? `Nur für Repositories mit Release-Regel (${withRule.map((r) => r.repo).join(', ')}), nur auf grüner CI genau des Ziel-Commits; danach wartet die App bei Bedarf auf das veröffentlichte ${service}-Release.`
             : 'Keins der Repositories hat eine Release-Regel; einrichten unter Repository → Verwaltung.', !withRule.length)),
         (targets.length > 0 || feedsWebsite) && h('fieldset', null, h('legend', null, 'Zugeordnete Inhalte'),
           targets.map((t) => h('div', { class: 'target-choice' },
@@ -2244,7 +2413,7 @@ function jobDialog(keys) {
         (o.prs || o.targets.size > 0 || o.website) && row('Modell', modelSelect(o.model, view.config.claudeModel || view.site?.claude?.model, (model) => { o.model = model; }, 'job-model'), 'job-model'),
         (o.targets.size > 0 || o.website) && h('div', { class: 'field-col' }, h('label', { for: 'job-instructions' }, 'Zusätzliche Anweisung für Inhalte und Website (optional)'),
           h('textarea', { id: 'job-instructions', rows: 2, value: o.instructions, oninput: (e) => { o.instructions = e.target.value; } })),
-        h('div', { class: 'note' }, 'Der Auftrag liest und bereitet vor, ohne nachzufragen. Vor jeder Änderung auf GitHub, im Wiki oder auf der Website legt er dir einen Vorschlag zur Freigabe vor; der Fortschritt steht unter Aufträge.'),
+        h('div', { class: 'note' }, `Der Auftrag liest und bereitet vor, ohne nachzufragen. Vor jeder Änderung auf ${service}, im Wiki oder auf der Website legt er dir einen Vorschlag zur Freigabe vor; der Fortschritt steht unter Aufträge.`),
         s.error && h('div', { class: 'note error-text', role: 'alert' }, s.error),
       ],
       actions: [
@@ -2352,6 +2521,9 @@ function settingsDialog() {
             row('GitHub', h('div', { class: view.signedIn === false ? 'orange' : 'muted' }, view.signedIn === false
               ? 'GitHub-CLI nicht angemeldet: im Terminal gh auth login'
               : view.signedIn ? 'über die GitHub-CLI (gh) angemeldet; die App nutzt ihren Token, Claude nie' : 'wird beim ersten Lesen geprüft (GitHub-CLI gh)')),
+            row('GitLab', h('div', { class: (view.gitlabHosts ?? []).some((g) => g.signedIn === false) ? 'orange' : 'muted' }, (view.gitlabHosts ?? []).length
+              ? (view.gitlabHosts ?? []).map((g) => `${g.host}: ${g.signedIn === true ? 'über glab angemeldet' : g.signedIn === false ? `nicht angemeldet (glab auth login --hostname ${g.host})` : g.configured ? 'in glab eingerichtet' : 'wird beim ersten Lesen geprüft'}`).join(' · ')
+              : 'keine Instanz; mit der GitLab-CLI anmelden: glab auth login --hostname <instanz>')),
             row('Repo-Ordner', h('div', { class: 'line' }, text('workspaceDir', { id: 's-workspace', placeholder: `${view.workspaceDisplay} (automatisch)` }),
               button('Auswählen …', async () => { const p = await call('pick_folder'); if (p) { s.workspaceDir = p; repoCache = null; render(); } }, { id: 's-workspace-pick' }))),
             h('div', { class: 'note' }, 'Aus diesem Ordner bietet „Repositories auswählen“ die lokalen Klone an; neue Klone legt die App hier an.')),

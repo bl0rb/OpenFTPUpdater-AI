@@ -2,7 +2,8 @@
 //!
 //! - `config`: the app's own settings (managed repositories, targets, website project, SFTP), stored in the app data folder
 //! - `site`: the project's `.openreleasepilot/site.json` (build, output, URL, watched products)
-//! - `shell`, `git`, `github`, `claude`: external tools
+//! - `shell`, `git`, `github`, `gitlab`, `claude`: external tools
+//! - `forge`: whether a repository lives on GitHub or on a GitLab instance
 //! - `sftp`, `manifest`, `verify`, `secrets`: upload, change tracking, live check, password storage
 //! - `update`: updates of the app itself from its GitHub releases
 //! - `repos`: the managed repositories, what GitHub reports about them, their health (read only)
@@ -14,8 +15,10 @@
 pub mod claude;
 pub mod config;
 pub mod content;
+pub mod forge;
 pub mod git;
 pub mod github;
+pub mod gitlab;
 pub mod jobs;
 pub mod localrepo;
 pub mod manifest;

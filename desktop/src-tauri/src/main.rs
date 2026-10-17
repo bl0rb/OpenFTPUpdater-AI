@@ -11,7 +11,8 @@ use openreleasepilot_core::config::{self, AuthKind, Config, ManagedRepo, Release
 use openreleasepilot_core::content::{self, ContentTarget, TargetState};
 use openreleasepilot_core::jobs::{self, Job, JobOptions};
 use openreleasepilot_core::update::{self, ReleaseInfo};
-use openreleasepilot_core::{github, localrepo, manifest, repos, security};
+use openreleasepilot_core::forge::{self, Forge};
+use openreleasepilot_core::{github, gitlab, localrepo, manifest, repos, security};
 use openreleasepilot_core::paths::{self, abbreviate_home, expand_home};
 use openreleasepilot_core::secrets;
 use openreleasepilot_core::sftp::{self, ConnectError};
@@ -294,6 +295,8 @@ struct View {
     website_sources: Option<Vec<String>>,
     /// Whether gh is signed in, once known.
     signed_in: Option<bool>,
+    /// The GitLab instances: those of managed repositories and those glab is signed in to.
+    gitlab_hosts: Vec<GitlabHost>,
     /// Facts older than this many seconds are shown as old.
     fresh_secs: u64,
     /// Unix seconds when the view was made.
@@ -305,6 +308,27 @@ struct View {
     installing_update: bool,
     notice: Option<String>,
     error: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitlabHost {
+    host: String,
+    /// Whether glab has a token for it, once asked.
+    signed_in: Option<bool>,
+    /// glab knows the host (its configuration names it).
+    configured: bool,
+}
+
+fn gitlab_hosts(config: &Config) -> Vec<GitlabHost> {
+    let configured = gitlab::configured_hosts();
+    let mut hosts: Vec<String> = config.repositories.iter().filter_map(|r| gitlab::project(&r.repo).map(|p| p.host)).chain(configured.iter().cloned()).collect();
+    hosts.sort();
+    hosts.dedup();
+    hosts
+        .into_iter()
+        .map(|host| GitlabHost { signed_in: gitlab::signed_in(&host), configured: configured.contains(&host), host })
+        .collect()
 }
 
 /// One repository in the Repositories area.
@@ -442,7 +466,7 @@ fn get_view(app: AppHandle) -> View {
                     let key = target.key.clone();
                     RepoView {
                         health: repos::health(&target, facts.as_ref(), details.as_ref(), now),
-                        capabilities: repos::capabilities(&target, facts.as_ref(), github::signed_in()),
+                        capabilities: repos::capabilities(&target, facts.as_ref(), target.forge.signed_in()),
                         loading: status.is_some_and(|s| s.loading),
                         error: status.and_then(|s| s.error.clone()),
                         details_loading: status.is_some_and(|s| s.details_loading),
@@ -477,6 +501,7 @@ fn get_view(app: AppHandle) -> View {
             jobs_unreadable: m.jobs_unreadable.clone(),
             website_sources: website_sources(&m.config, &m.site),
             signed_in: github::signed_in(),
+            gitlab_hosts: gitlab_hosts(&m.config),
             fresh_secs: repos::FRESH_SECS,
             now,
             last_upload: manifest::load_last(&m.config.sftp).map(|last| LastUpload {
@@ -819,6 +844,9 @@ pub fn refresh_status(app: &AppHandle, keys: &[String]) {
     if targets.is_empty() {
         return;
     }
+    let mut hosts: Vec<String> = targets.iter().filter_map(|t| gitlab::project(&t.repo).map(|p| p.host)).collect();
+    hosts.dedup();
+    let full = keys.is_empty();
     let jobs: VecDeque<(repos::RepoTarget, u64)> = with_model(app, |m| {
         targets
             .into_iter()
@@ -834,7 +862,15 @@ pub fn refresh_status(app: &AppHandle, keys: &[String]) {
     changed(app);
     let app = app.clone();
     std::thread::spawn(move || {
-        github::token(); // asks gh once, so the view knows whether it is signed in
+        // Asks gh and glab once, so the view knows whether they are signed in; reading everything
+        // asks glab again, so a login since then counts.
+        if full {
+            gitlab::forget_tokens();
+        }
+        github::token();
+        for host in &hosts {
+            gitlab::token(host);
+        }
         let queue = Mutex::new(jobs);
         std::thread::scope(|scope| {
             for _ in 0..4 {
@@ -1038,8 +1074,9 @@ fn held_by_job(m: &Model, key: &str) -> Option<String> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LocalRepo {
-    /// `owner/name` as the clone's origin names it.
+    /// `owner/name` (GitHub) or `host/group/…/name` (GitLab) as the clone's origin names it.
     repo: String,
+    forge: Forge,
     path: String,
     /// Further clones of the same repository.
     others: Vec<String>,
@@ -1057,8 +1094,8 @@ struct LocalRepoList {
     repos: Vec<LocalRepo>,
 }
 
-/// The GitHub clones in a folder (the repo folder unless `dir` names another): the selection the
-/// app offers. Reads only the clones' `.git/config`.
+/// The clones in a folder (the repo folder unless `dir` names another), GitHub and GitLab: the
+/// selection the app offers. Reads only the clones' `.git/config`.
 #[tauri::command]
 async fn list_local_repos(app: AppHandle, dir: Option<String>) -> LocalRepoList {
     let (site, config) = with_model(&app, |m| (m.site.clone().ok(), m.config.clone()));
@@ -1068,9 +1105,10 @@ async fn list_local_repos(app: AppHandle, dir: Option<String>) -> LocalRepoList 
             None => config.workspace(),
         };
         let website = if config.project_dir.is_empty() { None } else { localrepo::origin_repo(&expand_home(&config.project_dir)) };
-        let repos = localrepo::github_clones(&folder)
+        let repos = localrepo::clones(&folder)
             .into_iter()
             .map(|clone| LocalRepo {
+                forge: Forge::of(&clone.repo),
                 managed: config.repository(&clone.repo).is_some(),
                 on_site: site.iter().flat_map(|s| s.products.iter()).any(|p| p.repo.trim().eq_ignore_ascii_case(&clone.repo)),
                 is_website: website.as_ref().is_some_and(|w| w.eq_ignore_ascii_case(&clone.repo)),
@@ -1093,23 +1131,41 @@ struct AddRepo {
     local_path: String,
 }
 
+/// A repository as typed: `owner/name`, `host/group/name`, or the URL of either (`https://…`,
+/// `git@host:group/name.git`).
+fn typed_repo(text: &str) -> Result<String, String> {
+    let text = text.trim();
+    let repo = if text.contains("://") || text.starts_with("git@") { localrepo::repo_from_url(text) } else { Some(text.trim_end_matches('/').trim_end_matches(".git").to_owned()) };
+    repo.filter(|r| forge::is_repo_id(r))
+        .ok_or_else(|| format!("„{text}“ ist kein Repository: owner/name (GitHub), host/gruppe/name (GitLab) oder deren Adresse"))
+}
+
 /// Adds repositories to the managed list; one already managed is left as it is. A name typed in
-/// must exist on GitHub; a local clone counts by its origin, and GitHub's name and id are taken when
-/// GitHub can be asked (a private one without `gh` login cannot). Returns the ones added.
+/// must exist on GitHub or its GitLab instance; a local clone counts by its origin, and the
+/// service's spelling (and GitHub's id) are taken when it can be asked (a private one without
+/// login cannot). Returns the ones added.
 #[tauri::command]
 async fn add_repositories(app: AppHandle, repos: Vec<AddRepo>) -> Result<Vec<String>, String> {
     blocking(move || {
         let mut found = Vec::new();
         for entry in &repos {
+            let repo = typed_repo(&entry.repo)?;
             let local = entry.local_path.trim();
             let origin = if local.is_empty() { None } else { localrepo::origin_repo(&expand_home(local)) };
-            if !local.is_empty() && !origin.as_deref().is_some_and(|o| o.eq_ignore_ascii_case(entry.repo.trim())) {
-                return Err(format!("{local} ist keine Kopie von {}", entry.repo.trim()));
+            if !local.is_empty() && !origin.as_deref().is_some_and(|o| o.eq_ignore_ascii_case(&repo)) {
+                return Err(format!("{local} ist keine Kopie von {repo}"));
             }
-            match (github::repo_info(entry.repo.trim()), origin) {
-                (Ok(info), _) => found.push((info.full_name, Some(info.id), local.to_owned())),
-                (Err(_), Some(origin)) => found.push((origin, None, local.to_owned())),
-                (Err(e), None) => return Err(format!("{e:#}")),
+            match gitlab::project(&repo) {
+                Some(project) => match (gitlab::project_info(&project), origin) {
+                    (Ok(info), _) => found.push((info.id, None, local.to_owned())),
+                    (Err(_), Some(origin)) => found.push((origin, None, local.to_owned())),
+                    (Err(e), None) => return Err(format!("{e:#}{}", if gitlab::token(&project.host).is_none() { format!(" ({})", Forge::of(&repo).login_hint()) } else { String::new() })),
+                },
+                None => match (github::repo_info(&repo), origin) {
+                    (Ok(info), _) => found.push((info.full_name, Some(info.id), local.to_owned())),
+                    (Err(_), Some(origin)) => found.push((origin, None, local.to_owned())),
+                    (Err(e), None) => return Err(format!("{e:#}")),
+                },
             }
         }
         let mut added = Vec::new();
@@ -1237,8 +1293,8 @@ struct JobInput {
 /// Starts a care job for exactly these repositories and choices; its first pass begins at once.
 #[tauri::command]
 fn start_job(app: AppHandle, input: JobInput) -> Result<String, String> {
-    if (input.options.prs || input.options.cleanup || input.options.release) && github::token().is_none() {
-        return Err("Für die Pflege die GitHub-CLI anmelden: gh auth login".into());
+    if input.options.prs || input.options.cleanup || input.options.release {
+        jobrun::require_logins(&input.repos).map_err(|e| format!("{e:#}"))?;
     }
     let mut created = String::new();
     steps::start_with(&app, |m| {
@@ -1488,8 +1544,8 @@ async fn clone_repo(app: AppHandle, repo: String, workspace_dir: String) -> Resu
         config.workspace_dir = workspace_dir;
     }
     blocking(move || {
-        if !github::is_repo_name(repo.trim()) {
-            return Err("Repository im Format owner/name angeben".to_owned());
+        if !forge::is_repo_id(repo.trim()) {
+            return Err("Repository im Format owner/name (GitHub) oder host/gruppe/name (GitLab) angeben".to_owned());
         }
         localrepo::clone(repo.trim(), &config.workspace()).map(|p| p.display().to_string()).map_err(|e| format!("{e:#}"))
     })

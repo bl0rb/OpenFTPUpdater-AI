@@ -9,6 +9,7 @@
 //! Nothing in this module writes: no GitHub write, no git command.
 
 use crate::config::{Config, ManagedRepo, ReleaseRule};
+use crate::forge::Forge;
 use crate::github::{encode_ref, get, get_list, is_newer, Forbidden};
 use crate::localrepo;
 use crate::paths::expand_home;
@@ -54,8 +55,10 @@ pub enum LocalCopy {
 pub struct RepoTarget {
     /// `owner/name` in lower case: the identity.
     pub key: String,
-    /// `owner/name` as it was added.
+    /// `owner/name` as it was added; `host/group/…/name` for GitLab.
     pub repo: String,
+    /// GitHub or a GitLab instance, from `repo`.
+    pub forge: Forge,
     pub github_id: Option<u64>,
     /// Turned off: listed and readable, but no care job takes it.
     pub enabled: bool,
@@ -71,7 +74,7 @@ pub struct RepoTarget {
 }
 
 impl RepoTarget {
-    /// The short name, e.g. `app` for `owner/app`.
+    /// The short name, e.g. `app` for `owner/app` or `host/group/app`.
     pub fn name(&self) -> String {
         self.repo.rsplit('/').next().unwrap_or(&self.repo).to_owned()
     }
@@ -125,6 +128,7 @@ fn target(managed: &ManagedRepo, config: &Config, site: Option<&Site>, website: 
     }
     RepoTarget {
         website: website.is_some_and(|w| w.eq_ignore_ascii_case(&key)),
+        forge: Forge::of(&managed.repo),
         repo: managed.repo.trim().to_owned(),
         github_id: managed.github_id,
         enabled: managed.enabled,
@@ -171,7 +175,7 @@ impl<T> Fetch<T> {
         }
     }
 
-    fn from(result: Result<T>) -> Self {
+    pub(crate) fn from(result: Result<T>) -> Self {
         match result {
             Ok(value) => Fetch::Ok(value),
             Err(e) => Fetch::Failed(format!("{e:#}")),
@@ -231,6 +235,9 @@ pub struct Ci {
 
 /// The CI of `sha`. Errors only when GitHub cannot be asked; an unclear answer is `Unknown`.
 pub fn ci_for(repo: &str, sha: &str) -> Result<Ci> {
+    if let Some(p) = crate::gitlab::project(repo) {
+        return crate::gitlab::ci_for(&p, sha);
+    }
     let runs = get(&format!("repos/{repo}/commits/{sha}/check-runs?per_page=100"))?.with_context(|| format!("Commit {} nicht gefunden", short(sha)))?;
     let status = get(&format!("repos/{repo}/commits/{sha}/status?per_page=100"))?.with_context(|| format!("Commit {} nicht gefunden", short(sha)))?;
     Ok(ci_state(sha, &runs, &status))
@@ -343,7 +350,7 @@ pub struct Facts {
 }
 
 impl Facts {
-    fn new(checked_at: u64, access: Fetch<Access>, unreadable: bool) -> Self {
+    pub(crate) fn new(checked_at: u64, access: Fetch<Access>, unreadable: bool) -> Self {
         fn skipped<T>() -> Fetch<T> {
             Fetch::NotQueried("Repository nicht gelesen".into())
         }
@@ -358,6 +365,9 @@ impl Facts {
 
 /// Reads what the overview needs, about eight GitHub requests. Each part fails on its own.
 pub fn fetch_facts(target: &RepoTarget, now: u64) -> Facts {
+    if let Some(p) = crate::gitlab::project(&target.repo) {
+        return crate::gitlab::fetch_facts(&p, target, now);
+    }
     let repo = &target.repo;
     let info = match get(&format!("repos/{repo}")) {
         Ok(Some(info)) => info,
@@ -441,6 +451,9 @@ fn stable_tag(repo: &str, prefix: &str) -> Result<Option<String>> {
 
 /// Commits in `head` (a commit) since `base` (a tag), only where `base` is an ancestor of `head`.
 pub fn commits_since(repo: &str, base: &str, head: &str) -> Result<u64> {
+    if let Some(p) = crate::gitlab::project(repo) {
+        return crate::gitlab::commits_since(&p, base, head);
+    }
     let compare = get(&format!("repos/{repo}/compare/{}...{}", encode_ref(base), encode_ref(head)))?.with_context(|| format!("{base} nicht gefunden"))?;
     since_from_compare(&compare).map_err(|why| anyhow::anyhow!("nicht bestimmbar: {why}"))
 }
@@ -479,6 +492,9 @@ pub struct Details {
 
 /// Mergeability and CI of the open pull requests, for the detail view; read only.
 pub fn fetch_details(repo: &str, prs: &PrList, now: u64) -> Details {
+    if let Some(p) = crate::gitlab::project(repo) {
+        return crate::gitlab::fetch_details(&p, prs, now);
+    }
     let details = prs
         .items
         .iter()
@@ -546,7 +562,7 @@ pub fn health(target: &RepoTarget, facts: Option<&Facts>, details: Option<&Detai
         LocalCopy::Found { .. } => {}
         LocalCopy::Missing { path } => notes.push(format!("lokale Kopie fehlt: {path}")),
         LocalCopy::Foreign { path, origin } => {
-            notes.push(format!("{path} ist keine Kopie dieses Repositorys ({})", origin.as_deref().unwrap_or("ohne GitHub-origin")))
+            notes.push(format!("{path} ist keine Kopie dieses Repositorys ({})", origin.as_deref().unwrap_or("ohne erkannten origin")))
         }
     }
     if !target.enabled {
@@ -558,10 +574,11 @@ pub fn health(target: &RepoTarget, facts: Option<&Facts>, details: Option<&Detai
         return Health { state: HealthState::Unknown, reasons: Vec::new(), gaps, notes, stale: false };
     };
     let stale = now.saturating_sub(facts.checked_at) > FRESH_SECS;
+    let (service, request, bot) = (target.forge.name(), target.forge.request(), target.forge.update_bot());
     let default = facts.access.ok().map(|a| a.default_branch.clone()).unwrap_or_else(|| "Default-Branch".into());
     match &facts.access {
         Fetch::Failed(why) if facts.unreadable => blockers.push(format!("nicht lesbar: {why}")),
-        Fetch::Failed(why) => gaps.push(format!("GitHub-Abfrage fehlgeschlagen: {why}")),
+        Fetch::Failed(why) => gaps.push(format!("{service}-Abfrage fehlgeschlagen: {why}")),
         Fetch::NotQueried(why) => gaps.push(why.clone()),
         Fetch::Ok(access) => {
             if access.archived {
@@ -588,15 +605,15 @@ pub fn health(target: &RepoTarget, facts: Option<&Facts>, details: Option<&Detai
                 let at_least = if list.complete { "" } else { "mindestens " };
                 match list.dependabot() {
                     0 => {}
-                    1 => attention.push(format!("{at_least}1 Dependabot-PR kann geprüft werden")),
-                    n => attention.push(format!("{at_least}{n} Dependabot-PRs können geprüft werden")),
+                    1 => attention.push(format!("{at_least}1 {bot}-{request} kann geprüft werden")),
+                    n => attention.push(format!("{at_least}{n} {bot}-{request}s können geprüft werden")),
                 }
                 if !list.complete {
-                    gaps.push("mehr als 300 offene PRs; Liste unvollständig".to_owned());
+                    gaps.push(format!("mehr als 300 offene {request}s; Liste unvollständig"));
                 }
             }
-            Fetch::Failed(why) => gaps.push(format!("PRs nicht abfragbar: {why}")),
-            Fetch::NotQueried(why) => gaps.push(format!("PRs nicht abgefragt: {why}")),
+            Fetch::Failed(why) => gaps.push(format!("{request}s nicht abfragbar: {why}")),
+            Fetch::NotQueried(why) => gaps.push(format!("{request}s nicht abgefragt: {why}")),
         }
         match &facts.release {
             Fetch::Ok(Some(tag)) => {
@@ -632,7 +649,7 @@ pub fn health(target: &RepoTarget, facts: Option<&Facts>, details: Option<&Detai
         }
         let red: Vec<String> = details.prs.iter().filter(|d| d.ci.ok().is_some_and(|ci| ci.state == CiState::Failed)).map(|d| format!("#{}", d.number)).collect();
         if !red.is_empty() {
-            attention.push(format!("PR-CI fehlgeschlagen in {}", red.join(", ")));
+            attention.push(format!("{request}-CI fehlgeschlagen in {}", red.join(", ")));
         }
     }
     if stale {
@@ -666,12 +683,16 @@ pub struct Capabilities {
     pub local: Option<String>,
 }
 
-/// `signed_in`: whether gh is signed in, `None` while unknown (the care check asks again).
+/// `signed_in`: whether the service's CLI (gh, glab) is signed in, `None` while unknown (the care
+/// check asks again).
 pub fn capabilities(target: &RepoTarget, facts: Option<&Facts>, signed_in: Option<bool>) -> Capabilities {
     let care = if !target.enabled {
         Some("deaktiviert".to_owned())
     } else if signed_in == Some(false) {
-        Some("GitHub-CLI nicht angemeldet (gh auth login)".to_owned())
+        Some(match &target.forge {
+            Forge::Github => "GitHub-CLI nicht angemeldet (gh auth login)".to_owned(),
+            forge => format!("GitLab-CLI nicht angemeldet ({})", forge.login_hint()),
+        })
     } else {
         match facts {
             Some(facts) if facts.unreadable => Some("Repository nicht lesbar".to_owned()),

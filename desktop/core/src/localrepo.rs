@@ -1,5 +1,5 @@
-//! Finding the local clone of a GitHub repository next to the project, so Claude can read the
-//! released state through `git -C <path>`.
+//! Finding the local clone of a repository (GitHub or a GitLab instance) next to the project, so
+//! Claude can read the released state through `git -C <path>`.
 
 use crate::shell;
 use anyhow::{bail, Result};
@@ -21,7 +21,42 @@ pub fn github_repo_from_url(url: &str) -> Option<String> {
     (!owner.is_empty() && !name.is_empty() && parts.next().is_none()).then(|| format!("{owner}/{name}"))
 }
 
-/// `owner/name` of the `origin` remote, read from `.git/config` without starting git.
+/// Hosts of other services: their clones are not GitLab projects and stay out.
+const OTHER_HOSTS: [&str; 6] = ["bitbucket.org", "codeberg.org", "dev.azure.com", "ssh.dev.azure.com", "vs-ssh.visualstudio.com", "git.sr.ht"];
+
+/// The repository an origin URL points to: `owner/name` on GitHub, `host/group/…/name` on any other
+/// host, taken as a GitLab instance. An SSH port is dropped (the API is reached over HTTPS); an
+/// HTTPS port is kept.
+pub fn repo_from_url(url: &str) -> Option<String> {
+    if let Some(repo) = github_repo_from_url(url) {
+        return Some(repo);
+    }
+    let url = url.trim();
+    let (host, path) = if let Some(rest) = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")) {
+        let (authority, path) = rest.split_once('/')?;
+        (authority.rsplit('@').next()?.to_owned(), path)
+    } else if let Some(rest) = url.strip_prefix("ssh://") {
+        let (authority, path) = rest.split_once('/')?;
+        let host = authority.rsplit('@').next()?;
+        (host.split(':').next()?.to_owned(), path)
+    } else {
+        // scp-like: git@host:group/name.git
+        let (authority, path) = url.split_once(':')?;
+        if authority.contains('/') {
+            return None;
+        }
+        (authority.rsplit('@').next()?.to_owned(), path)
+    };
+    let host = host.to_lowercase();
+    if host == "github.com" || OTHER_HOSTS.contains(&host.as_str()) {
+        return None;
+    }
+    let path = path.trim_matches('/').trim_end_matches(".git");
+    let id = format!("{host}/{path}");
+    crate::gitlab::project(&id).map(|p| format!("{}/{}", p.host, p.path))
+}
+
+/// The repository of the `origin` remote (see `repo_from_url`), read from `.git/config` without starting git.
 pub fn origin_repo(dir: &Path) -> Option<String> {
     let config = fs::read_to_string(dir.join(".git").join("config")).ok()?;
     let mut in_origin = false;
@@ -30,7 +65,7 @@ pub fn origin_repo(dir: &Path) -> Option<String> {
             in_origin = line == "[remote \"origin\"]";
         } else if in_origin {
             if let Some(url) = line.strip_prefix("url").map(str::trim_start).and_then(|l| l.strip_prefix('=')) {
-                return github_repo_from_url(url);
+                return repo_from_url(url);
             }
         }
     }
@@ -40,7 +75,7 @@ pub fn origin_repo(dir: &Path) -> Option<String> {
 /// A repository with clones in a folder.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LocalClone {
-    /// `owner/name` as the origin names it.
+    /// `owner/name` (GitHub) or `host/group/…/name` (GitLab) as the origin names it.
     pub repo: String,
     /// The clone to use: the folder named like the repository, else the first by name.
     pub path: PathBuf,
@@ -48,9 +83,9 @@ pub struct LocalClone {
     pub others: Vec<PathBuf>,
 }
 
-/// The GitHub repositories with clones directly inside `dir`, each once, sorted by name. Folders
-/// without a GitHub origin and clones of a wiki (`owner/name.wiki`) are left out.
-pub fn github_clones(dir: &Path) -> Vec<LocalClone> {
+/// The repositories with clones directly inside `dir`, each once, sorted by name. Folders without
+/// a recognised origin and clones of a wiki (`…/name.wiki`) are left out.
+pub fn clones(dir: &Path) -> Vec<LocalClone> {
     let Ok(entries) = fs::read_dir(dir) else { return Vec::new() };
     let mut found: Vec<(String, PathBuf)> = entries
         .filter_map(|e| e.ok())
@@ -80,7 +115,7 @@ pub fn github_clones(dir: &Path) -> Vec<LocalClone> {
     clones
 }
 
-/// All GitHub clones directly inside `dir`, keyed by lowercase `owner/name`.
+/// All clones directly inside `dir`, keyed by the lowercase repository (see `repo_from_url`).
 pub fn clones_in(dir: &Path) -> HashMap<String, PathBuf> {
     let mut clones = HashMap::new();
     let Ok(entries) = fs::read_dir(dir) else { return clones };
@@ -94,7 +129,7 @@ pub fn clones_in(dir: &Path) -> HashMap<String, PathBuf> {
     clones
 }
 
-/// `git clone https://github.com/<repo>.git <workspace>/<name>`; uses the user's git credentials.
+/// `git clone <https URL> <workspace>/<name>`; uses the user's git credentials.
 pub fn clone(repo: &str, workspace: &Path) -> Result<PathBuf> {
     let name = repo.rsplit('/').next().unwrap_or(repo);
     let target = workspace.join(name);
@@ -102,7 +137,7 @@ pub fn clone(repo: &str, workspace: &Path) -> Result<PathBuf> {
         bail!("{} existiert bereits", target.display());
     }
     fs::create_dir_all(workspace)?;
-    let url = format!("https://github.com/{repo}.git");
+    let url = crate::forge::clone_url(repo);
     shell::output("git", &["clone", "--quiet", &url, &target.display().to_string()], workspace)?;
     Ok(target)
 }
@@ -128,7 +163,19 @@ mod tests {
     }
 
     #[test]
-    fn lists_each_github_repository_of_a_folder_once() {
+    fn other_hosts_are_gitlab_projects() {
+        assert_eq!(repo_from_url("https://gitpro.example.de/WERK/rag_optimizer.git").as_deref(), Some("gitpro.example.de/WERK/rag_optimizer"));
+        assert_eq!(repo_from_url("git@gitlab.example.com:werk/tools/app.git").as_deref(), Some("gitlab.example.com/werk/tools/app"));
+        assert_eq!(repo_from_url("ssh://git@gitlab.example.com:2222/werk/app.git").as_deref(), Some("gitlab.example.com/werk/app"), "the SSH port is not the API's");
+        assert_eq!(repo_from_url("https://user@git.example.org:8443/g/app").as_deref(), Some("git.example.org:8443/g/app"));
+        assert_eq!(repo_from_url("https://github.com/bl0rb/Weave.git").as_deref(), Some("bl0rb/Weave"));
+        assert_eq!(repo_from_url("https://bitbucket.org/o/app.git"), None);
+        assert_eq!(repo_from_url("https://gitlab.example.com/app.git"), None, "a project needs a namespace");
+        assert_eq!(repo_from_url("/local/path/repo"), None);
+    }
+
+    #[test]
+    fn lists_each_repository_of_a_folder_once() {
         let dir = std::env::temp_dir().join(format!("orp-local-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         for (name, url) in [
@@ -146,13 +193,13 @@ mod tests {
             fs::write(git.join("config"), config).unwrap();
         }
         fs::write(dir.join("file.txt"), "").unwrap();
-        let clones = github_clones(&dir);
-        let repos: Vec<&str> = clones.iter().map(|c| c.repo.as_str()).collect();
-        assert_eq!(repos, ["o/alpha", "o/Garden", "o/Zeta"], "GitHub origins only, no wiki, each once, sorted, case kept");
-        assert!(clones[1].path.ends_with("Garden"), "the folder named like the repository: {:?}", clones[1]);
-        assert_eq!(clones[1].others.len(), 1);
-        assert!(clones[1].others[0].ends_with("garden-copy"));
-        assert!(github_clones(&dir.join("missing")).is_empty());
+        let found = clones(&dir);
+        let repos: Vec<&str> = found.iter().map(|c| c.repo.as_str()).collect();
+        assert_eq!(repos, ["gitlab.com/o/x", "o/alpha", "o/Garden", "o/Zeta"], "GitHub and GitLab origins, no wiki, each once, sorted, case kept");
+        assert!(found[2].path.ends_with("Garden"), "the folder named like the repository: {:?}", found[2]);
+        assert_eq!(found[2].others.len(), 1);
+        assert!(found[2].others[0].ends_with("garden-copy"));
+        assert!(clones(&dir.join("missing")).is_empty());
         fs::remove_dir_all(&dir).unwrap();
     }
 

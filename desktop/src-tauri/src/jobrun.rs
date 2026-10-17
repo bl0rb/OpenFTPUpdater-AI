@@ -11,6 +11,7 @@ use openreleasepilot_core::content::{self, Basis, Conflict, Delivery, Proposal, 
 use openreleasepilot_core::jobs::{self, CareItem, ItemKind, ItemOutcome, Job, JobState, Link, Resolution, StepKind, StepState, WebsiteProposal};
 use openreleasepilot_core::repocare::{self, Action, CiWait, Done, Plan, PlanSet, ReleaseWait, RunState};
 use openreleasepilot_core::repos::RepoTarget;
+use openreleasepilot_core::forge::Forge;
 use openreleasepilot_core::{git, github, shell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -184,8 +185,9 @@ fn resolve_interrupted(ctx: &Ctx, job: &mut Job) -> Result<()> {
                     step.writing = None;
                     if let (Some(target), Some(number)) = (target, pr) {
                         if content::pull_request_state(&target.repo, number)? == content::PrState::Merged {
-                            ctx.ok(format!("  PR #{number} war gemergt"));
-                            step.set(StepState::Done, format!("PR #{number} erstellt und gemergt (nach der Unterbrechung bei GitHub nachgelesen)"), now());
+                            let r = repocare::request_ref(&target.repo, number);
+                            ctx.ok(format!("  {r} war gemergt"));
+                            step.set(StepState::Done, format!("{r} erstellt und gemergt (nach der Unterbrechung bei {} nachgelesen)", Forge::of(&target.repo).name()), now());
                             update_target_state(ctx, &target.id, |s| s.published = s.delivered.clone().map(|d| Delivery { pr: None, ..d }));
                         }
                     }
@@ -224,14 +226,14 @@ fn resolve_interrupted(ctx: &Ctx, job: &mut Job) -> Result<()> {
 /// The care plan: GitHub's state of the repositories (read only), then Claude judges the open pull
 /// requests. Ends with a plan to approve, or nothing to do.
 fn care_scan(ctx: &Ctx, job: &mut Job, i: usize) -> Result<()> {
-    if github::token().is_none() {
-        bail!("Für die Pflege die GitHub-CLI anmelden: gh auth login");
-    }
+    require_logins(&job.repos)?;
     let options = job.options.clone();
     let current = current_targets(ctx);
     let targets: Vec<RepoTarget> = job.repos.iter().filter_map(|key| current.iter().find(|t| &t.key == key).cloned()).collect();
     let names: Vec<&str> = targets.iter().map(|t| t.repo.as_str()).collect();
-    ctx.info(format!("Lese den Stand auf GitHub (nur lesend): {}", names.join(", ")));
+    let mut services: Vec<&str> = targets.iter().map(|t| t.forge.name()).collect();
+    services.dedup();
+    ctx.info(format!("Lese den Stand auf {} (nur lesend): {}", services.join(" und "), names.join(", ")));
     let mut plans: Vec<Plan> = std::thread::scope(|scope| {
         let handles: Vec<_> = targets
             .iter()
@@ -282,7 +284,7 @@ fn care_scan(ctx: &Ctx, job: &mut Job, i: usize) -> Result<()> {
                     Action::Rebase => ("info", "Rebase anstoßen"),
                     Action::Keep => ("info", "bleibt offen"),
                 };
-                ctx.log(kind, format!("  PR #{} {}: {what} – {}", pr.number, pr.title, pr.reason));
+                ctx.log(kind, format!("  {} {}: {what} – {}", repocare::request_ref(&plan.repo, pr.number), pr.title, pr.reason));
             }
         }
         repocare::finish(plan, options.cleanup, options.release);
@@ -359,13 +361,19 @@ fn scan_result(all_unreadable: bool, no_items: bool, summary: &str, note: &str, 
 /// `3 PRs mergen, 1 Tag, 5 Branches löschen`, or `nichts zu tun`.
 pub fn plan_summary(plans: &[Plan]) -> String {
     let sum = |f: &dyn Fn(&Plan) -> usize| plans.iter().map(f).sum::<usize>();
+    let gitlab = plans.iter().filter(|p| Forge::of(&p.repo) != Forge::Github).count();
+    let word = match gitlab {
+        0 => "PR",
+        n if n == plans.len() => "MR",
+        _ => "PR/MR",
+    };
     let parts: Vec<String> = [
-        (sum(&|p| p.count(Action::Merge)), "PR mergen", "PRs mergen"),
-        (sum(&|p| p.count(Action::Close)), "PR schließen", "PRs schließen"),
-        (sum(&|p| p.count(Action::Rebase)), "Rebase", "Rebases"),
-        (sum(&|p| p.tag.is_some() as usize), "Tag", "Tags"),
-        (sum(&|p| p.branches.len() + p.local_branches.len()), "Branch löschen", "Branches löschen"),
-        (sum(&|p| p.prs.iter().filter(|pr| pr.optional).count()), "PR zur Wahl", "PRs zur Wahl"),
+        (sum(&|p| p.count(Action::Merge)), format!("{word} mergen"), format!("{word}s mergen")),
+        (sum(&|p| p.count(Action::Close)), format!("{word} schließen"), format!("{word}s schließen")),
+        (sum(&|p| p.count(Action::Rebase)), "Rebase".to_owned(), "Rebases".to_owned()),
+        (sum(&|p| p.tag.is_some() as usize), "Tag".to_owned(), "Tags".to_owned()),
+        (sum(&|p| p.branches.len() + p.local_branches.len()), "Branch löschen".to_owned(), "Branches löschen".to_owned()),
+        (sum(&|p| p.prs.iter().filter(|pr| pr.optional).count()), format!("{word} zur Wahl"), format!("{word}s zur Wahl")),
     ]
     .into_iter()
     .filter(|(n, ..)| *n > 0)
@@ -376,6 +384,22 @@ pub fn plan_summary(plans: &[Plan]) -> String {
     } else {
         parts.join(", ")
     }
+}
+
+/// Every service the repositories live on must be signed in: gh for GitHub, glab for each GitLab host.
+pub fn require_logins(repos: &[String]) -> Result<()> {
+    let mut seen = Vec::new();
+    for repo in repos {
+        let forge = Forge::of(repo);
+        if seen.contains(&forge) {
+            continue;
+        }
+        if !forge.sign_in_check() {
+            bail!("Für die Pflege die {}-CLI anmelden: {}", forge.name(), forge.login_hint());
+        }
+        seen.push(forge);
+    }
+    Ok(())
 }
 
 /// Claude judges the open pull requests of one repository, read-only, in its local clone if there is one.
@@ -389,8 +413,9 @@ fn review(ctx: &Ctx, plan: &mut Plan, model: Option<&str>, effort: Option<&str>,
         }
     };
     let prompt = claude::review_prompt(plan);
-    let args = claude::review_args(&prompt, model, effort, budget);
-    ctx.cmd(format!("  $ claude -p … --model {} (prüft {} PRs, nur lesend)", model.unwrap_or("Standard"), plan.prs.len()));
+    let forge = Forge::of(&plan.repo);
+    let args = claude::review_args(&prompt, model, effort, budget, matches!(forge, Forge::Gitlab { .. }));
+    ctx.cmd(format!("  $ claude -p … --model {} (prüft {} {}s, nur lesend)", model.unwrap_or("Standard"), plan.prs.len(), forge.request()));
     let mut outcome = None;
     // No GITHUB_TOKEN: gh reads with its own login; the allowlist keeps Claude to reading.
     let code = shell::stream("claude", &args, &dir, &HashMap::new(), &ctx.runner, |line| match claude::parse(line) {
@@ -418,9 +443,7 @@ fn review(ctx: &Ctx, plan: &mut Plan, model: Option<&str>, effort: Option<&str>,
 /// Carries out the approved items one by one, each checked again right before it writes (see
 /// `repocare`). Every outcome is stored before the next item starts.
 fn care_run(ctx: &Ctx, job: &mut Job, i: usize) -> Result<()> {
-    if github::token().is_none() {
-        bail!("Für die Pflege die GitHub-CLI anmelden: gh auth login");
-    }
+    require_logins(&job.repos)?;
     let set = job.plan.clone().context("Kein Pflegeplan vorhanden")?;
     if let Err(why) = set.check_binding(&current_targets(ctx)) {
         job.steps[i].set(StepState::Blocked, why, now());
@@ -590,13 +613,14 @@ fn release(ctx: &Ctx, job: &mut Job, i: usize) -> Result<()> {
         return Ok(());
     };
     let readers = release_readers(job, i);
+    let service = Forge::of(&managed.repo).name();
     if !rule.publishes_release {
         if readers.is_empty() {
-            job.steps[i].set(StepState::Done, format!("Tag {tag} gesetzt; laut Release-Regel veröffentlicht das Repository kein GitHub-Release"), now());
+            job.steps[i].set(StepState::Done, format!("Tag {tag} gesetzt; laut Release-Regel veröffentlicht das Repository kein {service}-Release"), now());
             return Ok(());
         }
         ctx.warn(format!(
-            "  Laut Release-Regel kein GitHub-Release, aber {} beschreibt das neueste Release: warte trotzdem auf {tag}",
+            "  Laut Release-Regel kein {service}-Release, aber {} beschreibt das neueste Release: warte trotzdem auf {tag}",
             readers.join(", ")
         ));
     }
@@ -610,7 +634,10 @@ fn release(ctx: &Ctx, job: &mut Job, i: usize) -> Result<()> {
         ReleaseWait::Failed(why) => job.steps[i].set(StepState::Failed, format!("Tag {tag} gesetzt, aber kein Release: {why}"), now()),
         ReleaseWait::WorkflowFailed(why) => job.steps[i].set(
             StepState::Waiting,
-            format!("Tag {tag} gesetzt, Release noch nicht veröffentlicht: {why}. Workflow auf GitHub erneut starten, dann erneut prüfen"),
+            format!(
+                "Tag {tag} gesetzt, Release noch nicht veröffentlicht: {why}. {} auf {service} erneut starten, dann erneut prüfen",
+                if service == "GitLab" { "Pipeline" } else { "Workflow" }
+            ),
             now(),
         ),
         ReleaseWait::Pending(why) => job.steps[i].set(StepState::Waiting, format!("Tag {tag} gesetzt; {why}. Release-Workflow prüfen, dann erneut prüfen"), now()),
@@ -651,7 +678,7 @@ fn blocked_by_unreleased(ctx: &Ctx, job: &mut Job, i: usize) -> Result<bool> {
         return Ok(false);
     }
     let why = format!(
-        "Noch kein veröffentlichtes GitHub-Release für {}; sonst würde das vorige Release beschrieben. Release abwarten (Release-Regel „mit GitHub-Release“), dann neu vorbereiten",
+        "Noch kein veröffentlichtes Release für {}; sonst würde das vorige Release beschrieben. Release abwarten (Release-Regel „mit Release“), dann neu vorbereiten",
         missing.join(", ")
     );
     ctx.warn(why.clone());
@@ -801,7 +828,7 @@ fn content_publish(ctx: &Ctx, job: &mut Job, i: usize) -> Result<()> {
     if target.kind == TargetKind::Docs && job.steps[i].pr.is_none() {
         // An earlier, interrupted attempt may have opened the pull request already: take it, do not make another.
         if let Some(pr) = content::find_docs_delivery(&target.repo, &proposal)? {
-            ctx.info(format!("PR #{} gab es schon (früherer Versuch); wird übernommen", pr.number));
+            ctx.info(format!("{} gab es schon (früherer Versuch); wird übernommen", repocare::request_ref(&target.repo, pr.number)));
             record_pull_request(ctx, job, i, &target, &proposal, pr)?;
         }
     }
@@ -822,18 +849,21 @@ fn content_publish(ctx: &Ctx, job: &mut Job, i: usize) -> Result<()> {
         TargetKind::Docs => {
             if job.steps[i].pr.is_none() {
                 let (title, body) = content::pull_request_text(&target, &proposal, &job.id);
-                ctx.info(format!("Branch {} und Pull Request in {} anlegen …", proposal.branch, target.repo));
-                job.steps[i].writing = Some("Pull Request".into());
+                let request = if Forge::of(&target.repo) == Forge::Github { "Pull Request" } else { "Merge Request" };
+                ctx.info(format!("Branch {} und {request} in {} anlegen …", proposal.branch, target.repo));
+                job.steps[i].writing = Some(request.into());
                 save(ctx, job)?;
                 let result = content::publish_docs(&target.repo, &dir, &proposal, &title, &body);
                 job.steps[i].writing = None;
                 let pr = result?;
-                ctx.ok(format!("PR #{} erstellt: {}", pr.number, pr.url));
+                ctx.ok(format!("{} erstellt: {}", repocare::request_ref(&target.repo, pr.number), pr.url));
                 record_pull_request(ctx, job, i, &target, &proposal, pr)?;
             }
             let number = job.steps[i].pr.expect("set above");
+            let r = repocare::request_ref(&target.repo, number);
+            let forge = Forge::of(&target.repo);
             if !target.merge_when_green {
-                job.steps[i].set(StepState::Done, format!("PR #{number} erstellt; gemergt wird über die PR-Pflege oder auf GitHub"), now());
+                job.steps[i].set(StepState::Done, format!("{r} erstellt; gemergt wird über die {}-Pflege oder auf {}", forge.request(), forge.name()), now());
                 return Ok(());
             }
             let pr = PullRequestRef { number, url: String::new(), commit: job.steps[i].commit.clone().context("Commit des PRs unbekannt")? };
@@ -844,18 +874,18 @@ fn content_publish(ctx: &Ctx, job: &mut Job, i: usize) -> Result<()> {
             job.steps[i].writing = None;
             match result? {
                 Ok(text) => {
-                    ctx.ok(format!("PR #{number} {text}"));
-                    job.steps[i].set(StepState::Done, format!("PR #{number} erstellt und {text}"), now());
+                    ctx.ok(format!("{r} {text}"));
+                    job.steps[i].set(StepState::Done, format!("{r} erstellt und {text}"), now());
                     update_target_state(ctx, &target.id, |s| s.published = s.delivered.clone().map(|d| Delivery { pr: None, ..d }));
                 }
                 Err(why) => {
-                    ctx.warn(format!("PR #{number} nicht gemergt: {why}"));
-                    job.steps[i].set(StepState::Partial, format!("PR #{number} erstellt, nicht gemergt: {why}"), now());
+                    ctx.warn(format!("{r} nicht gemergt: {why}"));
+                    job.steps[i].set(StepState::Partial, format!("{r} erstellt, nicht gemergt: {why}"), now());
                 }
             }
         }
         TargetKind::Wiki => {
-            let identity = content::commit_identity()?;
+            let identity = content::commit_identity(&target.repo)?;
             let sources: Vec<String> = proposal.sources.iter().map(|s| s.describe()).collect();
             let message = format!("{}: aktualisiert für {}\n\nVon OpenReleasePilot (Auftrag {}), in der App geprüft und freigegeben.", target.name, sources.join(", "), job.id);
             ctx.info(format!("Wiki von {} frisch klonen, Stand prüfen, pushen (ohne Force) …", target.repo));
@@ -868,7 +898,10 @@ fn content_publish(ctx: &Ctx, job: &mut Job, i: usize) -> Result<()> {
             });
             job.steps[i].writing = None;
             let commit = result?;
-            let url = format!("https://github.com/{}/wiki", target.repo);
+            let url = match Forge::of(&target.repo) {
+                Forge::Github => format!("{}/wiki", openreleasepilot_core::forge::web_url(&target.repo)),
+                _ => format!("{}/-/wikis/home", openreleasepilot_core::forge::web_url(&target.repo)),
+            };
             ctx.ok(format!("Wiki-Commit {} veröffentlicht", content::short(&commit)));
             job.steps[i].links.push(Link { label: "Wiki".into(), url: url.clone() });
             job.steps[i].set(StepState::Done, format!("Wiki-Commit {} veröffentlicht", content::short(&commit)), now());
@@ -887,9 +920,10 @@ fn record_pull_request(ctx: &Ctx, job: &mut Job, i: usize, target: &content::Con
     let step = &mut job.steps[i];
     step.pr = Some(pr.number);
     step.commit = Some(pr.commit.clone());
-    step.links.push(Link { label: format!("PR #{}", pr.number), url: pr.url.clone() });
+    let r = repocare::request_ref(&target.repo, pr.number);
+    step.links.push(Link { label: r.clone(), url: pr.url.clone() });
     save(ctx, job)?;
-    let delivery = Delivery { job: job.id.clone(), at: now(), sources: proposal.sources.clone(), what: format!("PR #{}", pr.number), url: pr.url, pr: Some(pr.number) };
+    let delivery = Delivery { job: job.id.clone(), at: now(), sources: proposal.sources.clone(), what: r, url: pr.url, pr: Some(pr.number) };
     update_target_state(ctx, &target.id, |s| s.delivered = Some(delivery));
     Ok(())
 }

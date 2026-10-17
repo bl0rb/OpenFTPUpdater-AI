@@ -114,8 +114,8 @@ pub fn validate(target: &ContentTarget, managed: &[String]) -> Result<(), String
     if target.name.trim().is_empty() {
         return Err("Name fehlt".into());
     }
-    if !crate::github::is_repo_name(target.repo.trim()) {
-        return Err(format!("„{}“ ist kein Repository im Format owner/name", target.repo));
+    if !crate::forge::is_repo_id(target.repo.trim()) {
+        return Err(format!("„{}“ ist kein Repository im Format owner/name (GitHub) oder host/gruppe/name (GitLab)", target.repo));
     }
     if target.sources.is_empty() {
         return Err("Mindestens ein Quell-Repository wählen".into());
@@ -140,7 +140,7 @@ fn pattern_problem(pattern: &str, kind: TargetKind) -> Option<String> {
         return Some(format!("„{pattern}“: nur Pfade innerhalb des Repositorys, ohne .. und ohne führendes /"));
     }
     if forbidden(pattern.trim_end_matches('/')) || pattern.starts_with(".git") {
-        return Some(format!("„{pattern}“: .git, .github und Git-Steuerdateien sind nie erlaubt"));
+        return Some(format!("„{pattern}“: .git, .github, .gitlab, .gitlab-ci.yml und Git-Steuerdateien sind nie erlaubt"));
     }
     if kind == TargetKind::Docs && matches!(pattern, "*" | "**" | "**/*" | "*/" | "**/") {
         return Some(format!("„{pattern}“ erlaubt das ganze Repository; für Dokumentation einzelne Dateien oder Ordner nennen"));
@@ -148,10 +148,11 @@ fn pattern_problem(pattern: &str, kind: TargetKind) -> Option<String> {
     None
 }
 
-/// Paths no target may touch: Git's own files and GitHub's workflows (a pushed branch runs them).
+/// Paths no target may touch: Git's own files and the pipelines of GitHub and GitLab (a pushed
+/// branch runs them).
 fn forbidden(path: &str) -> bool {
     let first = path.split('/').next().unwrap_or_default();
-    matches!(first, ".git" | ".github" | ".gitmodules" | ".gitattributes")
+    matches!(first, ".git" | ".github" | ".gitlab" | ".gitlab-ci.yml" | ".gitmodules" | ".gitattributes")
 }
 
 /// Whether `path` (relative, with `/`) is covered by one of the patterns: `README.md` (that file),
@@ -305,6 +306,11 @@ pub fn pin_source(key: &str, repo: &str, basis: Basis) -> Result<SourceRev> {
                 .with_context(|| format!("{repo} hat kein veröffentlichtes Release; als Basis den aktuellen Stand wählen"))?;
             (resolve_tag(repo, &tag)?, tag)
         }
+        Basis::Commit if crate::gitlab::project(repo).is_some() => {
+            let (branch, sha) = crate::gitlab::default_head(&crate::gitlab::project(repo).expect("checked"))?;
+            let label = format!("{branch} {}", short(&sha));
+            (sha, label)
+        }
         Basis::Commit => {
             let info = get(&format!("repos/{repo}"))?.with_context(|| format!("{repo} nicht gefunden"))?;
             let branch = info["default_branch"].as_str().context("Antwort ohne default_branch")?;
@@ -319,6 +325,9 @@ pub fn pin_source(key: &str, repo: &str, basis: Basis) -> Result<SourceRev> {
 
 /// The commit a tag points to (through an annotated tag object, if it is one).
 pub fn resolve_tag(repo: &str, tag: &str) -> Result<String> {
+    if let Some(p) = crate::gitlab::project(repo) {
+        return crate::gitlab::resolve_tag(&p, tag);
+    }
     let reference = get(&format!("repos/{repo}/git/ref/tags/{}", encode_ref(tag)))?.with_context(|| format!("Tag {tag} nicht gefunden"))?;
     let object = &reference["object"];
     let sha = object["sha"].as_str().context("Tag ohne Ziel")?;
@@ -332,6 +341,9 @@ pub fn resolve_tag(repo: &str, tag: &str) -> Result<String> {
 /// Subjects of the commits from `from` to `to` (oldest first, at most 60), for the prompt; empty
 /// when GitHub cannot compare them.
 pub fn commits_between(repo: &str, from: &str, to: &str) -> Vec<String> {
+    if let Some(p) = crate::gitlab::project(repo) {
+        return crate::gitlab::commits_between(&p, from, to);
+    }
     let Ok(Some(compare)) = get(&format!("repos/{repo}/compare/{}...{}", encode_ref(from), encode_ref(to))) else { return Vec::new() };
     let commits = compare["commits"].as_array().cloned().unwrap_or_default();
     let skip = commits.len().saturating_sub(60);
@@ -344,12 +356,13 @@ pub fn commits_between(repo: &str, from: &str, to: &str) -> Vec<String> {
 
 // MARK: Work folder
 
+/// The URL the work folder clones from: GitHub or the GitLab instance, with the user's git credentials.
 pub fn github_remote(repo: &str) -> String {
-    format!("https://github.com/{repo}.git")
+    crate::forge::clone_url(repo)
 }
 
 pub fn wiki_remote(repo: &str) -> String {
-    format!("https://github.com/{repo}.wiki.git")
+    crate::forge::wiki_url(repo)
 }
 
 /// Git in a work folder, without hooks and without a file system monitor, so nothing Claude may
@@ -755,6 +768,10 @@ pub struct PullRequestRef {
 /// Before publishing: has the target branch moved, and if so, did anyone touch the proposed files?
 /// A move elsewhere is fine for a pull request; a change to the same files stops it.
 pub fn docs_conflict(repo: &str, proposal: &Proposal) -> Result<Option<String>> {
+    if let Some(p) = crate::gitlab::project(repo) {
+        let paths: Vec<&str> = proposal.files.iter().map(|f| f.path.as_str()).collect();
+        return crate::gitlab::docs_conflict(&p, &proposal.base_branch, &proposal.base_commit, &paths);
+    }
     let branch = get(&format!("repos/{repo}/branches/{}", encode_ref(&proposal.base_branch)))?
         .with_context(|| format!("Branch {} nicht mehr gefunden", proposal.base_branch))?;
     let head = branch["commit"]["sha"].as_str().context("Branch ohne Commit")?;
@@ -784,6 +801,14 @@ pub fn publish_docs(repo: &str, dir: &Path, proposal: &Proposal, title: &str, bo
         return Err(Conflict(format!("{why}; neu vorbereiten")).into());
     }
     let files = approved_files(dir, proposal)?;
+    if let Some(p) = crate::gitlab::project(repo) {
+        let docs: Vec<crate::gitlab::DocsFile> = files
+            .iter()
+            .map(|(f, data)| crate::gitlab::DocsFile { path: &f.path, added: f.added, executable: f.mode == "100755", data })
+            .collect();
+        let delivered = crate::gitlab::publish_docs(&p, &proposal.branch, &proposal.base_branch, &proposal.base_commit, &docs, title, body)?;
+        return Ok(PullRequestRef { number: delivered.iid, url: delivered.url, commit: delivered.commit });
+    }
     if let Some(found) = find_docs_delivery(repo, proposal)? {
         return Ok(found);
     }
@@ -835,6 +860,13 @@ fn open_pull_request(repo: &str, proposal: &Proposal, sha: &str, title: &str, bo
 /// The pull request an earlier attempt opened from the proposal's branch, if any; a branch without
 /// pull request gets one, as long as it carries exactly the approved files.
 pub fn find_docs_delivery(repo: &str, proposal: &Proposal) -> Result<Option<PullRequestRef>> {
+    if let Some(p) = crate::gitlab::project(repo) {
+        // The paths are enough to recognise an earlier attempt; the content was checked when it was written.
+        let docs: Vec<crate::gitlab::DocsFile> =
+            proposal.files.iter().map(|f| crate::gitlab::DocsFile { path: &f.path, added: f.added, executable: f.mode == "100755", data: &[] }).collect();
+        return Ok(crate::gitlab::find_delivery(&p, &proposal.branch, &proposal.base_commit, &docs)?
+            .map(|d| PullRequestRef { number: d.iid, url: d.url, commit: d.commit }));
+    }
     let Some(head) = branch_head(repo, &proposal.branch)? else { return Ok(None) };
     let owner = repo.split('/').next().unwrap_or_default();
     let open = get(&format!("repos/{repo}/pulls?state=all&head={owner}:{}&per_page=10", encode_ref(&proposal.branch)))?.unwrap_or_default();
@@ -878,6 +910,9 @@ pub enum PrState {
 }
 
 pub fn pull_request_state(repo: &str, number: u64) -> Result<PrState> {
+    if let Some(p) = crate::gitlab::project(repo) {
+        return crate::gitlab::merge_request_state(&p, number);
+    }
     let pr = get(&format!("repos/{repo}/pulls/{number}"))?.with_context(|| format!("PR #{number} nicht gefunden"))?;
     Ok(if pr["merged"].as_bool() == Some(true) {
         PrState::Merged
@@ -893,6 +928,9 @@ pub fn pull_request_state(repo: &str, number: u64) -> Result<PrState> {
 /// not merged, and why; the pull request stays open for the regular care.
 pub fn merge_when_green(repo: &str, pr: &PullRequestRef, runner: &Runner, wait: &crate::repocare::CiWait, progress: &dyn Fn(&str)) -> Result<Result<String, String>> {
     use crate::repos::CiState;
+    if let Some(p) = crate::gitlab::project(repo) {
+        return crate::gitlab::merge_when_green(&p, pr.number, &pr.commit, runner, wait, progress);
+    }
     let ci = crate::repocare::wait_for_checks(repo, &pr.commit, runner, wait, progress)?;
     if ci.state != CiState::Passed {
         return Ok(Err(match ci.state {
@@ -974,11 +1012,14 @@ pub fn publish_wiki(
     }
 }
 
-/// Who the wiki commit is by: `None` when Git has a user of its own, else the signed-in GitHub
-/// user with GitHub's no-reply address.
-pub fn commit_identity() -> Result<Option<(String, String)>> {
+/// Who the wiki commit of `repo` is by: `None` when Git has a user of its own, else the signed-in
+/// user of the service with its no-reply address.
+pub fn commit_identity(repo: &str) -> Result<Option<(String, String)>> {
     if shell::output("git", &["config", "--get", "user.email"], &std::env::temp_dir()).is_ok_and(|e| !e.trim().is_empty()) {
         return Ok(None);
+    }
+    if let Some(p) = crate::gitlab::project(repo) {
+        return crate::gitlab::commit_identity(&p.host).map(Some);
     }
     let user = get("user")?.context("GitHub-Benutzer nicht lesbar")?;
     let login = user["login"].as_str().context("Antwort ohne login")?;
@@ -1045,6 +1086,7 @@ mod tests {
             assert!(!allowed(&patterns, no), "{no}");
         }
         assert!(!allowed(&["**".into()], ".github/workflows/ci.yml"), "never workflows, whatever the pattern");
+        assert!(!allowed(&["**".into()], ".gitlab-ci.yml") && !allowed(&["**".into()], ".gitlab/ci/build.yml"), "nor GitLab pipelines");
         assert!(!allowed(&["*".into()], ".gitattributes"));
     }
 

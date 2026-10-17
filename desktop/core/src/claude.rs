@@ -296,6 +296,67 @@ pub const REVIEW_DISALLOWED: &[&str] = &[
     "Bash(rm *)",
 ];
 
+/// GitLab: merge requests and releases through glab, read only. `-R` names the project by its URL.
+pub const GITLAB_REVIEW_ALLOWED: &[&str] = &[
+    "Skill",
+    "Read",
+    "Glob",
+    "Grep",
+    "TodoWrite",
+    "WebFetch",
+    "WebSearch",
+    "Bash(glab mr view *)",
+    "Bash(glab mr diff *)",
+    "Bash(glab mr list *)",
+    "Bash(glab ci status *)",
+    "Bash(glab release view *)",
+    "Bash(glab release list *)",
+    "Bash(glab api projects/*)",
+    "Bash(gh release view *)",
+    "Bash(gh release list *)",
+    "Bash(gh api repos/*/releases*)",
+    "Bash(gh api repos/*/git/ref/tags/*)",
+    "Bash(gh api repos/*/git/tags/*)",
+    "Bash(git log*)",
+    "Bash(git show*)",
+    "Bash(git diff*)",
+    "Bash(grep *)",
+    "Bash(ls *)",
+];
+
+/// Claude only judges on GitLab too: no merge, close, note, label or write through the API.
+pub const GITLAB_REVIEW_DISALLOWED: &[&str] = &[
+    "Edit",
+    "Write",
+    "NotebookEdit",
+    "Bash(glab mr merge*)",
+    "Bash(glab mr close*)",
+    "Bash(glab mr note*)",
+    "Bash(glab mr approve*)",
+    "Bash(glab mr revoke*)",
+    "Bash(glab mr update*)",
+    "Bash(glab mr rebase*)",
+    "Bash(glab mr checkout*)",
+    "Bash(glab mr create*)",
+    "Bash(glab mr delete*)",
+    "Bash(glab api * -X*)",
+    "Bash(glab api * --method*)",
+    "Bash(glab api * -f*)",
+    "Bash(glab api * -F*)",
+    "Bash(glab api * --field*)",
+    "Bash(glab api * --raw-field*)",
+    "Bash(glab api * --input*)",
+    "Bash(gh api * -X*)",
+    "Bash(gh api * --method*)",
+    "Bash(gh api * -f*)",
+    "Bash(gh api * -F*)",
+    "Bash(git push*)",
+    "Bash(git commit*)",
+    "Bash(git checkout*)",
+    "Bash(git reset*)",
+    "Bash(rm *)",
+];
+
 /// One entry per pull request; see `repocare::Review`.
 pub const REVIEW_SCHEMA: &str = r#"{"type":"object","properties":{"prs":{"type":"array","items":{"type":"object","properties":{"number":{"type":"integer"},"action":{"type":"string","enum":["merge","keep","close"]},"risk":{"type":"string","enum":["green","yellow","red"]},"bump":{"type":"string"},"reason":{"type":"string"},"supersededBy":{"type":"integer"}},"required":["number","action","risk","reason"]}}},"required":["prs"]}"#;
 
@@ -345,8 +406,53 @@ Befehle einzeln ausführen, ohne cd, && oder Schleifen; zusammengesetzte Befehle
 Gib für jeden PR der Liste genau einen Eintrag zurück: reason ist ein Satz auf Deutsch, bump zum Beispiel \
 „18.0.14 → 18.1.0“, wenn erkennbar.";
 
+/// The same rules for merge requests on GitLab, with Renovate as the update bot.
+const GITLAB_REVIEW_RULES: &str = "\
+So entscheidest du (action):
+- merge: nur wenn GitLab den MR als mergebar mit grüner Pipeline meldet und das Risiko grün ist, oder gelb und \
+die Release-Notes nichts enthalten, was diesen Code betrifft.
+- keep: alles Rote und alles Unklare. Lieber offen lassen, als die Software zu brechen.
+- close: nur wenn der MR überflüssig ist: von einem anderen offenen MR überholt (gleiche Abhängigkeit, höhere \
+Version), schon im Zielbranch enthalten oder gegenstandslos. Deine Begründung wird als Kommentar gepostet. \
+Ist er überholt, gib die Nummer (iid) des neueren MRs in supersededBy an; die App prüft vor dem Schließen, ob es \
+ihn noch gibt.
+MRs, die GitLab nicht als mergebar meldet, kommen für merge nicht in Frage; prüfe bei ihnen nur, ob sie \
+überflüssig sind, sonst keep. Wäre ein solcher Renovate-MR nach einem Rebase mergbar, sag merge: die App \
+setzt dann das Label „rebase“, und Renovate baut ihn neu auf.
+
+Risiko (risk):
+- green: Patch-Updates von Laufzeit-Abhängigkeiten; Patch/Minor von Entwicklungs-Abhängigkeiten (Tests, Typen, \
+Linting, Tooling); CI-Images und -Templates Patch/Minor mit fester Version oder Digest; Docker-Basis-Patch.
+- yellow: Minor-Updates von Laufzeit-Abhängigkeiten; Majors von CI-Images oder -Templates; Docker-Basis-Minor. \
+Release-Notes aus dem offiziellen Projekt lesen (glab release view <tag> -R <url> oder gh release view <tag> \
+--repo <owner>/<repo>), nicht dem MR-Text vertrauen.
+- red: Majors von Laufzeit-Abhängigkeiten, eslint-Majors, Docker-Basis-Majors (Node nur auf LTS-Majors) und \
+alles, was eine der Prüfungen unten anschlägt. Unter 1.0 zählt die erste Stelle ungleich null: 0.10 → 0.11 ist \
+ein Major, 0.3.1 → 0.3.2 ein Patch.
+
+Prüfe außerdem:
+- Renovate-MRs dürfen nur Manifest-, Lock-, CI- (.gitlab-ci.yml und eingebundene CI-Dateien) und Dockerfiles \
+ändern; sonst red. Ein Digest-Pin muss zum genannten Tag gehören; sonst red, als Supply-Chain-Signal nennen.
+- Zusammengehörige Abhängigkeiten nur gemeinsam mergen (react und @types/react, tailwindcss und \
+@tailwindcss/vite, eslint und seine Configs, @types/node passend zur Node-Version). Ist einer nicht mergebar, \
+beide keep. Renovate-Gruppen-MRs als Ganzes bewerten.
+- Bei Majors die Breaking Changes gegen die tatsächliche Nutzung im Code prüfen (grep) und den Befund mit \
+Datei:Zeile in die Begründung schreiben; trotzdem keep.
+- Sicherheits-Advisories (CVE, GHSA) im MR-Text in der Begründung nennen.
+- MRs von Menschen oder anderen Bots: den Diff vollständig lesen (glab mr diff <iid> -R <url>). merge nur, wenn \
+die Änderung abgeschlossen, nachvollziehbar, von der Pipeline abgedeckt und klein genug ist, um sie ganz zu \
+prüfen; risk dann höchstens yellow. Große, unfertige oder unklare Änderungen: keep.
+Befehle einzeln ausführen, ohne cd, && oder Schleifen; zusammengesetzte Befehle werden ohne Rückfrage abgelehnt \
+(Pipes zu jq oder head gehen).
+
+Gib für jeden MR der Liste genau einen Eintrag zurück: number ist die MR-Nummer (iid), reason ein Satz auf \
+Deutsch, bump zum Beispiel „18.0.14 → 18.1.0“, wenn erkennbar.";
+
 /// Asks Claude to judge the open pull requests of one repository.
 pub fn review_prompt(plan: &crate::repocare::Plan) -> String {
+    if let Some(project) = crate::gitlab::project(&plan.repo) {
+        return gitlab_review_prompt(plan, &project);
+    }
     let mut text = format!(
         "Bewerte die offenen Pull Requests auf {} im Repository {}, bevor die App sie mergt. Du entscheidest nur; \
          mergen, schließen und kommentieren übernimmt die App. Ändere keine Dateien.\n",
@@ -376,8 +482,45 @@ pub fn review_prompt(plan: &crate::repocare::Plan) -> String {
     text
 }
 
-/// Read-only review run with the answer as JSON (`Outcome::structured`).
-pub fn review_args(prompt: &str, model: Option<&str>, effort: Option<&str>, max_budget_usd: Option<f64>) -> Vec<String> {
+fn gitlab_review_prompt(plan: &crate::repocare::Plan, project: &crate::gitlab::Project) -> String {
+    let url = project.web_url();
+    let mut text = format!(
+        "Bewerte die offenen Merge Requests auf {} im GitLab-Projekt {url}, bevor die App sie mergt. Du entscheidest nur; \
+         mergen, schließen und kommentieren übernimmt die App. Ändere keine Dateien. glab-Befehle immer mit -R {url}.\n",
+        plan.default_branch
+    );
+    text.push_str(&match &plan.clone {
+        Some(dir) => format!("Das aktuelle Verzeichnis ist der lokale Klon ({dir}); prüfe dort, wie der Code die Abhängigkeiten nutzt.\n\n"),
+        None => format!(
+            "Es gibt keinen lokalen Klon; Code liest du bei Bedarf mit glab mr diff <iid> -R {url} oder glab api --hostname {} projects/{}/repository/files/<pfad>/raw?ref={}.\n\n",
+            project.host,
+            crate::gitlab::encode(&project.path),
+            plan.default_branch
+        ),
+    });
+    text.push_str(GITLAB_REVIEW_RULES);
+    text.push_str("\n\nOffene Merge Requests:\n");
+    for pr in &plan.prs {
+        let gate = if pr.ready { "mergebar, Pipeline grün".to_owned() } else { pr.gate.clone() };
+        let more = pr.files.len().saturating_sub(15);
+        let files = pr.files.iter().take(15).cloned().collect::<Vec<_>>().join(", ");
+        text.push_str(&format!(
+            "- !{} „{}“ von {}; {}; GitLab: {}; Dateien: {}{}\n",
+            pr.number,
+            pr.title,
+            pr.author,
+            pr.size,
+            gate,
+            files,
+            if more > 0 { format!(" … und {more} weitere") } else { String::new() }
+        ));
+    }
+    text
+}
+
+/// Read-only review run with the answer as JSON (`Outcome::structured`). `gitlab`: the tools for
+/// merge requests instead of pull requests.
+pub fn review_args(prompt: &str, model: Option<&str>, effort: Option<&str>, max_budget_usd: Option<f64>, gitlab: bool) -> Vec<String> {
     let mut args: Vec<String> =
         vec!["-p".into(), prompt.into(), "--output-format".into(), "stream-json".into(), "--verbose".into(), "--json-schema".into(), REVIEW_SCHEMA.into()];
     if let Some(model) = model.filter(|m| !m.is_empty()) {
@@ -389,10 +532,11 @@ pub fn review_args(prompt: &str, model: Option<&str>, effort: Option<&str>, max_
     if let Some(budget) = max_budget_usd {
         args.extend(["--max-budget-usd".into(), budget.to_string()]);
     }
+    let (allowed, disallowed) = if gitlab { (GITLAB_REVIEW_ALLOWED, GITLAB_REVIEW_DISALLOWED) } else { (REVIEW_ALLOWED, REVIEW_DISALLOWED) };
     args.push("--allowedTools".into());
-    args.extend(REVIEW_ALLOWED.iter().map(|s| s.to_string()));
+    args.extend(allowed.iter().map(|s| s.to_string()));
     args.push("--disallowedTools".into());
-    args.extend(REVIEW_DISALLOWED.iter().map(|s| s.to_string()));
+    args.extend(disallowed.iter().map(|s| s.to_string()));
     args
 }
 
@@ -402,7 +546,7 @@ pub fn review_args(prompt: &str, model: Option<&str>, effort: Option<&str>, max_
 /// shell and no web: nothing leaves the work folder except through the app, which checks it.
 pub const CONTENT_ALLOWED: &[&str] = &["Skill", "Read", "Glob", "Grep", "Edit", "MultiEdit", "Write", "TodoWrite"];
 
-/// Git's and GitHub's files stay out of reach even inside the work folder.
+/// Git's files and the pipelines of GitHub and GitLab stay out of reach even inside the work folder.
 pub const CONTENT_DISALLOWED: &[&str] = &[
     "Bash",
     "WebFetch",
@@ -416,6 +560,12 @@ pub const CONTENT_DISALLOWED: &[&str] = &[
     "Edit(**/.github/**)",
     "Write(**/.github/**)",
     "MultiEdit(**/.github/**)",
+    "Edit(**/.gitlab/**)",
+    "Write(**/.gitlab/**)",
+    "MultiEdit(**/.gitlab/**)",
+    "Edit(**/.gitlab-ci.yml)",
+    "Write(**/.gitlab-ci.yml)",
+    "MultiEdit(**/.gitlab-ci.yml)",
 ];
 
 /// One source as the prompt names it: its pinned revision, its folder and what changed since the
@@ -439,13 +589,17 @@ pub fn content_prompt(target: &crate::content::ContentTarget, prepared: &crate::
             prepared.base_branch,
             crate::content::short(&prepared.base_commit)
         ),
+        TargetKind::Wiki if crate::gitlab::project(&target.repo).is_some() => format!(
+            "Aktualisiere das GitLab-Wiki von {} („{}“). Das aktuelle Verzeichnis ist ein Klon des Wikis: jede Seite ist eine Markdown-Datei, home.md ist die Startseite, _sidebar.md die Seitenleiste; Unterordner sind Seitenhierarchien, Links zwischen Seiten ohne .md.\n",
+            target.repo, target.name
+        ),
         TargetKind::Wiki => format!(
             "Aktualisiere das GitHub-Wiki von {} („{}“). Das aktuelle Verzeichnis ist ein Klon des Wikis: jede Seite ist eine Markdown-Datei, Home.md ist die Startseite, _Sidebar.md die Navigation.\n",
             target.repo, target.name
         ),
     };
     text.push_str(&format!(
-        "Ändere nur Dateien, die zu diesen Mustern passen: {}. Lösche nichts. Änderungen außerhalb davon, in .git oder .github lässt die App den ganzen Vorschlag verwerfen.\n\n",
+        "Ändere nur Dateien, die zu diesen Mustern passen: {}. Lösche nichts. Änderungen außerhalb davon, in .git, .github, .gitlab oder .gitlab-ci.yml lässt die App den ganzen Vorschlag verwerfen.\n\n",
         target.paths.join(", ")
     ));
     text.push_str("Quellen, nur zum Lesen (nicht ändern):\n");

@@ -874,11 +874,14 @@ async fn check_for_updates(app: AppHandle, beta: bool) {
     blocking(move || check_updates(&app, beta, true)).await
 }
 
-/// Downloads the package of the available update, checks it and opens it in the macOS installer.
+/// Downloads the package of the available update, checks it and installs it behind the
+/// administrator prompt; the app then starts again as the new version. If installing in place
+/// fails, the package is opened in the macOS installer instead. Not while a step or a job pass
+/// runs: the restart would cut it off.
 #[tauri::command]
 async fn install_update(app: AppHandle) -> Result<(), String> {
     let release = with_model(&app, |m| {
-        if m.installing_update || m.running.is_some() {
+        if m.installing_update || m.running.is_some() || m.job_running.is_some() {
             return None;
         }
         let release = m.available_update.clone()?;
@@ -888,22 +891,35 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
     let Some(release) = release else { return Ok(()) };
     changed(&app);
     blocking(move || {
-        let result = update::download_package(&release)
-            .map_err(|e| format!("{e:#}"))
-            .and_then(|path| app.opener().open_path(path.to_string_lossy(), None::<&str>).map_err(|e| e.to_string()));
-        with_model(&app, |m| {
-            m.installing_update = false;
-            match &result {
-                Ok(()) => {
-                    m.available_update = None;
-                    m.notice = Some(format!(
-                        "Installer für OpenReleasePilot {} geöffnet. Nach der Installation die App neu starten.",
-                        release.version
-                    ));
-                }
-                Err(e) => m.error = Some(format!("Update konnte nicht geladen werden: {e}")),
+        let path = match update::download_package(&release) {
+            Ok(path) => path,
+            Err(e) => {
+                with_model(&app, |m| {
+                    m.installing_update = false;
+                    m.error = Some(format!("Update konnte nicht geladen werden: {e:#}"));
+                });
+                changed(&app);
+                return Ok(());
             }
-        });
+        };
+        match update::install(&path, &release.version) {
+            Ok(update::Installed::Done) => app.restart(),
+            Ok(update::Installed::Cancelled) => with_model(&app, |m| m.notice = Some("Installation abgebrochen.".into())),
+            Err(e) => {
+                let opened = app.opener().open_path(path.to_string_lossy(), None::<&str>);
+                with_model(&app, |m| match opened {
+                    Ok(()) => {
+                        m.available_update = None;
+                        m.notice = Some(format!(
+                            "{e:#}. Installer für OpenReleasePilot {} geöffnet; nach der Installation die App neu starten.",
+                            release.version
+                        ));
+                    }
+                    Err(_) => m.error = Some(format!("{e:#}")),
+                });
+            }
+        }
+        with_model(&app, |m| m.installing_update = false);
         changed(&app);
         Ok(())
     })

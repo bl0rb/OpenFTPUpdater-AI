@@ -385,8 +385,9 @@ GitHub once; **Nach Updates suchen** in the footer checks manually. If a newer v
 appears at the top. **Installieren** downloads the `.pkg` from `github.com`, checks it against the SHA-256
 digest GitHub publishes for the release asset and against the release's minisign signature
 (`<package>.minisig`, verified with the public key built into the app,
-[desktop/update-key.pub](desktop/update-key.pub)), and opens the macOS installer; without a digest or a
-valid signature the update is refused; restart the app afterwards. Betas (`X.Y.Z-beta.N`) are only offered through **Beta-Version
+[desktop/update-key.pub](desktop/update-key.pub)), installs it behind the macOS administrator prompt and
+starts the app again as the new version; without a digest or a valid signature the update is refused. If
+installing in place fails, the macOS installer opens instead. Not while a step or a job runs. Betas (`X.Y.Z-beta.N`) are only offered through **Beta-Version
 suchen** or when a beta is installed. Development builds do not check.
 
 ## Requirements

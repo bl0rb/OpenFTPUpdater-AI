@@ -228,16 +228,16 @@ function banner(kind, text, actions = []) {
 
 function updateBanner(u) {
   const installing = view.installingUpdate;
+  const busy = view.running ? 'Erst nach dem laufenden Schritt' : view.jobRunning ? 'Erst nach dem laufenden Auftrag' : null;
   return h('div', { class: 'banner update' },
     h('div', { class: 'text' },
       h('strong', null, `${u.prerelease ? 'Beta: ' : ''}OpenReleasePilot ${u.version} ist verfügbar (installiert: ${view.version})`),
-      h('div', { class: 'muted small' }, installing ? 'Paket wird geladen und geprüft …'
-        : u.prerelease ? 'Beta-Versionen sind zum Testen gedacht. Die Installation benötigt Administratorrechte.'
-          : 'Die Installation benötigt Administratorrechte. Danach die App neu starten.')),
+      h('div', { class: 'muted small' }, installing ? 'Paket wird geladen, geprüft und installiert …'
+        : `${u.prerelease ? 'Beta-Versionen sind zum Testen gedacht. ' : ''}Die Installation benötigt Administratorrechte, danach startet die App neu.`)),
     button('Versionshinweise', () => call('open_url', { url: u.pageUrl })),
     button('Später', () => call('dismiss_update'), { disabled: installing }),
-    button(installing ? 'Wird geladen …' : 'Installieren', () => call('install_update'),
-      { cls: 'primary', disabled: installing || !!view.running, title: view.running ? 'Erst nach dem laufenden Schritt' : null }));
+    button(installing ? 'Wird installiert …' : 'Installieren', () => call('install_update'),
+      { cls: 'primary', disabled: installing || !!busy, title: busy }));
 }
 
 function renderFooter() {

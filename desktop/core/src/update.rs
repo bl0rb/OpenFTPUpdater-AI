@@ -153,6 +153,43 @@ pub fn download_package(release: &ReleaseInfo) -> Result<PathBuf> {
     Ok(target)
 }
 
+/// How an installation in place ended.
+#[derive(Debug, PartialEq)]
+pub enum Installed {
+    /// The new version is in /Applications; the caller restarts the app.
+    Done,
+    /// The administrator prompt was cancelled.
+    Cancelled,
+}
+
+/// Installs a downloaded package in place, as in ClaudeKeyZapper: `installer` behind the system
+/// administrator prompt; returns when the installation is done.
+#[cfg(target_os = "macos")]
+pub fn install(package: &std::path::Path, version: &str) -> Result<Installed> {
+    let script = [
+        "on run argv",
+        "do shell script \"/usr/sbin/installer -pkg \" & quoted form of item 1 of argv & \" -target /\" with prompt (item 2 of argv) with administrator privileges",
+        "end run",
+    ];
+    let output = std::process::Command::new("/usr/bin/osascript")
+        .args(script.into_iter().flat_map(|line| ["-e", line]))
+        .arg(package)
+        .arg(format!("OpenReleasePilot möchte das Update auf Version {version} installieren."))
+        .output()
+        .context("Installer starten")?;
+    let error = String::from_utf8_lossy(&output.stderr);
+    match output.status.success() {
+        true => Ok(Installed::Done),
+        false if error.contains("(-128)") => Ok(Installed::Cancelled),
+        false => bail!("Installation fehlgeschlagen: {}", error.trim()),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn install(_package: &std::path::Path, _version: &str) -> Result<Installed> {
+    bail!("Installation in place gibt es nur unter macOS")
+}
+
 fn download(url: &str, limit: u64) -> Result<Vec<u8>> {
     let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(300)).build();
     let response = agent.get(url).set("User-Agent", "OpenReleasePilot").call()?;

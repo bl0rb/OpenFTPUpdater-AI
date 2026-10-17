@@ -403,8 +403,10 @@ auf GitHub ab; manuell geht es über **Nach Updates suchen** in der Fußzeile. I
 erscheint oben ein Banner. **Installieren** lädt die `.pkg` von `github.com`, prüft sie gegen die
 SHA-256-Prüfsumme, die GitHub für das Release-Asset veröffentlicht, und gegen die minisign-Signatur des
 Releases (`<Paket>.minisig`, geprüft mit dem in die App eingebauten öffentlichen Schlüssel,
-[desktop/update-key.pub](desktop/update-key.pub)) und öffnet den macOS-Installer; ohne Prüfsumme oder
-gültige Signatur wird abgelehnt; danach die App neu starten. Beta-Versionen (`X.Y.Z-beta.N`) gibt es nur über
+[desktop/update-key.pub](desktop/update-key.pub)), installiert sie hinter der Administrator-Abfrage von
+macOS und startet die App als neue Version neu; ohne Prüfsumme oder gültige Signatur wird abgelehnt.
+Scheitert die Installation, öffnet sich stattdessen der macOS-Installer. Nicht während ein Schritt oder
+Auftrag läuft. Beta-Versionen (`X.Y.Z-beta.N`) gibt es nur über
 **Beta-Version suchen** oder wenn schon eine Beta installiert ist. Entwicklungs-Builds prüfen nicht.
 
 ## Voraussetzungen

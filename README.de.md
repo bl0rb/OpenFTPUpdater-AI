@@ -340,7 +340,7 @@ Einstellungen, nicht im Website-Repository; welche Repositories die App verwalte
   „nichts Neues“ zu gelten.
 - Seit 0.3.0: Ein Tag braucht eine CI, die für genau den getaggten Commit erfolgreich war; Repositories
   ohne CI bekommen keinen automatischen Tag.
-- Nach 0.3.6: GitLab-Projekte (gitlab.com und eigene Instanzen, Anmeldung über `glab`); die
+- Seit 0.4.0: GitLab-Projekte (gitlab.com und eigene Instanzen, Anmeldung über `glab`); die
   Startansicht zeigt je Dienst eine Karte. Siehe [GitLab](#gitlab).
 - Seit 0.3.5: „Einrichtung“ heißt **Einstellungen**, „Läufe“ heißt **Aufträge**, die Website-Schritte
   heißen Prüfen, Inhalte aktualisieren, Veröffentlichen und Live-Seite prüfen. „Verbindung testen“
@@ -382,7 +382,7 @@ Es ist nicht signiert, macOS blockiert es deshalb beim ersten Öffnen; einmal un
 Datenschutz & Sicherheit → Dennoch öffnen** erlauben oder im Terminal installieren:
 
 ```bash
-sudo installer -pkg OpenReleasePilot-0.3.6.pkg -target /
+sudo installer -pkg OpenReleasePilot-0.4.0.pkg -target /
 ```
 
 Dasselbe Paket lässt sich über Microsoft Intune als „macOS-App (PKG)“ verteilen; dann in den

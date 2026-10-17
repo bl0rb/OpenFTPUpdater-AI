@@ -323,7 +323,7 @@ repository; it does not change which repositories the app manages.
   instead of counting as "nothing new".
 - From 0.3.0: a tag needs CI that positively passed for exactly the tagged commit; repositories without CI
   get no automatic tag.
-- After 0.3.6: GitLab projects (gitlab.com and self-hosted instances, sign-in through `glab`); the start
+- From 0.4.0: GitLab projects (gitlab.com and self-hosted instances, sign-in through `glab`); the start
   view shows one card per service. See [GitLab](#gitlab).
 - From 0.3.5: "Einrichtung" is now **Einstellungen**, "Läufe" is **Aufträge**, and the website steps are
   Prüfen, Inhalte aktualisieren, Veröffentlichen and Live-Seite prüfen. "Verbindung testen" (test
@@ -364,7 +364,7 @@ not signed, so macOS blocks it on the first open; allow it once under **System S
 Security → Open Anyway**, or install it in the terminal:
 
 ```bash
-sudo installer -pkg OpenReleasePilot-0.3.6.pkg -target /
+sudo installer -pkg OpenReleasePilot-0.4.0.pkg -target /
 ```
 
 The same package can be distributed through Microsoft Intune as a "macOS app (PKG)"; then turn off
